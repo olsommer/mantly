@@ -1,0 +1,56 @@
+[
+  {
+    "orderNumber": "ZF-10482",
+    "trackingNumber": "DHL00340434161234567890",
+    "carrier": "DHL",
+    "customer": {
+      "name": "Lena Schmidt",
+      "email": "lena.schmidt@example-shop.de"
+    },
+    "shop": "Example Shop DE",
+    "status": "in_transit",
+    "statusLabel": "Unterwegs",
+    "lastEvent": {
+      "label": "Sendung im Ziel-Paketzentrum bearbeitet",
+      "location": "DHL Paketzentrum Ruedersdorf",
+      "timestamp": "heute 08:42"
+    },
+    "estimatedDeliveryWindow": "naechster Werktag"
+  },
+  {
+    "orderNumber": "ZF-20991",
+    "trackingNumber": "UPS1Z999AA10123456784",
+    "carrier": "UPS",
+    "customer": {
+      "name": "Michael Ross",
+      "email": "michael.ross@example.com"
+    },
+    "shop": "Example Shop EU",
+    "status": "in_transit",
+    "statusLabel": "In transit",
+    "lastEvent": {
+      "label": "Departed from facility",
+      "location": "UPS Koeln Hub",
+      "timestamp": "today 07:15"
+    },
+    "estimatedDeliveryWindow": "next business day"
+  },
+  {
+    "orderNumber": "ZF-88310",
+    "trackingNumber": "DHL00340434161234567890",
+    "carrier": "DHL",
+    "customer": {
+      "name": "Brand Demo Customer",
+      "email": "support@brand-demo.de"
+    },
+    "shop": "Brand Demo",
+    "status": "exception",
+    "statusLabel": "Tracking haengt",
+    "lastEvent": {
+      "label": "Keine neue Carrier-Bewegung seit mehreren Tagen",
+      "location": "DHL Paketzentrum Leipzig",
+      "timestamp": "vor 3 Tagen"
+    },
+    "estimatedDeliveryWindow": "unklar"
+  }
+]

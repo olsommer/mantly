@@ -1,0 +1,20 @@
+# Mantly — Caddy reverse proxy
+#
+# Provides automatic HTTPS (Let's Encrypt) and routes traffic to:
+#   - /pb/*   → PocketBase (auth, user management)
+#   - /*      → FastAPI app (API + bundled SPAs in on-prem package)
+#
+# The DOMAIN variable is set in .env (e.g. mail.yourfirm.com).
+# Defaults to :80 for local testing without TLS.
+
+{$DOMAIN::80} {
+	# PocketBase API — strip the /pb prefix before forwarding
+	handle_path /pb/* {
+		reverse_proxy pocketbase:8090
+	}
+
+	# Everything else → FastAPI backend (serves API + addin + admin SPAs)
+	handle {
+		reverse_proxy app:8080
+	}
+}

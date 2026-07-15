@@ -1,0 +1,54 @@
+# Development compose — builds from source with Python hot-reload.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# On FIRST RUN only:
+#   1. Visit http://localhost:8090/_/ to create the PocketBase superuser.
+#   2. Add those credentials to backend/config.env:
+#        PB_ADMIN_EMAIL=admin@yourdev.local
+#        PB_ADMIN_PASSWORD=yourpassword
+#   3. Restart: docker compose -f docker-compose.dev.yml restart
+#
+# For addin / admin UI hot-reload, run Vite natively in a second terminal:
+#   cd addin && npm run dev      → http://localhost:5173
+#   cd admin    && npm run dev   → http://localhost:5174
+
+services:
+  isarai:
+    build: .
+    ports:
+      - "8080:8080"   # FastAPI
+      - "8090:8090"   # PocketBase UI + API
+    env_file:
+      - path: ./backend/config.env
+        required: false
+    environment:
+      # Dev overrides (auth off so the app works before PocketBase is configured)
+      REQUIRE_AUTH: "false"
+      PB_URL: "http://localhost:8090"
+      PB_PUBLIC_URL: "${PB_PUBLIC_URL:-http://localhost:8090}"
+      PB_DATA_DIR: "/app/data/pb"
+      UVICORN_RELOAD: "true"
+      MANTLY_MANAGED_LLM_PROVIDER: "${MANTLY_MANAGED_LLM_PROVIDER:-gemini}"
+      MANTLY_MANAGED_LLM_MODEL: "${MANTLY_MANAGED_LLM_MODEL:-gemini-3-flash-preview}"
+      MANTLY_MANAGED_LLM_API_KEY: "${MANTLY_MANAGED_LLM_API_KEY:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_BASE_URL: "${MANTLY_MANAGED_LLM_CUSTOM_BASE_URL:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_MODEL: "${MANTLY_MANAGED_LLM_CUSTOM_MODEL:-}"
+      LLM_COST_MARKUP: "${LLM_COST_MARKUP:-1.2}"
+      LLM_PRICE_TABLE_JSON: "${LLM_PRICE_TABLE_JSON:-}"
+      STRIPE_PRO_PRICE_ID: "${STRIPE_PRO_PRICE_ID:-}"
+      STRIPE_BUSINESS_PRICE_ID: "${STRIPE_BUSINESS_PRICE_ID:-}"
+      STRIPE_EXTRA_USER_PRICE_ID: "${STRIPE_EXTRA_USER_PRICE_ID:-}"
+      STRIPE_EXTRA_PROJECT_PRICE_ID: "${STRIPE_EXTRA_PROJECT_PRICE_ID:-}"
+      STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID: "${STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID:-}"
+      STRIPE_EXTRA_EMAIL_BLOCK_SIZE: "${STRIPE_EXTRA_EMAIL_BLOCK_SIZE:-100}"
+      STRIPE_LLM_USAGE_PRICE_ID: "${STRIPE_LLM_USAGE_PRICE_ID:-}"
+      STRIPE_LLM_METER_EVENT_NAME: "${STRIPE_LLM_METER_EVENT_NAME:-mantly_llm_usage}"
+    volumes:
+      # Mount source so uvicorn --reload picks up Python changes immediately
+      - ./backend/automail:/app/backend/automail:ro
+      - isarai_dev_data:/app/data
+
+volumes:
+  isarai_dev_data:

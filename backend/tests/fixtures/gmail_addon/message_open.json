@@ -1,0 +1,19 @@
+{
+  "commonEventObject": {
+    "hostApp": "GMAIL",
+    "platform": "WEB"
+  },
+  "authorizationEventObject": {
+    "userOAuthToken": "user-oauth-token",
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/gmail.addons.execute",
+      "https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
+      "https://www.googleapis.com/auth/userinfo.email"
+    ]
+  },
+  "gmail": {
+    "messageId": "msg-123",
+    "threadId": "thread-123",
+    "accessToken": "message-access-token"
+  }
+}

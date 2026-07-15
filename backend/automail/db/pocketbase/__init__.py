@@ -1,0 +1,1 @@
+"""PocketBase persistence adapter."""

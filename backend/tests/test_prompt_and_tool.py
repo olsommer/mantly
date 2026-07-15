@@ -1,0 +1,1029 @@
+"""Unit tests for prompt factory and agent output validation.
+
+These tests run WITHOUT calling the Gemini API or PocketBase.
+
+Run with:
+    uv run pytest tests/test_prompt_and_tool.py -v
+"""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import pytest
+
+from automail.models import (
+    AgentResponse,
+    Email,
+    IdentityResult,
+    IntentAction,
+    IntentProcessingOutput,
+    IntentResponseConfig,
+    IntentResult,
+    IntentReviewOutput,
+    ResponseDraft,
+)
+from automail.pipeline.response.prompt_factory import create_response_system_prompt, create_response_user_prompt
+
+
+@pytest.mark.no_gemini
+def test_response_tool_builder_filters_to_read_only_tools(monkeypatch):
+    from automail.pipeline.intent.helpers import _build_intent_http_tools
+
+    monkeypatch.setattr("automail.pipeline.intent.helpers.load_runtime_secrets", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "automail.pipeline.intent.helpers.get_intent_tools",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "lookup-status",
+                "description": "Read-only lookup.",
+                "method": "GET",
+                "urlTemplate": "https://api.example.test/status?sender_email={sender_email}",
+            },
+            {
+                "name": "create-case",
+                "description": "Writes an operational case.",
+                "method": "POST",
+                "urlTemplate": "https://api.example.test/cases",
+            },
+        ],
+    )
+
+    tools = _build_intent_http_tools(
+        "shipment-status-request",
+        "sender@example.com",
+        read_only_only=True,
+    )
+
+    assert [tool.name for tool in tools] == ["lookup_status"]
+
+
+@pytest.mark.no_gemini
+def test_processing_agent_uses_review_schema_without_actions(monkeypatch):
+    from automail.core.config import AdminConfig
+    from automail.pipeline.intent.agent import _run_processing_agent
+
+    captured: dict[str, object] = {}
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            return {"structured_response": IntentReviewOutput()}
+
+    def fake_tool_strategy(model):
+        captured["model"] = model
+        return {"model": model}
+
+    monkeypatch.setattr("automail.pipeline.intent.agent.ToolStrategy", fake_tool_strategy)
+    monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda **_kwargs: FakeAgent())
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_body", lambda *_args, **_kwargs: "Process intent.")
+    monkeypatch.setattr("automail.pipeline.intent.agent._build_intent_http_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent._load_intent_feedback_learnings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+    monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+    monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+
+    output = _run_processing_agent(
+        "shipment-status-request",
+        [],
+        _make_email(body="Where is order ZF-10482?"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert captured["model"] is IntentReviewOutput
+    assert isinstance(output, IntentReviewOutput)
+    assert not hasattr(output, "action_fills")
+
+
+@pytest.mark.no_gemini
+def test_processing_agent_uses_action_schema_with_actions(monkeypatch):
+    from automail.core.config import AdminConfig
+    from automail.pipeline.intent.agent import _run_processing_agent
+
+    captured: dict[str, object] = {}
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            return {"structured_response": IntentProcessingOutput()}
+
+    def fake_tool_strategy(model):
+        captured["model"] = model
+        return {"model": model}
+
+    monkeypatch.setattr("automail.pipeline.intent.agent.ToolStrategy", fake_tool_strategy)
+    monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda **_kwargs: FakeAgent())
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_body", lambda *_args, **_kwargs: "Process intent.")
+    monkeypatch.setattr("automail.pipeline.intent.agent._build_intent_http_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent._load_intent_feedback_learnings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+    monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+    monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+
+    output = _run_processing_agent(
+        "delivery-exception",
+        [IntentAction(name="case_id", label="Case ID", type="input")],
+        _make_email(body="Prepare a case."),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert captured["model"] is IntentProcessingOutput
+    assert isinstance(output, IntentProcessingOutput)
+    assert output.action_fills == []
+
+
+def _make_email(**kwargs) -> Email:
+    return Email(
+        id=kwargs.get("id", "t1"),
+        subject=kwargs.get("subject", "Test Subject"),
+        from_address=kwargs.get("from_address", "test@example.com"),
+        body=kwargs.get("body", "Body text"),
+        attachments=[],
+    )
+
+
+# ============================================================
+# Email prompt tests
+# ============================================================
+
+class TestEmailPrompt:
+    """Tests for email prompt formatting via create_response_user_prompt."""
+
+    @pytest.mark.no_gemini
+    def test_email_body_in_prompt(self):
+        """Email body and sender should appear in the formatted prompt."""
+        email = _make_email(body="This is the email body.", from_address="test@example.com")
+        prompt = create_response_user_prompt(email)
+        assert "<incoming_email>" in prompt
+        assert "This is the email body." in prompt
+        assert "FROM: test@example.com" in prompt
+
+    @pytest.mark.no_gemini
+    def test_attachments_in_prompt(self):
+        """Parsed attachments should appear in the formatted prompt."""
+        email = _make_email()
+        parsed = {"contract.pdf": "Some contract text here"}
+        prompt = create_response_user_prompt(email, parsed)
+        assert "contract.pdf" in prompt
+        assert "Some contract text here" in prompt
+
+    @pytest.mark.no_gemini
+    def test_no_attachments(self):
+        """Without attachments the prompt should still render."""
+        email = _make_email()
+        prompt = create_response_user_prompt(email)
+        assert "<incoming_email>" in prompt
+
+    @pytest.mark.no_gemini
+    def test_braces_in_email_body_safe(self):
+        """Curly braces in the email body must not crash string formatting."""
+        email = _make_email(body="Please fill in {name} and {address}.")
+        prompt = create_response_user_prompt(email)
+        assert "{name}" in prompt
+        assert "{address}" in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_system_prompt_uses_company_prompt_contract(self):
+        with patch(
+            "automail.pipeline.response.prompt_factory.read_config",
+            return_value=SimpleNamespace(org_name="Mantly", org_description="Email agent"),
+        ):
+            prompt = create_response_system_prompt(
+                intent_name="claim",
+            )
+
+        assert "Draft an appropriate email response" in prompt
+        assert "for Mantly" in prompt
+        assert "<rules>" in prompt
+        assert "<intent_specific_rules>" not in prompt
+        assert "<attachment_rules>" not in prompt
+        assert "learnings > rules > Base Boundaries" in prompt
+        assert "Keep the reply concise" not in prompt
+        assert "The intent/concern of the incoming email is" not in prompt
+        assert "{instructions}" not in prompt
+        assert "{company_name}" not in prompt
+        assert "{description}" not in prompt
+        assert "{intent}" not in prompt
+        assert "## Your Intents" not in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_user_prompt_lists_rules(self, monkeypatch):
+        monkeypatch.setattr(
+            "automail.pipeline.intent.intents_factory.get_intent_response_rules",
+            lambda *_args, **_kwargs: ["Keep the reply concise"],
+        )
+
+        prompt = create_response_user_prompt(
+            _make_email(),
+            intent_result=IntentResult(matched=True, intent_name="claim"),
+        )
+
+        assert "<rules>" in prompt
+        assert "<rule>Keep the reply concise</rule>" in prompt
+        assert "Only use exact filenames listed in <available_attachments>" in prompt
+        assert "<intent_specific_rules>" not in prompt
+        assert "<attachment_rules>" not in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_user_prompt_lists_available_response_attachments(self):
+        email = _make_email()
+        prompt = create_response_user_prompt(
+            email,
+            available_response_attachments=[
+                {
+                    "filename": "Stammblatt GmbH 2025.docx",
+                    "description": "German GmbH template",
+                    "mode": "dynamic",
+                }
+            ],
+        )
+
+        assert "<available_attachments>" in prompt
+        assert '<attachment filename="Stammblatt GmbH 2025.docx" mode="dynamic">German GmbH template</attachment>' in prompt
+        assert "<rules>" in prompt
+        assert "<attachment_rules>" not in prompt
+        assert "Only use exact filenames listed in <available_attachments>" in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_user_prompt_uses_xml_context_sections(self):
+        email = _make_email()
+        prompt = create_response_user_prompt(
+            email,
+            identity_result=IdentityResult(
+                customer_found=True,
+                data={"name": "Max & Co <VIP>"},
+            ),
+            intent_result=IntentResult(
+                matched=True,
+                intent_name="claim",
+            ),
+            available_response_attachments=[],
+        )
+
+        assert '<customer_identity status="found">' in prompt
+        assert '<field name="name">Max &amp; Co &lt;VIP&gt;</field>' in prompt
+        assert '<intent_context status="matched">' in prompt
+        assert "<title>claim</title>" in prompt
+        assert "<description>" in prompt
+        assert "<intent_name>" not in prompt
+        assert "<response_context>" not in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_user_prompt_uses_configured_user_name(self, monkeypatch):
+        monkeypatch.setattr(
+            "automail.db.pocketbase.users.get_user_display_name",
+            lambda email, tenant_id=None: "Oliver Sommer",
+        )
+
+        prompt = create_response_user_prompt(
+            _make_email(),
+            creator="demo@mantly.io",
+            tenant_id="tenant-a",
+        )
+
+        assert "<responder_name>Oliver Sommer</responder_name>" in prompt
+        assert "<responder_email>demo@mantly.io</responder_email>" in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_user_prompt_omits_missing_responder_name(self, monkeypatch):
+        monkeypatch.delenv("USERS", raising=False)
+        monkeypatch.setattr(
+            "automail.db.pocketbase.users.get_user_display_name",
+            lambda email, tenant_id=None: None,
+        )
+
+        prompt = create_response_user_prompt(
+            _make_email(),
+            creator="demo@mantly.io",
+            tenant_id="tenant-a",
+        )
+
+        assert "<responder_name>" not in prompt
+        assert "<responder_email>demo@mantly.io</responder_email>" in prompt
+
+    @pytest.mark.no_gemini
+    def test_llm_response_draft_excludes_runtime_metadata(self):
+        """The LLM schema should not ask for runtime-only metadata."""
+        props = ResponseDraft.model_json_schema()["properties"]
+
+        assert "response_text" in props
+        assert "response_attachments" in props
+        assert "responseText" not in props
+        assert "responseAttachments" not in props
+        assert "activatedIntent" not in props
+        assert "requiresHuman" not in props
+        assert "requiresHumanReason" not in props
+        assert "generatedAttachments" not in props
+
+
+# ============================================================
+# Agent output validation
+# ============================================================
+
+class TestAgentOutputValidation:
+    """Tests for _validate_response in agent.py."""
+
+    @pytest.mark.no_gemini
+    def test_empty_response_raises(self):
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(response_text="", requires_human=False)
+        with pytest.raises(ValueError, match="empty response_text"):
+            _validate_response(response)
+
+    @pytest.mark.no_gemini
+    def test_whitespace_only_response_raises(self):
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(response_text="   \n\t  ", requires_human=False)
+        with pytest.raises(ValueError, match="empty response_text"):
+            _validate_response(response)
+
+    @pytest.mark.no_gemini
+    def test_no_intent_overrides_requires_human(self):
+        """No activated_intent + requires_human=False must be forced to True."""
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(
+            response_text="Some response",
+            activated_intent=None,
+            requires_human=False,
+        )
+        validated = _validate_response(response)
+        assert validated.requires_human is True
+        assert validated.requires_human_reason is not None
+
+    @pytest.mark.no_gemini
+    def test_unknown_intent_cleared(self):
+        """Unknown intent name must be cleared and requires_human set True."""
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(
+            response_text="Some response",
+            activated_intent="nonexistent-intent-xyz",
+            requires_human=False,
+        )
+        validated = _validate_response(response)
+        assert validated.activated_intent is None
+        assert validated.requires_human is True
+        assert validated.requires_human_reason is not None
+        assert "nonexistent-intent-xyz" in validated.requires_human_reason
+
+    @pytest.mark.no_gemini
+    def test_known_intent_preserved(self):
+        """Known intent name must be kept unchanged."""
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(
+            response_text="Some response",
+            activated_intent="company-foundation",
+            requires_human=False,
+        )
+        validated = _validate_response(response, known_intents={"company-foundation"})
+        assert validated.activated_intent == "company-foundation"
+        assert validated.requires_human is False
+
+    @pytest.mark.no_gemini
+    def test_intent_activated_overrides_requires_human(self):
+        """Known activated_intent with requires_human=True must be overridden to False."""
+        from automail.pipeline.response.agent import _validate_response
+        response = AgentResponse(
+            response_text="GmbH formation processed",
+            activated_intent="company-foundation",
+            requires_human=True,
+            requires_human_reason="Complex request",
+        )
+        validated = _validate_response(response, known_intents={"company-foundation"})
+        assert validated.requires_human is False
+        assert validated.requires_human_reason is None
+        assert validated.activated_intent == "company-foundation"
+
+    @pytest.mark.no_gemini
+    def test_hallucinated_attachment_removed(self, monkeypatch):
+        """Filenames not present in PocketBase attachment records must be stripped."""
+        from automail.pipeline.response.agent import _validate_response
+        monkeypatch.setattr(
+            "automail.db.pocketbase.client._list_all",
+            lambda *args, **kwargs: [{"filename": "Stammblatt GmbH 2025.docx"}],
+        )
+        response = AgentResponse(
+            response_text="Some response",
+            activated_intent="company-foundation",
+            requires_human=False,
+            response_attachments=["Stammblatt GmbH 2025.docx", "hallucinated-file.pdf"],
+        )
+        validated = _validate_response(
+            response,
+            known_intents={"company-foundation"},
+            intents_dir=SimpleNamespace(project_id="project-1"),
+        )
+        assert validated.response_attachments == ["Stammblatt GmbH 2025.docx"]
+
+    @pytest.mark.no_gemini
+    def test_all_attachments_hallucinated(self, monkeypatch):
+        """If every attachment is hallucinated, response_attachments must be None."""
+        from automail.pipeline.response.agent import _validate_response
+        monkeypatch.setattr("automail.db.pocketbase.client._list_all", lambda *args, **kwargs: [])
+        response = AgentResponse(
+            response_text="Some response",
+            activated_intent="company-foundation",
+            requires_human=False,
+            response_attachments=["fake1.pdf", "fake2.pdf"],
+        )
+        validated = _validate_response(
+            response,
+            known_intents={"company-foundation"},
+            intents_dir=SimpleNamespace(project_id="project-1"),
+        )
+        assert validated.response_attachments is None
+
+
+class TestRequireHumanReview:
+    """Tests for intent-level human review enforcement."""
+
+    @pytest.mark.no_gemini
+    def test_require_review_frontmatter_parsed(self, monkeypatch):
+        from automail.pipeline.intent.intents_factory import get_intent_require_review
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.intents_factory.get_intent_frontmatters",
+            lambda intents_dir=None: [
+                {"name": "manual", "require_review": "true"},
+                {"name": "automatic", "require_review": False},
+            ],
+        )
+
+        assert get_intent_require_review("manual") is True
+        assert get_intent_require_review("automatic") is False
+
+    @pytest.mark.no_gemini
+    def test_require_review_skips_response_generation(self, monkeypatch):
+        from automail.pipeline.intent.agent import _maybe_draft_response
+
+        called = {"response_agent": False}
+
+        def fake_response_agent(*_args, **_kwargs):
+            called["response_agent"] = True
+            return AgentResponse(response_text="Should not happen")
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_require_review",
+            lambda intent_name, intents_dir=None: intent_name == "manual",
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_response_agent", fake_response_agent)
+
+        response = _maybe_draft_response(
+            IntentResult(
+                matched=True,
+                intent_name="manual",
+                response=IntentResponseConfig(enabled=True),
+            ),
+            _make_email(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        assert called["response_agent"] is False
+        assert response is not None
+        assert response.requires_human is True
+        assert response.activated_intent == "manual"
+        assert response.requires_human_reason == "Intent is configured to require human review."
+
+
+class TestIntentAttachmentContext:
+    @pytest.mark.no_gemini
+    def test_uploaded_intent_files_are_available_response_attachments(self, monkeypatch):
+        from automail.pipeline.intent.intents_factory import get_intent_response_attachments
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.intents_factory.get_intent_response_config",
+            lambda *_args, **_kwargs: {
+                "attachments": [
+                    {
+                        "filename": "Stammblatt GmbH 2025.docx",
+                        "description": "GmbH template",
+                        "mode": "dynamic",
+                    }
+                ]
+            },
+        )
+
+        def fake_list_all(collection, filter_str="", sort="-created", per_page=200):
+            assert collection == "intent_attachments"
+            assert "project='project_1'" in filter_str
+            assert "intent='legal-company-formation'" in filter_str
+            assert sort == "filename"
+            assert per_page == 200
+            return [
+                {"filename": "Master Data Sheet LLC 2025.docx", "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+                {"filename": "Stammblatt GmbH 2025.docx", "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            ]
+
+        monkeypatch.setattr("automail.db.pocketbase.client._list_all", fake_list_all)
+
+        attachments = get_intent_response_attachments(
+            "legal-company-formation",
+            intents_dir=SimpleNamespace(project_id="project_1"),
+        )
+
+        assert attachments == [
+            {
+                "filename": "Master Data Sheet LLC 2025.docx",
+                "description": "",
+                "mode": "dynamic",
+            },
+            {
+                "filename": "Stammblatt GmbH 2025.docx",
+                "description": "GmbH template",
+                "mode": "dynamic",
+            },
+        ]
+
+    @pytest.mark.no_gemini
+    def test_response_prompt_lists_available_uploaded_files(self, monkeypatch):
+        monkeypatch.setattr(
+            "automail.pipeline.intent.intents_factory.get_intent_response_attachments",
+            lambda *_args, **_kwargs: [
+                {
+                    "filename": "Stammblatt GmbH 2025.docx",
+                    "description": "GmbH template",
+                    "mode": "dynamic",
+                }
+            ],
+        )
+
+        prompt = create_response_user_prompt(
+            _make_email(body="Bitte GmbH gründen."),
+            intent_result=IntentResult(matched=True, intent_name="legal-company-formation"),
+            intents_dir=SimpleNamespace(project_id="project_1"),
+        )
+
+        assert "<available_attachments>" in prompt
+        assert '<attachment filename="Stammblatt GmbH 2025.docx" mode="dynamic">GmbH template</attachment>' in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_prompt_self_closes_available_files_without_description(self, monkeypatch):
+        monkeypatch.setattr(
+            "automail.pipeline.intent.intents_factory.get_intent_response_attachments",
+            lambda *_args, **_kwargs: [
+                {
+                    "filename": "Stammblatt GmbH 2025.docx",
+                    "description": "",
+                    "mode": "dynamic",
+                }
+            ],
+        )
+
+        prompt = create_response_user_prompt(
+            _make_email(body="Bitte GmbH gründen."),
+            intent_result=IntentResult(matched=True, intent_name="legal-company-formation"),
+            intents_dir=SimpleNamespace(project_id="project_1"),
+        )
+
+        assert '<attachment filename="Stammblatt GmbH 2025.docx" mode="dynamic" />' in prompt
+
+    @pytest.mark.no_gemini
+    def test_classification_prompt_includes_attachment_text(self, monkeypatch):
+        from langchain.messages import AIMessage
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import run_intent_agent
+
+        captured = {}
+
+        class FakeAgent:
+            def invoke(self, payload, config=None):
+                captured["content"] = payload["messages"][0]["content"]
+                captured["run_name"] = (config or {}).get("run_name")
+                captured["tags"] = (config or {}).get("tags")
+                captured["metadata"] = (config or {}).get("metadata")
+                return {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[{
+                                "name": "no_match",
+                                "args": {"reason": "No matching intent."},
+                                "id": "call_1",
+                            }],
+                        )
+                    ]
+                }
+
+        def fake_create_agent(*_args, **kwargs):
+            captured["tools"] = [getattr(tool, "name", "") for tool in kwargs.get("tools", [])]
+            captured["response_format"] = kwargs.get("response_format")
+            return FakeAgent()
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_known_intent_names",
+            lambda intents_dir=None: {"claim"},
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent._build_intents_list", lambda intents_dir=None: "**claim**: Claim")
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", fake_create_agent)
+
+        run_intent_agent(
+            email=_make_email(body="See attachment."),
+            parsed_attachments={"claim.pdf": "Schadennummer AXA-123"},
+        )
+
+        assert captured["tools"] == ["activate_intent", "no_match"]
+        assert captured["response_format"] is None
+        assert captured["run_name"] == "intent_router_agent"
+        assert captured["tags"] == ["mantly", "intent", "router"]
+        assert captured["metadata"]["source"] == "pipeline.intent.agent"
+        assert "## Attachments" in captured["content"]
+        assert "claim.pdf" in captured["content"]
+        assert "Schadennummer AXA-123" in captured["content"]
+
+    @pytest.mark.no_gemini
+    def test_classification_no_tool_result_is_no_match(self, monkeypatch):
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import run_intent_agent
+
+        class FakeAgent:
+            def invoke(self, payload, config=None):
+                return {"messages": []}
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_known_intent_names",
+            lambda intents_dir=None: {"claim"},
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent._build_intents_list", lambda intents_dir=None: "**claim**: Claim")
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda *args, **kwargs: FakeAgent())
+
+        intent_result, agent_response = run_intent_agent(email=_make_email(body="No matching intent."))
+
+        assert intent_result.matched is False
+        assert intent_result.error == "No matching intent was activated."
+        assert agent_response is not None
+        assert agent_response.requires_human is True
+        assert agent_response.requires_human_reason == "No matching intent was activated."
+
+    @pytest.mark.no_gemini
+    def test_classification_match_loads_configured_actions(self, monkeypatch):
+        from langchain.messages import AIMessage
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import run_intent_agent
+
+        class FakeAgent:
+            def invoke(self, payload, config=None):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[{
+                                "name": "activate_intent",
+                                "args": {"intent_name": "claim"},
+                                "id": "call_1",
+                            }],
+                        )
+                    ]
+                }
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_known_intent_names",
+            lambda intents_dir=None: {"claim"},
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent._build_intents_list", lambda intents_dir=None: "**claim**: Claim")
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda *args, **kwargs: FakeAgent())
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [{
+            "type": "button",
+            "name": "open_claim",
+            "label": "Open claim",
+        }])
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", lambda *_args, **_kwargs: IntentProcessingOutput())
+
+        intent_result, agent_response = run_intent_agent(email=_make_email(body="Please open a claim."))
+
+        assert intent_result.matched is True
+        assert intent_result.intent_name == "claim"
+        assert [action.name for action in intent_result.actions] == ["open_claim"]
+        assert agent_response is None
+
+    @pytest.mark.no_gemini
+    def test_response_only_intent_skips_processing_and_drafts(self, monkeypatch):
+        from langchain.messages import AIMessage
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import run_intent_agent
+
+        calls = {"processing": 0, "response": 0}
+
+        class FakeAgent:
+            def invoke(self, payload, config=None):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[{
+                                "name": "activate_intent",
+                                "args": {"intent_name": "claim"},
+                                "id": "call_1",
+                            }],
+                        )
+                    ]
+                }
+
+        def fake_processing(*_args, **_kwargs):
+            calls["processing"] += 1
+            return IntentProcessingOutput()
+
+        def fake_response(*_args, **_kwargs):
+            calls["response"] += 1
+            return AgentResponse(response_text="Draft", activated_intent="claim")
+
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_known_intent_names", lambda intents_dir=None: {"claim"})
+        monkeypatch.setattr("automail.pipeline.intent.agent._build_intents_list", lambda intents_dir=None: "**claim**: Claim")
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda *args, **kwargs: FakeAgent())
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {"enabled": True})
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", fake_processing)
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_response_agent", fake_response)
+
+        intent_result, agent_response = run_intent_agent(email=_make_email(body="Please open a claim."))
+
+        assert intent_result.matched is True
+        assert intent_result.intent_name == "claim"
+        assert intent_result.actions == []
+        assert intent_result.response.enabled is True
+        assert agent_response is not None
+        assert agent_response.response_text == "Draft"
+        assert calls == {"processing": 0, "response": 1}
+
+    @pytest.mark.no_gemini
+    def test_processing_prompt_includes_attachment_text(self):
+        from automail.pipeline.intent.agent import _build_process_user_message
+
+        prompt = _build_process_user_message(
+            _make_email(body="See attachment."),
+            None,
+            [],
+            parsed_attachments={"contract.pdf": "Kuendigungsfrist 30 Tage"},
+        )
+
+        assert "## Attachments" in prompt
+        assert "contract.pdf" in prompt
+        assert "Kuendigungsfrist 30 Tage" in prompt
+
+    @pytest.mark.no_gemini
+    def test_processing_prompt_includes_button_action_context(self):
+        from automail.pipeline.intent.agent import _build_process_user_message
+
+        prompt = _build_process_user_message(
+            _make_email(body="Please check claim CLM-42."),
+            None,
+            [
+                IntentAction(
+                    type="input",
+                    name="claim_number",
+                    label="Claim Number",
+                    description="Claim number from the email",
+                ),
+                IntentAction(
+                    type="button",
+                    name="open-claim",
+                    label="Open Claim",
+                    description="Open the claim detail page for the extracted claim",
+                    query={"claim": "{claim_number}"},
+                ),
+            ],
+        )
+
+        assert "## Action Buttons" in prompt
+        assert "Open the claim detail page for the extracted claim" in prompt
+        assert "uses: claim_number" in prompt
+
+    @pytest.mark.no_gemini
+    def test_response_prompt_includes_pre_generated_tool_attachments(self, monkeypatch):
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import _run_response_agent
+
+        captured = {}
+
+        class FakeAgent:
+            def invoke(self, payload, config=None):
+                captured["run_name"] = (config or {}).get("run_name")
+                captured["tags"] = (config or {}).get("tags")
+                captured["metadata"] = (config or {}).get("metadata")
+                captured["prompt"] = payload["messages"][0]["content"]
+                return {
+                    "structured_response": ResponseDraft(
+                        response_text="Here is the generated document.",
+                        response_attachments=["gruene-karte-max-keller.pdf"],
+                    )
+                }
+
+        monkeypatch.setattr("automail.pipeline.intent.intents_factory.get_intent_response_attachments", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr("automail.pipeline.intent.agent._load_intent_feedback_learnings", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            "automail.pipeline.intent.helpers.current_generated_attachments",
+            lambda: [{
+                "filename": "gruene-karte-max-keller.pdf",
+                "content_type": "application/pdf",
+                "source_tool": "request_green_card",
+                "attach_to_response": True,
+            }],
+        )
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.current_generated_attachments",
+            lambda: [{
+                "filename": "gruene-karte-max-keller.pdf",
+                "content_type": "application/pdf",
+                "source_tool": "request_green_card",
+                "attach_to_response": True,
+            }],
+        )
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda *args, **kwargs: FakeAgent())
+        monkeypatch.setattr("automail.billing.plans.has_feature", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_known_intent_names",
+            lambda intents_dir=None: {"gruene-karte-beauftragen"},
+        )
+
+        response = _run_response_agent(
+            _make_email(body="Bitte gruene Karte senden."),
+            None,
+            "gruene-karte-beauftragen",
+        )
+
+        assert "<available_attachments>" in captured["prompt"]
+        assert captured["run_name"] == "response_agent"
+        assert captured["tags"] == ["mantly", "response", "agent"]
+        assert captured["metadata"]["intent_name"] == "gruene-karte-beauftragen"
+        assert (
+            '<attachment filename="gruene-karte-max-keller.pdf" mode="generated">'
+            "generated by tool `request_green_card`, application/pdf</attachment>"
+        ) in captured["prompt"]
+        assert response.response_attachments == ["gruene-karte-max-keller.pdf"]
+
+
+class TestHttpTools:
+    """Tests for dynamic HTTP tool conversion and demo tool execution."""
+
+    @pytest.mark.no_gemini
+    def test_raw_tool_accepts_null_optional_sections(self):
+        from automail.integrations.http_tool import raw_tool_to_definition
+
+        definition = raw_tool_to_definition(
+            {
+                "name": "demo",
+                "description": "Demo tool",
+                "method": "GET",
+                "urlTemplate": "https://api.mantly.io/demo/insurance/motor-policy",
+                "headers": None,
+                "body": None,
+                "envVars": None,
+                "inputSchema": None,
+            }
+        )
+
+        assert definition is not None
+        assert definition.headers == {}
+        assert definition.body == {}
+        assert definition.input_schema == []
+
+    @pytest.mark.no_gemini
+    def test_intent_tools_receive_project_secrets(self, monkeypatch):
+        from automail.pipeline.intent.agent import _build_intent_http_tools
+
+        seen = {}
+        monkeypatch.setattr(
+            "automail.pipeline.intent.helpers.get_intent_tools",
+            lambda *_args, **_kwargs: [{
+                "name": "lookup",
+                "description": "Lookup",
+                "method": "GET",
+                "urlTemplate": "https://api.example.com/{API_PATH}",
+            }],
+        )
+        monkeypatch.setattr(
+            "automail.pipeline.intent.helpers.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {"API_PATH": "customers"},
+        )
+
+        def fake_raw_tool_to_definition(raw, secrets=None):
+            seen["secrets"] = secrets
+            return None
+
+        monkeypatch.setattr("automail.pipeline.intent.helpers.raw_tool_to_definition", fake_raw_tool_to_definition)
+
+        assert _build_intent_http_tools("lookup", "max@example.com", tenant_id="tenant-1", project_id="project-1") == []
+        assert seen["secrets"] == {"API_PATH": "customers"}
+
+    @pytest.mark.no_gemini
+    def test_demo_insurance_tool_runs_in_process(self):
+        from automail.integrations.http_tool import ToolDefinition, _make_http_tool
+
+        tool = _make_http_tool(
+            ToolDefinition(
+                name="get_motor_policy",
+                description="Get demo motor policy",
+                method="GET",
+                url_template="https://api.mantly.io/demo/insurance/motor-policy?sender_email={sender_email}",
+            ),
+            sender_email="max.keller@example.com",
+        )
+
+        result = tool.invoke({})
+
+        assert "AXA-M-104928" in result
+        assert "ZH-48291" in result
+
+    @pytest.mark.no_gemini
+    def test_file_returning_tool_collects_generated_attachment(self):
+        from automail.integrations.http_tool import (
+            ToolDefinition,
+            _make_http_tool,
+            begin_generated_attachment_collection,
+            begin_tool_call_collection,
+            collect_generated_attachments,
+            collect_tool_calls,
+        )
+
+        token = begin_generated_attachment_collection()
+        tool_token = begin_tool_call_collection()
+        try:
+            tool = _make_http_tool(
+                ToolDefinition(
+                    name="request_green_card",
+                    description="Generate green card",
+                    method="POST",
+                    url_template="https://api.mantly.io/demo/insurance/green-card",
+                    body={"policyNumber": "AXA-M-104928", "licensePlate": "ZH-48291"},
+                    expects_file=True,
+                    attach_to_response=True,
+                    file_name_path="document.filename",
+                    file_content_type_path="document.contentType",
+                    file_content_base64_path="document.contentBase64",
+                ),
+                sender_email="max.keller@example.com",
+            )
+
+            result = tool.invoke({})
+            generated = collect_generated_attachments(token)
+            tool_calls = collect_tool_calls(tool_token)
+        except Exception:
+            collect_generated_attachments(token)
+            collect_tool_calls(tool_token)
+            raise
+
+        assert "gruene-karte-max-keller.pdf" in result
+        assert "[base64 omitted]" in result
+        assert generated[0]["filename"] == "gruene-karte-max-keller.pdf"
+        assert generated[0]["content_type"] == "application/pdf"
+        assert generated[0]["attach_to_response"] is True
+        assert tool_calls == [{"name": "request_green_card", "method": "POST", "status": "success"}]
+
+
+class TestLlmSecretPlaceholders:
+    @pytest.mark.no_gemini
+    def test_llm_api_key_resolves_from_project_secret(self, monkeypatch):
+        from automail.core.config import AdminConfig
+        from automail.llm import resolve_effective_config
+
+        monkeypatch.setattr("automail.billing.config.IS_SAAS", False)
+        monkeypatch.setattr(
+            "automail.core.runtime_secrets.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {"GEMINI_API_KEY": "resolved-key"},
+        )
+
+        config = AdminConfig(
+            llm_provider="gemini",
+            llm_api_key="{GEMINI_API_KEY}",
+            use_custom_llm=True,
+        )
+
+        resolved = resolve_effective_config(config, tenant_id="tenant-1", project_id="project-1")
+
+        assert resolved.llm_api_key == "resolved-key"

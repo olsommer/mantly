@@ -1,0 +1,115 @@
+[
+  {
+    "email": "max.keller@example.com",
+    "customerId": "crm_axa_1000",
+    "fullName": "Max Keller",
+    "organization": "Keller Transporte AG",
+    "status": "active",
+    "segment": "commercial",
+    "preferredLanguage": "de",
+    "openMatters": [
+      "MOTOR-2026-2217"
+    ],
+    "notes": [
+      "Motorfahrzeugkunde mit aktiver Police AXA-M-104928.",
+      "Bevorzugt kurze Antworten per E-Mail."
+    ]
+  },
+  {
+    "email": "sarah.keller@alpina-claims.ch",
+    "customerId": "crm_1001",
+    "fullName": "Sarah Keller",
+    "organization": "Alpina Claims AG",
+    "status": "active",
+    "segment": "enterprise",
+    "preferredLanguage": "de",
+    "openMatters": [
+      "MOTOR-2026-0142",
+      "MOTOR-2026-0188"
+    ],
+    "notes": [
+      "Key fleet customer with dedicated claims contact.",
+      "Prefers updates by email in German."
+    ]
+  },
+  {
+    "email": "luca.bernardi@bernardi-logistics.com",
+    "customerId": "crm_1002",
+    "fullName": "Luca Bernardi",
+    "organization": "Bernardi Logistics GmbH",
+    "status": "prospect",
+    "segment": "mid-market",
+    "preferredLanguage": "en",
+    "openMatters": [
+      "ONBOARDING-2026-0007"
+    ],
+    "notes": [
+      "Prospect evaluating outside counsel for cross-border transport claims.",
+      "Requested proposal with fixed-fee options."
+    ]
+  },
+  {
+    "email": "martina.hug@wysslaw.ch",
+    "customerId": "crm_1003",
+    "fullName": "Martina Hug",
+    "organization": "Wyss Law Partners",
+    "status": "active",
+    "segment": "referral",
+    "preferredLanguage": "de",
+    "openMatters": [],
+    "notes": [
+      "Referral partner account used for collaboration tests."
+    ]
+  },
+  {
+    "email": "martin.fasser@fasser-treuhand.ch",
+    "customerId": "crm_sro_2001",
+    "fullName": "Martin Fasser",
+    "organization": "Fasser Treuhand AG",
+    "status": "prospect",
+    "segment": "fiduciary-sro",
+    "preferredLanguage": "de",
+    "openMatters": [
+      "KYC-SRO-2026-014"
+    ],
+    "notes": [
+      "Lead fragt nach KYC/onboarding fuer Treuhaender und SRO-Unterstellung.",
+      "Moechte den passenden Link erhalten und verstehen, wie stark Mantly auf Treuhaender und SRO-Prozesse ausgerichtet ist.",
+      "Demo soll zeigen, dass CRM-Kontext vor der Antworterstellung automatisch geladen wird."
+    ]
+  },
+  {
+    "email": "operations@shop-demo.de",
+    "customerId": "crm_zen_3001",
+    "fullName": "Nina Weber",
+    "organization": "Shop Demo GmbH",
+    "status": "active",
+    "segment": "merchant",
+    "preferredLanguage": "de",
+    "openMatters": [
+      "OPS-2026-4412"
+    ],
+    "notes": [
+      "E-Commerce merchant using Zenfulfillment for warehousing and parcel shipping.",
+      "Primary contact for delivery exceptions, picking issues and warehouse tickets.",
+      "Prefers concise German updates with ticket reference when operational work is opened."
+    ]
+  },
+  {
+    "email": "fulfillment@northstar-outdoor.com",
+    "customerId": "crm_zen_3002",
+    "fullName": "Emma Clarke",
+    "organization": "Northstar Outdoor",
+    "status": "active",
+    "segment": "merchant",
+    "preferredLanguage": "en",
+    "openMatters": [
+      "OPS-2026-4488"
+    ],
+    "notes": [
+      "DTC merchant with recurring fulfilment support requests.",
+      "Uses Zenfulfillment for EU warehouse operations and outbound shipping.",
+      "Prefers ticket-based follow-up for warehouse checks and inventory exceptions."
+    ]
+  }
+]

@@ -1,0 +1,135 @@
+# Dockerfile.onprem — On-premise build with Cython-compiled Python sources.
+#
+# This produces a Docker image where the automail/ package is compiled to
+# native .so extensions. No readable .py source files ship in the image.
+#
+# Usage:
+#   docker compose -f docker-compose.onprem.yml build
+#
+# The SPA build stages are identical to the standard Dockerfile.
+# Only the backend stage differs (adds Cython compilation + source removal).
+
+# ── Stage 1 — Build Outlook add-in ───────────────────────────────────────────
+FROM node:22-alpine AS addin-build
+
+ARG VITE_PB_URL=/pb
+ARG VITE_ENABLE_ADMIN_PREVIEW=true
+ARG VITE_ENABLE_DEMO_MODE=false
+ENV VITE_PB_URL=${VITE_PB_URL}
+ENV VITE_REQUIRE_AUTH=true
+ENV VITE_ENABLE_MOCK_MODE=false
+ENV VITE_ENABLE_ADMIN_PREVIEW=${VITE_ENABLE_ADMIN_PREVIEW}
+ENV VITE_ENABLE_DEMO_MODE=${VITE_ENABLE_DEMO_MODE}
+
+WORKDIR /app/addin
+COPY addin/package.json addin/package-lock.json ./
+RUN npm ci
+COPY brand.json /app/brand.json
+COPY demo /app/demo
+COPY addin/ ./
+RUN npm run build
+
+# ── Stage 2 — Build admin SPA ────────────────────────────────────────────────
+FROM node:22-alpine AS admin-build
+
+ARG VITE_PB_URL=/pb
+# On-prem: isSaas is false (no signup UI, manifest download visible)
+ARG VITE_IS_SAAS=false
+ARG VITE_ENABLE_ADMIN_PREVIEW=true
+ARG VITE_ENABLE_DEMO_MODE=false
+ENV VITE_PB_URL=${VITE_PB_URL}
+ENV VITE_IS_SAAS=${VITE_IS_SAAS}
+ENV VITE_REQUIRE_AUTH=true
+ENV VITE_ENABLE_ADMIN_PREVIEW=${VITE_ENABLE_ADMIN_PREVIEW}
+ENV VITE_ENABLE_DEMO_MODE=${VITE_ENABLE_DEMO_MODE}
+
+WORKDIR /app/admin
+COPY admin/package.json admin/package-lock.json ./
+RUN npm ci
+COPY brand.json /app/brand.json
+COPY demo /app/demo
+COPY admin/ ./
+RUN npm run build
+
+# ── Stage 3 — Compile Python to native extensions ────────────────────────────
+FROM python:3.12-slim AS compiler
+
+# Install build toolchain for Cython
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install "uv>=0.7,<1" cython setuptools
+
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY backend/ ./
+COPY scripts/compile_sources.py /app/backend/scripts/compile_sources.py
+
+# Compile automail/ package to .so files and remove .py sources
+RUN python /app/backend/scripts/compile_sources.py
+
+# Verify no .py source files remain (only __init__.py stubs)
+RUN echo "=== Remaining .py files (should be __init__.py stubs only) ===" && \
+    find automail -name "*.py" -exec wc -l {} \; && \
+    echo "=== Compiled .so files ===" && \
+    find automail -name "*.so" | head -20
+
+# ── Stage 4 — Final runtime image ────────────────────────────────────────────
+FROM python:3.12-slim
+
+RUN pip install "uv>=0.7,<1"
+
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app/backend
+
+# Install dependencies (same as standard Dockerfile)
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# Copy the COMPILED backend (no .py source files)
+COPY --from=compiler /app/backend/automail/ ./automail/
+# Copy non-Python backend files that aren't compiled
+COPY backend/start.sh backend/config.env.example ./
+COPY backend/pb_migrations/ ./pb_migrations/
+
+# Manifest template for the download endpoint
+RUN mkdir -p /app/backend/resources
+COPY demo /app/demo
+COPY addin/manifest.xml /app/backend/resources/manifest.xml
+
+# Copy icon assets for Outlook manifest
+COPY backend/assets/ /app/backend/assets/
+
+# Copy addin and admin builds from build stages
+COPY --from=addin-build /app/addin/dist /app/addin/dist
+COPY --from=admin-build /app/admin/dist /app/admin/dist
+
+# Ensure data directory exists and is writable by appuser
+RUN mkdir -p /app/data/attachments && chown -R appuser:appuser /app
+
+RUN chmod +x /app/backend/start.sh
+
+ENV STATIC_FILES_DIR=/app/addin/dist
+ENV ADMIN_STATIC_FILES_DIR=/app/admin/dist
+ENV MANIFEST_TEMPLATE_PATH=/app/backend/resources/manifest.xml
+ENV ASSETS_DIR=/app/backend/assets
+ENV ATTACHMENTS_DIR=/app/data/attachments
+
+# Persist attachments and license cache across container restarts
+VOLUME ["/app/data"]
+
+EXPOSE 8080
+
+# Switch to non-root user
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
+
+CMD ["/app/backend/start.sh"]

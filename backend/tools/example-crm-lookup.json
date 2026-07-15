@@ -1,0 +1,12 @@
+{
+  "_comment": "Example identity tool — rename this file and fill in your own values to enable customer lookup.",
+  "name": "crm-customer-lookup",
+  "description": "Look up customer information in the CRM system by email address. Returns customer name, account ID, and contact history.",
+  "method": "GET",
+  "url_template": "https://your-crm.example.com/api/v1/customers?email={sender_email}",
+  "headers": {
+    "Authorization": "Bearer {CRM_API_KEY}",
+    "Accept": "application/json"
+  },
+  "env_vars": ["CRM_API_KEY"]
+}

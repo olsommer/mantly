@@ -1,0 +1,96 @@
+# docker-compose.onprem.yml — On-premise deployment
+#
+# Uses Dockerfile.onprem which compiles Python sources to native extensions.
+# Includes license validation against the Mantly SaaS server.
+#
+# Usage:
+#   cp .env.onprem.example .env
+#   # Fill in values in .env
+#   docker compose -f docker-compose.onprem.yml up -d
+
+services:
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - onprem_caddy_data:/data
+      - onprem_caddy_config:/config
+    environment:
+      DOMAIN: "${DOMAIN:-:80}"
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+
+  pocketbase:
+    build:
+      context: .
+      dockerfile: pocketbase/Dockerfile
+    environment:
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
+    volumes:
+      - onprem_pb_data:/pb/pb_data
+    expose:
+      - "8090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.onprem
+      args:
+        VITE_PB_URL: "/pb"
+        VITE_IS_SAAS: "false"
+        VITE_ENABLE_DEMO_MODE: "${VITE_ENABLE_DEMO_MODE:-false}"
+    image: isarai-email-agent-onprem:latest
+    environment:
+      REQUIRE_AUTH: "true"
+      IS_SAAS: "false"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
+      CORS_ORIGINS: "${PUBLIC_URL}"
+      MANIFEST_BASE_URL: "${PUBLIC_URL}"
+      PB_PUBLIC_URL: "${PB_PUBLIC_URL:-${PUBLIC_URL}/pb}"
+      ADDIN_ID: "${ADDIN_ID:?ADDIN_ID is required — generate with: python -c \"import uuid; print(uuid.uuid4())\"}"
+      # License validation
+      LICENSE_KEY: "${LICENSE_KEY:?LICENSE_KEY is required — contact support@mantly.io}"
+      LICENSE_SERVER_URL: "${LICENSE_SERVER_URL:-https://api.mantly.io}"
+      ENABLE_DEMO_MODE: "${ENABLE_DEMO_MODE:-false}"
+      LICENSE_CACHE_PATH: "/app/data/license_cache.json"
+      # Optional default LLM for self-hosted deployments. Tenants can still
+      # configure BYOK in the admin UI.
+      MANTLY_MANAGED_LLM_PROVIDER: "${MANTLY_MANAGED_LLM_PROVIDER:-gemini}"
+      MANTLY_MANAGED_LLM_MODEL: "${MANTLY_MANAGED_LLM_MODEL:-gemini-3-flash-preview}"
+      MANTLY_MANAGED_LLM_API_KEY: "${MANTLY_MANAGED_LLM_API_KEY:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_BASE_URL: "${MANTLY_MANAGED_LLM_CUSTOM_BASE_URL:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_MODEL: "${MANTLY_MANAGED_LLM_CUSTOM_MODEL:-}"
+      LLM_PRICE_TABLE_JSON: "${LLM_PRICE_TABLE_JSON:-}"
+      # PocketBase — connects over Docker's internal network
+      PB_URL: "http://pocketbase:8090"
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
+    depends_on:
+      pocketbase:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      - onprem_app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  onprem_caddy_data:
+  onprem_caddy_config:
+  onprem_pb_data:
+  onprem_app_data:

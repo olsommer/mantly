@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["vite/client", "office-js", "node"]
+  },
+  "include": [
+    "src",
+    "e2e/**/*.ts",
+    "playwright*.config.ts",
+    "vite.config.ts",
+    "../demo/**/*.json"
+  ]
+}

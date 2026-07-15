@@ -1,0 +1,16 @@
+[
+  {
+    "id": "zen-shipment-status",
+    "subject": "Wo ist mein Paket?",
+    "fromAddress": "lena.schmidt@example-shop.de",
+    "body": "Hallo Zenfulfillment Team,\n\nmeine Bestellung ZF-10482 wurde letzte Woche versendet. Könnt ihr mir sagen, wo mein Paket gerade ist und wann es ankommt?\n\nViele Grüße\nLena",
+    "attachments": []
+  },
+  {
+    "id": "zen-delivery-exception",
+    "subject": "Tracking seit drei Tagen unverändert",
+    "fromAddress": "support@brand-demo.de",
+    "body": "Hallo,\n\nbei Bestellung ZF-88310 / DHL00340434161234567890 bewegt sich das Tracking seit drei Tagen nicht mehr. Der Kunde fragt erneut nach. Bitte eröffnet ein Ticket, weil das Paket nicht sauber getrackt werden kann.\n\nDanke und viele Grüße",
+    "attachments": []
+  }
+]

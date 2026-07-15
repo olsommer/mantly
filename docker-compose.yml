@@ -1,0 +1,128 @@
+services:
+
+  caddy:
+    build:
+      context: .
+      dockerfile: caddy/Dockerfile
+    environment:
+      # In Coolify, keep this as :80 and let Coolify terminate TLS.
+      # For direct Docker hosting, set DOMAIN=api.mantly.io and publish ports.
+      DOMAIN: "${DOMAIN:-:80}"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_started
+      pocketbase:
+        condition: service_healthy
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  pocketbase:
+    build:
+      context: .
+      dockerfile: pocketbase/Dockerfile
+    environment:
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
+      PB_CORS_ORIGINS: "${PB_CORS_ORIGINS:-}"
+    volumes:
+      - isarai_pb_data:/pb/pb_data
+    expose:
+      - "8090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: mantly-api:latest
+    environment:
+      # ── Core ────────────────────────────────────────────────────────────
+      REQUIRE_AUTH: "true"
+      IS_SAAS: "${VITE_IS_SAAS:-true}"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-${PUBLIC_URL}}"
+      MANIFEST_BASE_URL: "${PUBLIC_URL}"
+      ADDIN_BASE_URL: "${ADDIN_BASE_URL:-${PUBLIC_URL}}"
+      ASSET_BASE_URL: "${ASSET_BASE_URL:-${PUBLIC_URL}}"
+      APP_BASE_URL: "${APP_BASE_URL:-${PUBLIC_URL}}"
+      PB_PUBLIC_URL: "${PB_PUBLIC_URL:-${PUBLIC_URL}/pb}"
+      ADDIN_ID: "${ADDIN_ID:-}"
+      ENABLE_DEMO_MODE: "${ENABLE_DEMO_MODE:-false}"
+
+      # ── LLM ────────────────────────────────────────────────────────────
+      # Free uses the Mantly-managed key. Paid tenants can BYOK in settings.
+      # Paid tenants without BYOK use the Mantly-managed key and are billed
+      # at provider cost x LLM_COST_MARKUP.
+      MANTLY_MANAGED_LLM_PROVIDER: "${MANTLY_MANAGED_LLM_PROVIDER:-gemini}"
+      MANTLY_MANAGED_LLM_MODEL: "${MANTLY_MANAGED_LLM_MODEL:-gemini-3-flash-preview}"
+      MANTLY_MANAGED_LLM_API_KEY: "${MANTLY_MANAGED_LLM_API_KEY:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_BASE_URL: "${MANTLY_MANAGED_LLM_CUSTOM_BASE_URL:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_MODEL: "${MANTLY_MANAGED_LLM_CUSTOM_MODEL:-}"
+      LLM_COST_MARKUP: "${LLM_COST_MARKUP:-1.2}"
+      LLM_PRICE_TABLE_JSON: "${LLM_PRICE_TABLE_JSON:-}"
+
+      # ── PocketBase (internal network) ──────────────────────────────────
+      PB_URL: "http://pocketbase:8090"
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
+
+      # ── Stripe billing (SaaS) ─────────────────────────────────────────
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRO_PRICE_ID: "${STRIPE_PRO_PRICE_ID:-}"
+      STRIPE_BUSINESS_PRICE_ID: "${STRIPE_BUSINESS_PRICE_ID:-}"
+      STRIPE_EXTRA_USER_PRICE_ID: "${STRIPE_EXTRA_USER_PRICE_ID:-}"
+      STRIPE_EXTRA_PROJECT_PRICE_ID: "${STRIPE_EXTRA_PROJECT_PRICE_ID:-}"
+      STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID: "${STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID:-}"
+      STRIPE_EXTRA_EMAIL_BLOCK_SIZE: "${STRIPE_EXTRA_EMAIL_BLOCK_SIZE:-100}"
+      STRIPE_LLM_USAGE_PRICE_ID: "${STRIPE_LLM_USAGE_PRICE_ID:-}"
+      STRIPE_LLM_METER_EVENT_NAME: "${STRIPE_LLM_METER_EVENT_NAME:-mantly_llm_usage}"
+      STRIPE_ONPREM_PRICE_ID: "${STRIPE_ONPREM_PRICE_ID:-}"
+      STRIPE_ONPREM_MAX_USERS: "${STRIPE_ONPREM_MAX_USERS:-20}"
+
+      # ── SMTP (email verification & notifications) ─────────────────────
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+
+      # ── Initial admin bootstrap (first deploy only) ────────────────────
+      SETUP_ADMIN_EMAIL: "${SETUP_ADMIN_EMAIL:-}"
+      SETUP_ADMIN_PASSWORD: "${SETUP_ADMIN_PASSWORD:-}"
+      COMPANY_NAME: "${COMPANY_NAME:-}"
+
+      # ── Observability (optional) ───────────────────────────────────────
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-}"
+      LANGSMITH_ENDPOINT: "${LANGSMITH_ENDPOINT:-}"
+      LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:-}"
+      LANGSMITH_PROJECT: "${LANGSMITH_PROJECT:-}"
+
+      # ── Security (optional) ────────────────────────────────────────────
+      ALLOWED_WEBHOOK_HOSTS: "${ALLOWED_WEBHOOK_HOSTS:-}"
+
+    depends_on:
+      pocketbase:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      - isarai_app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  isarai_pb_data:
+  isarai_app_data:

@@ -1,0 +1,12 @@
+{
+  "commonEventObject": {
+    "hostApp": "GMAIL",
+    "platform": "WEB"
+  },
+  "authorizationEventObject": {
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/gmail.addons.execute",
+      "https://www.googleapis.com/auth/userinfo.email"
+    ]
+  }
+}

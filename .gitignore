@@ -1,0 +1,72 @@
+# Secrets & local config — never commit these
+config.env
+.env
+.env.*
+!deploy/.env.example
+
+# Draft config (runtime state, not committed)
+backend/intents_draft/
+backend/admin_config_draft.json
+backend/pb_data/
+backend/data/
+
+# Local agent/tooling state
+.claude/
+.codex/
+.agents/
+.pi/
+.worktrees
+.worktrees/
+tmp/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.uv/
+.uv-cache/
+
+# Node / addin & admin
+node_modules/
+addin/dist/
+addin/.vite/
+admin/dist/
+admin/.vite/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+screenshots/
+playwright-report/
+test-results/
+addin/playwright-report/
+addin/test-results/
+server-connection.md
+skills-lock.json
+todo.md

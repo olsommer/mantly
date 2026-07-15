@@ -1,0 +1,38 @@
+{
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
+    "https://www.googleapis.com/auth/gmail.addons.current.action.compose",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Mantly",
+      "logoUrl": "https://api.mantly.io/assets/icon-128.png",
+      "layoutProperties": {
+        "primaryColor": "#111827",
+        "secondaryColor": "#2563eb"
+      },
+      "homepageTrigger": {
+        "runFunction": "https://api.mantly.io/addons/gmail/homepage",
+        "enabled": true
+      },
+      "openLinkUrlPrefixes": [
+        "https://mantly.io/",
+        "https://app.mantly.io/"
+      ]
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": "https://api.mantly.io/addons/gmail/message"
+        }
+      ]
+    },
+    "httpOptions": {
+      "authorizationHeader": "SYSTEM_ID_TOKEN",
+      "granularOauthPermissionSupport": "OPT_IN"
+    }
+  }
+}

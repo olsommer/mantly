@@ -1,0 +1,13 @@
+{
+  "processStart": {
+    "action": "process-start",
+    "status": "started",
+    "defaultChatId": "demo-chat",
+    "defaultProcess": "process-start",
+    "processIdPrefix": "process_"
+  },
+  "updateTitle": {
+    "action": "update-title",
+    "status": "updated"
+  }
+}

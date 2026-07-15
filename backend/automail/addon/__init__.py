@@ -1,0 +1,1 @@
+"""Platform add-on adapters."""

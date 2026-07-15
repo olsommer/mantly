@@ -1,0 +1,69 @@
+{
+  "tool": {
+    "name": "customer-lookup",
+    "description": "Looks up the sender in the CRM to retrieve customer profile, segment, and open matters.",
+    "method": "GET",
+    "urlTemplate": "/demo/crm?sender_email={sender_email}",
+    "headers": {},
+    "body": {},
+    "envVars": [],
+    "inputSchema": [
+      {
+        "key": "sender_email",
+        "description": "Email address of the sender",
+        "type": "string",
+        "required": true
+      }
+    ]
+  },
+  "intent": {
+    "name": "demo-legal-inquiry",
+    "contentLines": [
+      "---",
+      "name: demo-legal-inquiry",
+      "description: Legal intake enquiry for Wyss Law covering company formation, notary services, employment matters, and quote requests",
+      "active: true",
+      "require_review: false",
+      "response:",
+      "  enabled: true",
+      "  auto: true",
+      "  response_rules:",
+      "    - Respond in the sender's language",
+      "    - Acknowledge the requested legal service",
+      "    - Ask for missing documents or details needed for an estimate",
+      "    - Offer a consultation or next-step appointment",
+      "    - Keep legal statements general and avoid definitive legal advice",
+      "actions:",
+      "  - type: dropdown",
+      "    name: matter-type",
+      "    label: \"Matter type\"",
+      "    options:",
+      "      - Company formation",
+      "      - Notary / certification",
+      "      - Employment / equity",
+      "      - General legal enquiry",
+      "    separate_call: false",
+      "  - type: calendar",
+      "    name: consultation-date",
+      "    label: \"Consultation date\"",
+      "    separate_call: false",
+      "  - type: button",
+      "    name: open-intake",
+      "    label: \"Open Intake\"",
+      "    webhook: \"/demo/process-start\"",
+      "    method: POST",
+      "---",
+      "",
+      "# Instructions",
+      "",
+      "You are handling incoming legal enquiry emails for Wyss Law. Follow these guidelines:",
+      "",
+      "- Match company formation, AG/GmbH setup, notary/certification, signature verification, employment, equity, and general quote requests.",
+      "- Reply in the same language as the sender.",
+      "- Summarise the requested service and key facts from the email.",
+      "- Ask for missing information such as domicile, shareholder/director details, document count, deadlines, or relevant contracts.",
+      "- Offer a consultation or explain that Wyss Law can provide a non-binding quote after reviewing the details.",
+      "- Use a professional Swiss law firm tone and avoid giving final legal advice without review."
+    ]
+  }
+}

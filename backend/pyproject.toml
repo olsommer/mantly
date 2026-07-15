@@ -1,0 +1,79 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.128.0",
+    "httpx>=0.28.0",
+    "langchain>=1.2.3",
+    "langchain-google-genai>=4.2.0",
+    "pyjwt>=2.8.0",
+    "python-dotenv>=1.2.1",
+    "pyyaml>=6.0.2",
+    "slowapi>=0.1.9",
+    "stripe>=12.0.0",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.40.0",
+    "langchain-openai>=1.1.14",
+    "websockets>=15.0.1",
+    "just-bash==0.2.1",
+]
+
+[project.optional-dependencies]
+attachments = ["docling>=2.70.0"]
+postgres = ["psycopg2-binary>=2.9"]
+
+[tool.pytest.ini_options]
+markers = [
+    "no_gemini: tests that don't call the Gemini API",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.409",
+    "pytest>=7.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.5",
+]
+
+[tool.pyright]
+include = ["automail"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportMissingTypeArgument = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportUntypedFunctionDecorator = false
+reportPrivateUsage = false
+reportUnusedFunction = false
+reportUnusedClass = false
+reportUnusedImport = false
+reportUnnecessaryIsInstance = false
+reportUnnecessaryComparison = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line too long — handled by formatter if needed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "F841"]   # sys.path.insert before imports; test helper vars
+"automail/main.py" = ["E402"]  # load_dotenv must run before any automail imports
+
+[tool.ruff.lint.isort]
+known-first-party = ["automail"]

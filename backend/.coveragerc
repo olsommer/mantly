@@ -1,0 +1,9 @@
+[run]
+omit =
+    automail/db.py
+    automail/email_sender.py
+
+[report]
+omit =
+    automail/db.py
+    automail/email_sender.py

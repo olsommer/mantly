@@ -1,0 +1,30 @@
+FROM node:22-alpine AS build
+
+ARG VITE_API_URL
+ARG VITE_PB_URL
+ARG VITE_REQUIRE_AUTH=true
+ARG VITE_ENABLE_MOCK_MODE=false
+ARG VITE_ENABLE_DEMO_MODE=false
+ARG VITE_ADDIN_BASE_PATH=/
+ARG VITE_EMBED_ADMIN_ORIGINS=
+
+ENV VITE_API_URL=${VITE_API_URL}
+ENV VITE_PB_URL=${VITE_PB_URL}
+ENV VITE_REQUIRE_AUTH=${VITE_REQUIRE_AUTH}
+ENV VITE_ENABLE_MOCK_MODE=${VITE_ENABLE_MOCK_MODE}
+ENV VITE_ENABLE_DEMO_MODE=${VITE_ENABLE_DEMO_MODE}
+ENV VITE_ADDIN_BASE_PATH=${VITE_ADDIN_BASE_PATH}
+ENV VITE_EMBED_ADMIN_ORIGINS=${VITE_EMBED_ADMIN_ORIGINS}
+
+WORKDIR /app/addin
+COPY addin/package.json addin/package-lock.json ./
+RUN npm ci
+COPY brand.json /app/brand.json
+COPY demo /app/demo
+COPY addin/ ./
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY deploy/spa-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/addin/dist /usr/share/nginx/html
+EXPOSE 80

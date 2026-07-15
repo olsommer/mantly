@@ -1,0 +1,39 @@
+# Dockerfile.api — SaaS backend runtime only.
+#
+# Admin, add-in, and landing SPAs are deployed as separate static apps in SaaS.
+# Keep Dockerfile / Dockerfile.onprem for bundled single-origin deployments.
+
+FROM python:3.12-slim
+
+RUN pip install "uv>=0.7,<1"
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY backend/ ./
+RUN mkdir -p /app/backend/resources
+COPY brand.json /app/brand.json
+COPY demo /app/demo
+COPY addin/manifest.xml /app/backend/resources/manifest.xml
+COPY backend/assets/ /app/backend/assets/
+
+RUN mkdir -p /app/data/attachments && chown -R appuser:appuser /app
+RUN chmod +x /app/backend/start.sh
+
+ENV STATIC_FILES_DIR=/app/disabled/addin
+ENV ADMIN_STATIC_FILES_DIR=/app/disabled/admin
+ENV MANIFEST_TEMPLATE_PATH=/app/backend/resources/manifest.xml
+ENV ASSETS_DIR=/app/backend/assets
+ENV ATTACHMENTS_DIR=/app/data/attachments
+
+VOLUME ["/app/data"]
+EXPOSE 8080
+
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
+
+CMD ["/app/backend/start.sh"]

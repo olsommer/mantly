@@ -1,0 +1,9 @@
+<incoming_email>
+  <from>{from_address}</from>
+  <subject>{subject}</subject>
+  <body>{body}</body>
+  <body_html>{body_html}</body_html>
+  <attachments>
+{attachments}
+  </attachments>
+</incoming_email>

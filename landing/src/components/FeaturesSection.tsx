@@ -1,0 +1,134 @@
+import {
+  MousePointerClick,
+  BotMessageSquare,
+  Paperclip,
+  Users,
+  RefreshCw,
+  ShieldCheck,
+  LayoutDashboard,
+  Mail,
+  Settings2,
+  FileCheck2,
+} from "lucide-react";
+import { useTranslation } from "@/i18n/useTranslation";
+
+export function FeaturesSection() {
+  const { t } = useTranslation();
+  const subtitle = t("features.subtitle");
+
+  const features = [
+    { icon: MousePointerClick, title: t("features.1.title"), desc: t("features.1.desc") },
+    { icon: BotMessageSquare, title: t("features.2.title"), desc: t("features.2.desc") },
+    { icon: Paperclip, title: t("features.3.title"), desc: t("features.3.desc") },
+    { icon: Users, title: t("features.4.title"), desc: t("features.4.desc") },
+    { icon: RefreshCw, title: t("features.5.title"), desc: t("features.5.desc") },
+    { icon: ShieldCheck, title: t("features.6.title"), desc: t("features.6.desc") },
+    { icon: Settings2, title: t("features.7.title"), desc: t("features.7.desc") },
+    { icon: FileCheck2, title: t("features.8.title"), desc: t("features.8.desc") },
+    { icon: Mail, title: t("features.9.title"), desc: t("features.9.desc") },
+  ];
+
+  const adminTabs = [
+    { icon: Settings2, label: t("features.admin.tab.intents") },
+    { icon: Mail, label: t("features.admin.tab.responses") },
+    { icon: FileCheck2, label: t("features.admin.tab.attachments") },
+  ];
+
+  return (
+    <section id="features" className="py-24 sm:py-32">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        {/* Section header */}
+        <div className="mx-auto max-w-2xl text-center">
+          <p className="text-xs font-semibold uppercase tracking-widest text-primary">
+            {t("features.tagline")}
+          </p>
+          <h2 className="mt-4 text-[2.5rem] leading-tight sm:text-[3rem] lg:text-[3.5rem]">
+            {t("features.title")}
+          </h2>
+          {subtitle && (
+            <p className="mt-5 text-lg text-muted-foreground">{subtitle}</p>
+          )}
+        </div>
+
+        {/* Feature grid */}
+        <div className="mt-20 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {features.map((feature, i) => (
+            <div
+              key={i}
+              className="group rounded-2xl border border-border/60 bg-background p-7 transition-all hover:shadow-md hover:border-border"
+            >
+              <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-primary/8">
+                <feature.icon className="h-5 w-5 text-primary" />
+              </div>
+              <h3 className="text-[2rem] leading-tight">{feature.title}</h3>
+              <p className="mt-3 text-base text-muted-foreground leading-relaxed">
+                {feature.desc}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* Admin preview */}
+        <div className="mt-20 mx-auto max-w-4xl">
+          <div className="rounded-2xl border border-border/60 bg-gradient-to-b from-muted/40 to-muted/10 p-1 shadow-lg shadow-black/[0.03]">
+            <div className="overflow-hidden rounded-xl bg-background/90">
+              <div className="flex items-center gap-3 border-b border-border/60 px-5 py-4">
+                <LayoutDashboard className="h-5 w-5 text-primary" />
+                <div>
+                  <p className="text-base font-semibold">{t("features.screenshotAlt")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("features.admin.subtitle")}
+                  </p>
+                </div>
+              </div>
+              <div className="grid gap-0 md:grid-cols-[240px_1fr]">
+                <div className="border-b border-border/60 bg-muted/25 p-4 md:border-b-0 md:border-r">
+                  {adminTabs.map(({ icon: Icon, label }) => (
+                    <div
+                      key={label}
+                      className="mb-2 flex items-center gap-2 rounded-lg px-3 py-2 text-base text-muted-foreground first:bg-background first:text-foreground first:shadow-sm"
+                    >
+                      <Icon className="h-4 w-4" />
+                      {label}
+                    </div>
+                  ))}
+                </div>
+                <div className="p-5">
+                  <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-base font-semibold">
+                        {t("features.admin.intentName")}
+                      </p>
+                      <p className="text-base text-muted-foreground">
+                        {t("features.admin.intentDesc")}
+                      </p>
+                    </div>
+                    <span className="w-fit rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700">
+                      {t("features.admin.status")}
+                    </span>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    {[
+                      t("features.admin.card1"),
+                      t("features.admin.card2"),
+                      t("features.admin.card3"),
+                      t("features.admin.card4"),
+                    ].map((label) => (
+                      <div key={label} className="rounded-lg border border-border/70 p-4">
+                        <p className="text-base font-medium">{label}</p>
+                        <div className="mt-3 space-y-2">
+                          <div className="h-2 rounded bg-muted" />
+                          <div className="h-2 w-3/4 rounded bg-muted" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

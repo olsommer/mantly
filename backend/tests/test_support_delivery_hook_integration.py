@@ -199,8 +199,9 @@ def test_delivery_hook_claim_is_atomic_and_completion_is_token_fenced():
 @pytest.mark.parametrize(
     ("failed_precondition", "expected_message"),
     [
-        ("body", "delivery_body_changed"),
-        ("issue_version", "delivery_issue_changed"),
+        # PocketBase 0.36 sentenizes ApiError messages before serializing them.
+        ("body", "Delivery_body_changed."),
+        ("issue_version", "Delivery_issue_changed."),
     ],
 )
 def test_delivery_claim_precondition_failure_rolls_back_ownership(
@@ -246,7 +247,7 @@ def test_delivery_claim_requires_configured_approval_before_ownership():
         )
 
         assert response.status_code == 409
-        assert response.json()["message"] == "delivery_approval_required"
+        assert response.json()["message"] == "Delivery_approval_required."
         _assert_claim_rolled_back(client, outbound)
 
 
@@ -271,7 +272,7 @@ def test_delivery_claim_blocks_unreviewed_automatic_reply_for_terminal_issue():
         )
 
         assert response.status_code == 409
-        assert response.json()["message"] == "delivery_issue_terminal"
+        assert response.json()["message"] == "Delivery_issue_terminal."
         _assert_claim_rolled_back(client, outbound)
 
 

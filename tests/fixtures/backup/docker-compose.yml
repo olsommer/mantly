@@ -1,0 +1,16 @@
+services:
+  pocketbase:
+    image: python:3.12-alpine
+    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 60; done"]
+    volumes:
+      - pocketbase_data:/pb/pb_data
+
+  app:
+    image: alpine:3.21
+    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 60; done"]
+    volumes:
+      - application_data:/app/data
+
+volumes:
+  pocketbase_data:
+  application_data:

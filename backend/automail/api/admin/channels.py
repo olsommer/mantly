@@ -8581,7 +8581,7 @@ def _smoke_count(result: dict[str, Any], key: str, fallback: int = 0) -> int:
 
 
 def _smoke_url(provider: str, setup: dict[str, Any]) -> str:
-    if provider in {"slack", "teams", "discord", "telegram", "line", "viber", "whatsapp", "messenger", "instagram", "twitter", "sms"}:
+    if provider in {"email", "slack", "teams", "discord", "telegram", "line", "viber", "whatsapp", "messenger", "instagram", "twitter", "sms"}:
         return str(setup.get("providerWebhookUrl") or "").strip()
     return str(setup.get("inboundWebhookUrl") or "").strip()
 

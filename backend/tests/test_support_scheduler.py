@@ -6723,6 +6723,16 @@ def test_sms_http_smoke_posts_form_with_twilio_signature(monkeypatch):
     }
 
 
+def test_email_http_smoke_uses_provider_pipeline_url():
+    setup = {
+        "providerWebhookUrl": "https://support.example.test/api/internal/support/email/email-main",
+        "inboundWebhookUrl": "https://support.example.test/api/internal/support/channel-webhooks/email-main",
+    }
+
+    assert admin_channels._smoke_url("email", setup) == setup["providerWebhookUrl"]
+    assert admin_channels._smoke_url("webhook", setup) == setup["inboundWebhookUrl"]
+
+
 def test_whatsapp_provider_smoke_payload_uses_cloud_api_shape():
     payload, provider, event_id, message_id = admin_channels._provider_smoke_payload(
         "whatsapp-main",

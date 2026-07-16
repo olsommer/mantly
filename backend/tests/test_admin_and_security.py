@@ -330,6 +330,12 @@ class TestWebhookProxy:
 
         captured = {}
         monkeypatch.setenv("PUBLIC_URL", "https://api.mantly.io")
+        monkeypatch.setenv("IS_SAAS", "true")
+        monkeypatch.setenv("ENABLE_DEMO_MODE", "false")
+        monkeypatch.setattr(
+            "automail.db.pocketbase.client.get_tenant_account_type",
+            lambda tenant_id: "normal",
+        )
 
         class FakeResponse:
             text = ""
@@ -389,6 +395,59 @@ class TestWebhookProxy:
         }
         assert captured["recorded"]["user_email"] == "agent@example.com"
         assert captured["recorded"]["response"] == {"ticketReference": "ZF-TKT-ABC123"}
+
+    @pytest.mark.no_gemini
+    def test_sync_demo_ticket_action_executes_in_process_for_demo_tenant(self, monkeypatch):
+        from automail.api.admin.actions import ActionTriggerRequest, execute_action_webhook_sync
+
+        captured = {}
+        monkeypatch.setenv("PUBLIC_URL", "https://api.mantly.io")
+        monkeypatch.setenv("IS_SAAS", "true")
+        monkeypatch.setenv("ENABLE_DEMO_MODE", "false")
+        monkeypatch.setattr(
+            "automail.db.pocketbase.client.get_tenant_account_type",
+            lambda tenant_id: "demo",
+        )
+        monkeypatch.setattr(
+            "automail.api.admin.actions._validate_webhook_url",
+            lambda url: captured.setdefault("validated", url),
+        )
+        monkeypatch.setattr(
+            "automail.core.runtime_secrets.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {},
+        )
+        monkeypatch.setattr(
+            "automail.api.admin.actions.record_action_run",
+            lambda **kwargs: captured.setdefault("recorded", kwargs),
+        )
+
+        class UnexpectedHttpClient:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("exact hosted demo action must not use public HTTP")
+
+        monkeypatch.setattr("automail.api.admin.actions.httpx.Client", UnexpectedHttpClient)
+
+        payload = {
+            "open_ticket": "Open a carrier investigation for order ZF-88310",
+            "actionName": "open_ticket",
+        }
+        result = execute_action_webhook_sync(
+            ActionTriggerRequest(
+                webhook="https://api.mantly.io/demo/logistics/open-ticket",
+                payload=payload,
+            ),
+            tenant_id="demo-tenant",
+            project_id=PROJECT_ID,
+            user_email="agent@example.com",
+            authorization_header="Bearer demo-token",
+        )
+
+        assert captured["validated"] == "https://api.mantly.io/demo/logistics/open-ticket"
+        assert result["status"] == "ok"
+        assert result["response"]["status"] == "open"
+        assert result["response"]["ticketReference"].startswith("ZF-TKT-")
+        assert result["response"]["received"] == payload
+        assert captured["recorded"]["response"] == result["response"]
 
     @pytest.mark.no_gemini
     def test_action_trigger_never_forwards_auth_to_untrusted_demo_path(self, monkeypatch):

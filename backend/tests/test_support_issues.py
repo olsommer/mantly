@@ -11669,7 +11669,7 @@ def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_cita
     )
     assert [item["id"] for item in draft_calls[0]["articles"]] == ["article1", "article2"]
     assert grounding_calls[0]["answer"] == "We can fix this automatically."
-    assert [item["id"] for item in grounding_calls[0]["articles"]] == ["article1"]
+    assert [item["id"] for item in grounding_calls[0]["articles"]] == ["article1", "article2"]
     assert outbound["metadata"]["deliveryRequired"] is True
     ai_run = next(data for path, data in posted if path == "/api/collections/support_ai_runs/records")
     assert ai_run["requires_human"] is False
@@ -11819,6 +11819,17 @@ def test_create_issue_agent_answer_routes_auto_send_without_citations_to_approva
             answer="We can fix this automatically.",
             confidence="high",
             generation_mode="llm",
+        ),
+    )
+    monkeypatch.setattr(
+        issues,
+        "assess_issue_automation_grounding",
+        lambda **_kwargs: AutomationGroundingAssessment(
+            verified=True,
+            status="passed",
+            reason_code="",
+            checked_at="2026-07-17T00:00:00Z",
+            citation_ids=(),
         ),
     )
 
@@ -16310,7 +16321,15 @@ def test_create_customer_portal_message_skips_auto_draft_when_automation_prepare
         lambda **_kwargs: {
             "processed": 1,
             "failed": 0,
-            "items": [{"result": {"actions": [{"type": "prepare_agent_reply", "status": "prepared"}]}}],
+            "items": [{
+                "result": {
+                    "actions": [{
+                        "type": "prepare_agent_reply",
+                        "status": "prepared",
+                        "replyId": "reply-from-rule",
+                    }],
+                },
+            }],
         },
     )
 
@@ -16634,7 +16653,15 @@ def test_create_web_chat_message_skips_update_autopilot_when_automation_prepared
         lambda **_kwargs: {
             "processed": 1,
             "failed": 0,
-            "items": [{"result": {"actions": [{"type": "prepare_agent_reply", "status": "prepared"}]}}],
+            "items": [{
+                "result": {
+                    "actions": [{
+                        "type": "prepare_agent_reply",
+                        "status": "prepared",
+                        "replyId": "reply-from-rule",
+                    }],
+                },
+            }],
         },
     )
 
@@ -18096,6 +18123,73 @@ def test_run_automation_rules_for_issue_prepares_agent_reply(monkeypatch):
     assert action_result["includeFeedbackLink"] is True
     assert action_result["automationContext"]["ruleId"] == "rule123"
     assert action_result["automationContext"]["actionType"] == "prepare_agent_reply"
+
+
+@pytest.mark.parametrize(
+    (
+        "answer",
+        "expected_status",
+        "expected_reason",
+        "expected_run_id",
+        "expected_reply_id",
+    ),
+    [
+        (
+            {"answer": "Analysis only", "reply": None, "run": {"id": "run-answer"}},
+            "answered",
+            "",
+            "run-answer",
+            "",
+        ),
+        (
+            {
+                "answer": "Unsafe draft",
+                "reply": None,
+                "run": {"id": "run-withheld"},
+                "draftBlockedReason": "grounding_check_failed",
+            },
+            "withheld",
+            "grounding_check_failed",
+            "run-withheld",
+            "",
+        ),
+        (
+            {
+                "answer": "Draft created",
+                "reply": {"id": "reply-prepared"},
+                "run": {"id": "run-prepared"},
+            },
+            "prepared",
+            "",
+            "run-prepared",
+            "reply-prepared",
+        ),
+        (None, "skipped", "", "", ""),
+    ],
+)
+def test_automation_answer_only_status_requires_persisted_reply(
+    monkeypatch,
+    answer,
+    expected_status,
+    expected_reason,
+    expected_run_id,
+    expected_reply_id,
+):
+    monkeypatch.setattr(issues, "create_issue_agent_answer", lambda *_args, **_kwargs: answer)
+
+    result = issues._execute_automation_actions(
+        issue={"id": "issue123"},
+        actions=[{"type": "prepare_agent_reply", "createDraft": False}],
+        tenant_id="tenant1",
+        project_id="project1",
+        actor_email="automation",
+    )[0]
+
+    assert result["status"] == expected_status
+    assert result["replyId"] == expected_reply_id
+    assert result["runId"] == expected_run_id
+    assert result["createDraft"] is False
+    assert result["reason"] == expected_reason
 
 
 def test_run_automation_prepare_agent_reply_can_auto_send(monkeypatch):
@@ -20827,6 +20921,7 @@ def test_channel_auto_prepare_runs_full_ticket_prep(monkeypatch):
             "autoSend": False,
             "autoSendPolicy": "",
             "autoSendBlockedReason": "",
+            "reason": "",
         },
     ]
     autopilot_event = next(data for path, data in posted
@@ -20896,6 +20991,7 @@ def test_channel_auto_prepare_can_request_guarded_auto_send(monkeypatch):
         "autoSend": True,
         "autoSendPolicy": "approval_not_required",
         "autoSendBlockedReason": "",
+        "reason": "",
     }
     autopilot_event = next(data for path, data in posted
                            if path == "/api/collections/support_issue_events/records"
@@ -21010,7 +21106,13 @@ def test_channel_auto_prepare_skips_when_automation_prepared_reply(monkeypatch):
         message_id="msg1",
         automation_result={
             "items": [{
-                "result": {"actions": [{"type": "prepare_agent_reply", "status": "prepared"}]},
+                "result": {
+                    "actions": [{
+                        "type": "prepare_agent_reply",
+                        "status": "prepared",
+                        "replyId": "reply-from-rule",
+                    }],
+                },
             }],
         },
     )

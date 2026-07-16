@@ -108,6 +108,36 @@ def _trusted_demo_webhook(url: str) -> bool:
     return bool(candidate.hostname and trusted.hostname and origin(candidate) == origin(trusted))
 
 
+def _trusted_demo_ticket_payload(
+    prepared: _PreparedActionRequest,
+    *,
+    tenant_id: str,
+) -> dict[str, Any] | None:
+    """Handle the hosted demo ticket action without a public network hairpin."""
+    parsed = urlparse(prepared.webhook)
+    if (
+        prepared.method != "POST"
+        or prepared.query
+        or parsed.path != "/demo/logistics/open-ticket"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+        or not _trusted_demo_webhook(prepared.webhook)
+    ):
+        return None
+
+    from automail.core.capabilities import get_account_capabilities
+
+    if not get_account_capabilities(tenant_id).get("canAccessDemoEndpoints", False):
+        return None
+
+    from automail.demo.shipments import open_demo_logistics_ticket
+
+    return open_demo_logistics_ticket(prepared.json_payload or {})
+
+
 def _resolve_action_mapping(value: Any, runtime_values: dict[str, Any], secrets: dict[str, str] | None) -> Any:
     """Resolve action query/body placeholders from runtime payload first, then secrets."""
     if isinstance(value, str):
@@ -283,6 +313,16 @@ async def execute_action_webhook(
     started = time.monotonic()
 
     try:
+        demo_payload = _trusted_demo_ticket_payload(prepared, tenant_id=tenant_id)
+        if demo_payload is not None:
+            return _record_action_success(
+                body,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                user_email=user_email,
+                response_payload=demo_payload,
+                started=started,
+            )
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.request(**_request_kwargs(prepared))
             response.raise_for_status()
@@ -324,6 +364,16 @@ def execute_action_webhook_sync(
     started = time.monotonic()
 
     try:
+        demo_payload = _trusted_demo_ticket_payload(prepared, tenant_id=tenant_id)
+        if demo_payload is not None:
+            return _record_action_success(
+                body,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                user_email=user_email,
+                response_payload=demo_payload,
+                started=started,
+            )
         with httpx.Client(timeout=15.0) as client:
             response = client.request(**_request_kwargs(prepared))
             response.raise_for_status()

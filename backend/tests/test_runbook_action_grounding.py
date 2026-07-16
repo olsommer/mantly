@@ -237,7 +237,13 @@ def test_failed_or_unknown_action_approval_persists_failed_never_success(
     assert events[0]["event_type"] == "action_failed"
 
 
-def _stub_channel_agent_answer(monkeypatch, *, verified: bool):
+def _stub_channel_agent_answer(
+    monkeypatch,
+    *,
+    verified: bool,
+    draft_citation_ids: tuple[str, ...] = (),
+    grounded_citation_ids: tuple[str, ...] = ("article1",),
+):
     issue = {
         "id": "issue1",
         "subject": "Shipment status",
@@ -254,8 +260,18 @@ def _stub_channel_agent_answer(monkeypatch, *, verified: bool):
         "title": "Shipment status",
         "body": "Shipment ZF-42 is in transit.",
         "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
         "metadata": {"visibility": "public", "public": True},
     }
+    unused_article = {
+        "id": "article2",
+        "title": "Returns policy",
+        "body": "Returns require approval.",
+        "status": "published",
+        "metadata": {"visibility": "public", "public": True},
+    }
+    articles = [article, unused_article]
     reply_calls: list[dict] = []
     grounding_calls: list[dict] = []
     monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
@@ -265,17 +281,17 @@ def _stub_channel_agent_answer(monkeypatch, *, verified: bool):
     monkeypatch.setattr(
         issues,
         "_knowledge_article_records_for_agent",
-        lambda **_kwargs: [article],
+        lambda **_kwargs: articles,
     )
     monkeypatch.setattr(
         issues,
         "_rank_knowledge_articles_for_issue",
-        lambda *_args, **_kwargs: [article],
+        lambda *_args, **_kwargs: articles,
     )
     monkeypatch.setattr(
         issues,
         "_rank_knowledge_articles_for_automatic_answer",
-        lambda *_args, **_kwargs: [article],
+        lambda *_args, **_kwargs: articles,
     )
     monkeypatch.setattr(
         issues,
@@ -284,7 +300,7 @@ def _stub_channel_agent_answer(monkeypatch, *, verified: bool):
             answer="Shipment ZF-42 is in transit.",
             confidence="high",
             generation_mode="llm",
-            citation_ids=("article1",),
+            citation_ids=draft_citation_ids,
         ),
     )
 
@@ -295,7 +311,7 @@ def _stub_channel_agent_answer(monkeypatch, *, verified: bool):
             status="passed" if verified else "failed",
             reason_code="" if verified else "ungrounded_answer",
             checked_at="2026-07-16T10:05:00Z",
-            citation_ids=("article1",),
+            citation_ids=grounded_citation_ids,
             claim_count=1,
             unsupported_claims=() if verified else ("Shipment ZF-42 is in transit.",),
             provider="test",
@@ -340,11 +356,89 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert result["draftBlockedReason"] == ""
         assert result["reply"]["id"] == "reply1"
         assert len(reply_calls) == 1
+        assert [article["id"] for article in grounding_calls[0]["articles"]] == [
+            "article1",
+            "article2",
+        ]
+        assert reply_calls[0]["metadata"]["knowledgeArticleIds"] == ["article1"]
+        assert [
+            citation["id"] for citation in reply_calls[0]["metadata"]["citations"]
+        ] == ["article1"]
     else:
         assert result["draftBlockedReason"] == "ungrounded_answer"
         assert result["reply"] is None
         assert result["run"]["id"] == "run1"
         assert reply_calls == []
+
+
+def test_channel_autopilot_auto_send_uses_grounder_derived_citation(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(monkeypatch, verified=True)
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=False,
+        auto_send=True,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(grounding_calls) == 1
+    assert result["autoSend"] is True
+    assert result["autoSendBlockedReason"] == ""
+    assert result["reply"]["status"] == "queued"
+    assert reply_calls[0]["metadata"]["knowledgeArticleIds"] == ["article1"]
+
+
+@pytest.mark.parametrize(
+    (
+        "draft_citation_ids",
+        "grounded_citation_ids",
+        "expected_auto_send",
+        "expected_blocked_reason",
+        "expected_article_ids",
+    ),
+    [
+        ((), ("article1",), True, "", ["article1"]),
+        (("article1",), (), False, "missing_citations", []),
+        (("article1",), ("article2",), False, "unreviewed_citations", ["article2"]),
+    ],
+)
+def test_non_channel_auto_send_checks_exact_grounder_derived_citations(
+    monkeypatch,
+    draft_citation_ids,
+    grounded_citation_ids,
+    expected_auto_send,
+    expected_blocked_reason,
+    expected_article_ids,
+):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+        draft_citation_ids=draft_citation_ids,
+        grounded_citation_ids=grounded_citation_ids,
+    )
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=False,
+        auto_send=True,
+        automation_context={"source": "automation"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(grounding_calls) == 1
+    assert result["autoSend"] is expected_auto_send
+    assert result["autoSendBlockedReason"] == expected_blocked_reason
+    assert result["reply"]["status"] == ("queued" if expected_auto_send else "draft")
+    assert reply_calls[0]["metadata"]["knowledgeArticleIds"] == expected_article_ids
 
 
 def test_blocked_channel_autopilot_package_is_handled_without_pipeline_fallback(monkeypatch):
@@ -372,9 +466,80 @@ def test_blocked_channel_autopilot_package_is_handled_without_pipeline_fallback(
     assert bool(result) is True
 
 
+def test_channel_autopilot_marks_grounding_block_as_withheld(monkeypatch):
+    events: list[dict] = []
+    blocked = {
+        "reply": None,
+        "run": {"id": "run1"},
+        "draftBlockedReason": "grounding_check_failed",
+    }
+    monkeypatch.setattr(issues, "create_issue_agent_answer", lambda *_args, **_kwargs: blocked)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **kwargs: events.append(kwargs))
+
+    result = issues._channel_auto_prepare_agent_reply(
+        channel={
+            "id": "channel1",
+            "channelKey": "email-main",
+            "type": "email",
+            "config": {
+                "autoPrepareAgentReply": True,
+                "autoPrepareTriage": False,
+                "autoPrepareCustomFields": False,
+            },
+        },
+        issue_id="issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email-main",
+        message_id="message1",
+    )
+
+    assert result is blocked
+    assert result["autopilotActions"][-1] == {
+        "type": "prepare_agent_reply",
+        "status": "withheld",
+        "replyId": "",
+        "runId": "run1",
+        "reason": "grounding_check_failed",
+        "autoSendRequested": False,
+        "autoSend": False,
+        "autoSendPolicy": "",
+        "autoSendBlockedReason": "",
+    }
+    assert events[0]["title"] == "Channel autopilot withheld"
+    assert events[0]["metadata"]["draftBlockedReason"] == "grounding_check_failed"
+
+
+def test_automation_prepared_reply_requires_persisted_reply_id():
+    without_reply = {
+        "items": [
+            {
+                "result": {
+                    "actions": [
+                        {"type": "prepare_agent_reply", "status": "prepared", "replyId": ""}
+                    ]
+                }
+            }
+        ]
+    }
+    with_reply = {
+        "items": [
+            {
+                "result": {
+                    "actions": [
+                        {"type": "prepare_agent_reply", "status": "prepared", "replyId": "reply1"}
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert issues._automation_prepared_agent_reply(without_reply) is False
+    assert issues._automation_prepared_agent_reply(with_reply) is True
+
+
 def test_automatic_action_context_distinguishes_pending_from_proven_success():
-    context = issue_agent._automatic_ticket_context(
-        {
+    issue = {
             "id": "issue1",
             "subject": "Delivery exception",
             "status": "ongoing",
@@ -401,8 +566,20 @@ def test_automatic_action_context_distinguishes_pending_from_proven_success():
                 {
                     "type": "runbook_webhook",
                     "status": "failed",
+                    "completedAt": "2026-07-16T10:08:00Z",
+                    "error": "webhook unavailable: " + ("x" * 600),
                     "metadata": {"source": "runbook", "approvalRequired": True},
                     "result": {"proposedAction": {"name": "failed_ticket"}},
+                },
+                {
+                    "type": "runbook_webhook",
+                    "status": "skipped",
+                    "completedAt": "2026-07-16T10:09:00Z",
+                    "metadata": {"source": "runbook", "approvalRequired": True},
+                    "result": {
+                        "proposedAction": {"name": "rejected_ticket", "label": "Rejected ticket"},
+                        "approval": {"note": "Rejected by operator"},
+                    },
                 },
                 {
                     "type": "runbook_webhook",
@@ -442,15 +619,30 @@ def test_automatic_action_context_distinguishes_pending_from_proven_success():
                 },
             ],
         }
-    )
+    context = issue_agent._automatic_ticket_context(issue)
+    knowledge_context = issue_agent._ticket_context(issue)
 
     assert "status" not in context
     assert "summary" not in context
-    assert context["runbookActions"] == [
+    expected_actions = [
         {
             "name": "open_ticket",
             "label": "Open fulfillment ticket",
             "status": "pending_approval",
+        },
+        {
+            "name": "failed_ticket",
+            "label": "failed_ticket",
+            "status": "failed",
+            "completedAt": "2026-07-16T10:08:00Z",
+            "error": ("webhook unavailable: " + ("x" * 600))[:500],
+        },
+        {
+            "name": "rejected_ticket",
+            "label": "Rejected ticket",
+            "status": "skipped",
+            "completedAt": "2026-07-16T10:09:00Z",
+            "error": "Rejected by operator",
         },
         {
             "name": "confirm_ticket",
@@ -460,6 +652,8 @@ def test_automatic_action_context_distinguishes_pending_from_proven_success():
             "proof": {"status": "opened", "ticketReference": "ZF-42"},
         },
     ]
+    assert context["runbookActions"] == expected_actions
+    assert knowledge_context["runbookActions"] == expected_actions
 
 
 def test_automatic_evidence_excludes_generated_messages_and_related_agent_replies():

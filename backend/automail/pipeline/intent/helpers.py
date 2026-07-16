@@ -245,6 +245,13 @@ def _extract_mapping_placeholders(value: Any) -> set[str]:
     return set()
 
 
+def _is_open_ticket_button(action: IntentAction) -> bool:
+    return (
+        action.type == "button"
+        and action.name.strip().lower().replace("-", "_") == "open_ticket"
+    )
+
+
 def _build_process_user_message(
     email: Email,
     identity_result: IdentityResult | None,
@@ -272,7 +279,11 @@ def _build_process_user_message(
         parts.append("\n## Customer Identity\nNo customer record found.")
 
     # Fillable actions (tell the LLM what fields to extract)
-    fillable = [a for a in actions if a.type in ("dropdown", "input", "calendar")]
+    fillable = [
+        a
+        for a in actions
+        if a.type in ("dropdown", "input", "calendar") or _is_open_ticket_button(a)
+    ]
     if fillable:
         parts.append("\n## Action Fields to Fill")
         parts.append(
@@ -287,6 +298,8 @@ def _build_process_user_message(
                 extra = f" (choose from: {', '.join(a.options)})"
             elif a.type == "calendar":
                 extra = " (use ISO 8601 format: YYYY-MM-DD)"
+            elif _is_open_ticket_button(a):
+                extra = " (write a concise ticket task grounded in the email)"
             parts.append(f"- **{a.name}**: {desc}{extra}")
 
     button_actions = [a for a in actions if a.type == "button"]
@@ -294,8 +307,8 @@ def _build_process_user_message(
         parts.append("\n## Action Buttons")
         parts.append(
             "These are fixed user-triggered actions. Use their descriptions as context "
-            "when extracting values for related action fields. Do not return action_fills "
-            "for button actions.",
+            "when extracting values for related action fields. Only return action_fills "
+            "for buttons also listed under Action Fields to Fill.",
         )
         for a in button_actions:
             desc = a.description or a.label or a.name

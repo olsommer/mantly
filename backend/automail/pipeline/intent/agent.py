@@ -34,6 +34,7 @@ from automail.pipeline.intent.helpers import (
     _format_attachment_context,
     _generated_attachment_prompt_items,
     _invoke_agent,
+    _is_open_ticket_button,
     _load_intent_feedback_learnings,
 )
 from automail.pipeline.intent.intents_factory import (
@@ -115,6 +116,29 @@ def _merge_action_fills(actions: list[IntentAction], output: IntentProcessingOut
         if alt_name in fills_by_name:
             action.initial_value = fills_by_name[alt_name]
     return len(fills_by_name)
+
+
+def _default_open_ticket_task(email: Email) -> str:
+    subject = " ".join(email.subject.split())
+    body = " ".join(email.body.split())
+    if subject and body and not body.casefold().startswith(subject.casefold()):
+        task = f"{subject}: {body}"
+    else:
+        task = body or subject
+    return task[:1000].rstrip()
+
+
+def _ensure_open_ticket_action_task(actions: list[IntentAction], email: Email) -> int:
+    task = _default_open_ticket_task(email)
+    if not task:
+        return 0
+
+    filled = 0
+    for action in actions:
+        if _is_open_ticket_button(action) and not str(action.initial_value or "").strip():
+            action.initial_value = task
+            filled += 1
+    return filled
 
 
 def _classification_user_prompt(
@@ -533,11 +557,10 @@ def _handle_matched_intent(
             tenant_id,
             project_id,
         )
-        fills_count = (
-            _merge_action_fills(intent_result.actions, output)
-            if intent_result.actions and isinstance(output, IntentProcessingOutput)
-            else 0
-        )
+        fills_count = 0
+        if intent_result.actions and isinstance(output, IntentProcessingOutput):
+            fills_count = _merge_action_fills(intent_result.actions, output)
+            fills_count += _ensure_open_ticket_action_task(intent_result.actions, email)
         if output.requires_human:
             intent_result.error = output.requires_human_reason
             return intent_result, AgentResponse(

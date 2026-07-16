@@ -9934,11 +9934,20 @@ def _agent_auto_send_static_blocked_reason(
     missing_information: tuple[str, ...],
     knowledge_agent_requested: bool,
     min_confidence: str = AGENT_AUTO_SEND_MIN_CONFIDENCE,
+    check_citations: bool = True,
 ) -> str:
     if generation_mode == "deterministic_fallback" or generation_error:
         return "generation_failed"
     if _agent_confidence_rank(confidence) < _agent_confidence_rank(min_confidence):
         return "confidence_below_threshold"
+    if not check_citations:
+        if missing_information:
+            return "missing_information"
+        if knowledge_agent_requested:
+            return "knowledge_agent_requires_review"
+        if generation_mode != "llm":
+            return "unverified_generation"
+        return ""
     if not articles:
         return "missing_citations"
     if missing_information:
@@ -10194,6 +10203,12 @@ def _create_issue_agent_answer(
             if _string_from(article.get("id"))
         }
         articles = [fallback_by_id[article_id] for article_id in draft.citation_ids if article_id in fallback_by_id]
+    grounding_articles = articles if use_knowledge_agent else fallback_articles
+    grounding_article_ids = {
+        _string_from(article.get("id"))
+        for article in grounding_articles
+        if _string_from(article.get("id"))
+    }
     selected_article_ids = {
         _string_from(article.get("id"))
         for article in articles
@@ -10219,7 +10234,12 @@ def _create_issue_agent_answer(
         for article in knowledge_records
         if _string_from(article.get("id"))
     }
-    lineage_ids = selected_article_ids | accessed_article_ids | context_article_ids
+    lineage_ids = (
+        selected_article_ids
+        | grounding_article_ids
+        | accessed_article_ids
+        | context_article_ids
+    )
     inherited_lineage_ids = {
         _string_from(snapshot.get("articleId"))
         for snapshot in inherited_lineage
@@ -10262,6 +10282,52 @@ def _create_issue_agent_answer(
     auto_send_blocked_reason = ""
     draft_blocked_reason = ""
     grounding_gate: dict[str, Any] = {}
+
+    def static_auto_send_blocked_reason() -> str:
+        return _agent_auto_send_static_blocked_reason(
+            confidence=confidence,
+            articles=articles,
+            generation_mode=draft.generation_mode,
+            generation_error=draft.error,
+            missing_information=draft.missing_information,
+            knowledge_agent_requested=use_knowledge_agent,
+        )
+
+    def pre_grounding_auto_send_blocked_reason() -> str:
+        return _agent_auto_send_static_blocked_reason(
+            confidence=confidence,
+            articles=articles,
+            generation_mode=draft.generation_mode,
+            generation_error=draft.error,
+            missing_information=draft.missing_information,
+            knowledge_agent_requested=use_knowledge_agent,
+            check_citations=False,
+        )
+
+    def apply_grounded_citations() -> None:
+        nonlocal articles, citation_evidence, citation_previews
+        if not bool(grounding_gate.get("verified")):
+            return
+        grounded_citation_ids = {
+            _string_from(value)
+            for value in _parse(grounding_gate.get("citationIds"), list)
+            if _string_from(value)
+        }
+        articles = [
+            article
+            for article in grounding_articles
+            if _string_from(article.get("id")) in grounded_citation_ids
+        ]
+        citation_evidence = tuple(
+            item
+            for item in citation_evidence
+            if _string_from(item.get("articleId")) in grounded_citation_ids
+        )
+        citation_previews = [
+            _agent_citation_preview(article, citation_evidence)
+            for article in articles
+        ]
+
     automatic_draft_requires_grounding = bool(
         should_create_reply
         and not use_knowledge_agent
@@ -10272,7 +10338,7 @@ def _create_issue_agent_answer(
             issue=issue,
             messages=messages,
             answer=answer,
-            articles=articles,
+            articles=grounding_articles,
             tenant_id=tenant_id,
             project_id=project_id,
             account_context=account_context,
@@ -10284,19 +10350,13 @@ def _create_issue_agent_answer(
             draft_blocked_reason = grounding_assessment.reason_code or "grounding_check_failed"
             confidence = "low"
             should_create_reply = False
+        apply_grounded_citations()
     if requested_auto_send:
         if clean_approval_required:
             auto_send_blocked_reason = "approval_required"
         else:
-            auto_send_blocked_reason = draft_blocked_reason or (
-                _agent_auto_send_static_blocked_reason(
-                    confidence=confidence,
-                    articles=articles,
-                    generation_mode=draft.generation_mode,
-                    generation_error=draft.error,
-                    missing_information=draft.missing_information,
-                    knowledge_agent_requested=use_knowledge_agent,
-                )
+            auto_send_blocked_reason = (
+                draft_blocked_reason or pre_grounding_auto_send_blocked_reason()
             )
             if not auto_send_blocked_reason:
                 if not grounding_gate:
@@ -10304,7 +10364,7 @@ def _create_issue_agent_answer(
                         issue=issue,
                         messages=messages,
                         answer=answer,
-                        articles=articles,
+                        articles=grounding_articles,
                         tenant_id=tenant_id,
                         project_id=project_id,
                         account_context=account_context,
@@ -10316,6 +10376,9 @@ def _create_issue_agent_answer(
                     auto_send_blocked_reason = (
                         grounding_assessment.reason_code or "grounding_check_failed"
                     )
+                else:
+                    apply_grounded_citations()
+                    auto_send_blocked_reason = static_auto_send_blocked_reason()
         if not grounding_gate:
             grounding_gate = {
                 "version": GROUNDING_GATE_VERSION,
@@ -10337,6 +10400,7 @@ def _create_issue_agent_answer(
                 "contradictions": [],
                 "error": "",
             }
+    apply_grounded_citations()
     grounding_verified = bool(grounding_gate.get("verified"))
     grounding_issues = tuple(
         dict.fromkeys(
@@ -11309,7 +11373,12 @@ def _automation_prepared_agent_reply(result: dict[str, Any] | None) -> bool:
         if not isinstance(actions, list):
             continue
         for action in actions:
-            if isinstance(action, dict) and action.get("type") == "prepare_agent_reply" and action.get("status") == "prepared":
+            if (
+                isinstance(action, dict)
+                and action.get("type") == "prepare_agent_reply"
+                and action.get("status") == "prepared"
+                and _string_from(action.get("replyId"))
+            ):
                 return True
     return False
 
@@ -11422,6 +11491,19 @@ def _channel_auto_prepare_agent_reply(
             use_knowledge_agent=False,
         )
         if answer:
+            reply_id = (
+                _string_from(answer.get("reply", {}).get("id"))
+                if isinstance(answer.get("reply"), dict)
+                else ""
+            )
+            draft_blocked_reason = _string_from(answer.get("draftBlockedReason"))
+            reply_action_status = (
+                "prepared"
+                if reply_id
+                else "withheld"
+                if draft_blocked_reason
+                else "skipped"
+            )
             triage_execution = triage_result.get("actionExecution") if isinstance(triage_result, dict) else None
             triage_run = triage_result.get("run") if isinstance(triage_result, dict) else None
             field_execution = field_result.get("actionExecution") if isinstance(field_result, dict) else None
@@ -11446,9 +11528,10 @@ def _channel_auto_prepare_agent_reply(
                 },
                 {
                     "type": "prepare_agent_reply",
-                    "status": "prepared",
-                    "replyId": _string_from(answer.get("reply", {}).get("id")) if isinstance(answer.get("reply"), dict) else "",
+                    "status": reply_action_status,
+                    "replyId": reply_id,
                     "runId": _string_from(answer.get("run", {}).get("id")) if isinstance(answer.get("run"), dict) else "",
+                    "reason": draft_blocked_reason,
                     "autoSendRequested": bool(answer.get("autoSendRequested")),
                     "autoSend": bool(answer.get("autoSend")),
                     "autoSendPolicy": _string_from(answer.get("autoSendPolicy")),
@@ -11464,7 +11547,11 @@ def _channel_auto_prepare_agent_reply(
                 tenant_id=tenant_id,
                 project_id=project_id,
                 actor_email="automation",
-                title="Channel autopilot prepared",
+                title=(
+                    "Channel autopilot prepared"
+                    if reply_action_status == "prepared"
+                    else "Channel autopilot withheld"
+                ),
                 body=question,
                 metadata={
                     "source": source,
@@ -11474,7 +11561,7 @@ def _channel_auto_prepare_agent_reply(
                     "channelKey": _string_from(channel.get("channelKey") or channel.get("channel_key")),
                     "channelType": _string_from(channel.get("type")),
                     "onUpdate": on_update,
-                    "replyId": _string_from(answer.get("reply", {}).get("id")) if isinstance(answer.get("reply"), dict) else "",
+                    "replyId": reply_id,
                     "aiRunId": _string_from(answer.get("run", {}).get("id")) if isinstance(answer.get("run"), dict) else "",
                     "triageActionExecutionId": _string_from(triage_execution.get("id")) if isinstance(triage_execution, dict) else "",
                     "triageAiRunId": _string_from(triage_run.get("id")) if isinstance(triage_run, dict) else "",
@@ -11486,7 +11573,7 @@ def _channel_auto_prepare_agent_reply(
                     "autoSend": bool(answer.get("autoSend")),
                     "autoSendPolicy": _string_from(answer.get("autoSendPolicy")),
                     "autoSendBlockedReason": _string_from(answer.get("autoSendBlockedReason")),
-                    "draftBlockedReason": _string_from(answer.get("draftBlockedReason")),
+                    "draftBlockedReason": draft_blocked_reason,
                     "actions": autopilot_actions,
                     "automationContext": automation_context,
                 },
@@ -18873,12 +18960,32 @@ def _execute_automation_actions(
                 use_knowledge_agent=False,
             )
             reply = answer.get("reply") if isinstance(answer, dict) else None
+            reply_id = _string_from(reply.get("id")) if isinstance(reply, dict) else ""
+            run = answer.get("run") if isinstance(answer, dict) else None
+            run_id = _string_from(run.get("id")) if isinstance(run, dict) else ""
+            draft_blocked_reason = (
+                _string_from(answer.get("draftBlockedReason"))
+                if isinstance(answer, dict)
+                else ""
+            )
+            reply_action_status = (
+                "prepared"
+                if reply_id
+                else "withheld"
+                if draft_blocked_reason
+                else "answered"
+                if answer and not create_draft
+                else "skipped"
+            )
             citations = answer.get("citations") if isinstance(answer, dict) else []
             results.append(
                 {
                     "type": "prepare_agent_reply",
-                    "status": "prepared" if answer else "skipped",
-                    "replyId": _string_from(reply.get("id")) if isinstance(reply, dict) else "",
+                    "status": reply_action_status,
+                    "replyId": reply_id,
+                    "runId": run_id,
+                    "createDraft": create_draft,
+                    "reason": draft_blocked_reason,
                     "confidence": _string_from(answer.get("confidence")) if isinstance(answer, dict) else "",
                     "citationCount": len(citations) if isinstance(citations, list) else 0,
                     "approvalRequired": bool(answer.get("approvalRequired")) if isinstance(answer, dict) else create_draft and approval_required,

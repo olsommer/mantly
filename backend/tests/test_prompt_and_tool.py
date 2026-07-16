@@ -215,6 +215,49 @@ def _make_email(**kwargs) -> Email:
     )
 
 
+@pytest.mark.no_gemini
+def test_open_ticket_action_gets_email_task_when_model_omits_fill():
+    from automail.pipeline.intent.agent import _ensure_open_ticket_action_task
+
+    actions = [
+        IntentAction(name="open_ticket", label="Open ticket", type="button"),
+        IntentAction(name="retry_delivery", label="Retry delivery", type="button"),
+    ]
+
+    filled = _ensure_open_ticket_action_task(
+        actions,
+        _make_email(
+            subject="Damaged parcel for ZF-88310",
+            body="Outer carton crushed; please open a carrier claim.",
+        ),
+    )
+
+    assert filled == 1
+    assert actions[0].initial_value == (
+        "Damaged parcel for ZF-88310: Outer carton crushed; please open a carrier claim."
+    )
+    assert actions[1].initial_value is None
+
+
+@pytest.mark.no_gemini
+def test_open_ticket_action_preserves_model_task():
+    from automail.pipeline.intent.agent import _ensure_open_ticket_action_task, _merge_action_fills
+
+    action = IntentAction(name="open-ticket", label="Open ticket", type="button")
+    output = IntentProcessingOutput(
+        action_fills=[
+            {
+                "name": "open_ticket",
+                "initial_value": "Open carrier investigation for tracking TRK-42",
+            }
+        ]
+    )
+
+    assert _merge_action_fills([action], output) == 1
+    assert _ensure_open_ticket_action_task([action], _make_email()) == 0
+    assert action.initial_value == "Open carrier investigation for tracking TRK-42"
+
+
 # ============================================================
 # Email prompt tests
 # ============================================================
@@ -1067,6 +1110,27 @@ class TestIntentAttachmentContext:
         assert "## Action Buttons" in prompt
         assert "Open the claim detail page for the extracted claim" in prompt
         assert "uses: claim_number" in prompt
+
+    @pytest.mark.no_gemini
+    def test_processing_prompt_requests_grounded_open_ticket_task(self):
+        from automail.pipeline.intent.agent import _build_process_user_message
+
+        prompt = _build_process_user_message(
+            _make_email(body="Please open a carrier investigation for order ZF-88310."),
+            None,
+            [
+                IntentAction(
+                    type="button",
+                    name="open_ticket",
+                    label="Open ticket",
+                    description="Open a fulfillment exception ticket",
+                ),
+            ],
+        )
+
+        assert "## Action Fields to Fill" in prompt
+        assert "write a concise ticket task grounded in the email" in prompt
+        assert "Do not return action_fills for button actions" not in prompt
 
     @pytest.mark.no_gemini
     def test_response_prompt_includes_pre_generated_tool_attachments(self, monkeypatch):

@@ -1001,6 +1001,25 @@ function isWorkflowProofEvent(event: SupportIssueActivityEvent): boolean {
 
 function activityEventTitle(event: SupportIssueActivityEvent): string {
     if (isWorkflowProofEvent(event)) return 'Lifecycle proof';
+    if (event.eventType === 'channel_agent_autopilot') {
+        const metadata = event.metadata ?? {};
+        const rawActions: unknown[] = Array.isArray(metadata.actions)
+            ? metadata.actions as unknown[]
+            : [];
+        const replyAction: unknown = rawActions
+            .find(action => isRecord(action)
+                && textFrom(action.type).toLowerCase() === 'prepare_agent_reply');
+        const replyId = textFrom(metadata.replyId ?? metadata.reply_id)
+            || (isRecord(replyAction) ? textFrom(replyAction.replyId ?? replyAction.reply_id) : '');
+        const draftBlockedReason = textFrom(
+            metadata.draftBlockedReason ?? metadata.draft_blocked_reason,
+        );
+        const replyActionClaimedPrepared = isRecord(replyAction)
+            && textFrom(replyAction.status).toLowerCase() === 'prepared';
+        if (!replyId && (draftBlockedReason || replyActionClaimedPrepared)) {
+            return 'Channel autopilot reply withheld';
+        }
+    }
     return event.title || event.eventType;
 }
 
@@ -1238,6 +1257,19 @@ function autopilotActionStatus(actions: AutopilotActionProof[], type: string): s
     return actions.find(action => action.type === type)?.status ?? '';
 }
 
+function autopilotDraftWithheldReason(reason: string): string {
+    if (reason === 'ungrounded_answer') {
+        return 'The answer was not sufficiently grounded, so no reply was created.';
+    }
+    if (reason === 'grounding_evidence_incomplete') {
+        return 'Grounding evidence was incomplete, so no reply was created.';
+    }
+    if (reason === 'grounding_check_failed') {
+        return 'Grounding verification did not pass, so no reply was created.';
+    }
+    return reason || 'No reply was created.';
+}
+
 function autopilotPackageGaps(actions: AutopilotActionProof[]): string[] {
     const gaps: string[] = [];
     if (autopilotActionStatus(actions, 'prepare_triage') !== 'prepared') gaps.push('Triage');
@@ -1261,10 +1293,25 @@ function latestAutopilotProof(issue: SupportIssue): AutopilotProof | null {
         : isRecord(metadata.automation_context)
             ? metadata.automation_context
             : {};
+    const replyId = textFrom(metadata.replyId ?? metadata.reply_id);
+    const draftBlockedReason = textFrom(
+        metadata.draftBlockedReason ?? metadata.draft_blocked_reason,
+    ).toLowerCase();
     const actions = (Array.isArray(metadata.actions) ? metadata.actions : [])
         .map(autopilotActionProof)
-        .filter((action): action is AutopilotActionProof => Boolean(action));
-    const replyId = textFrom(metadata.replyId ?? metadata.reply_id);
+        .filter((action): action is AutopilotActionProof => Boolean(action))
+        .map(action => {
+            if (action.type !== 'prepare_agent_reply') return action;
+            const provenReplyId = action.replyId || replyId;
+            if (action.status === 'prepared' && !provenReplyId) {
+                return {
+                    ...action,
+                    status: 'withheld',
+                    reason: action.reason || autopilotDraftWithheldReason(draftBlockedReason),
+                };
+            }
+            return provenReplyId === action.replyId ? action : { ...action, replyId: provenReplyId };
+        });
     const aiRunId = textFrom(metadata.aiRunId ?? metadata.ai_run_id);
     const gaps = autopilotPackageGaps(actions);
     const failed = event.eventType === 'channel_agent_autopilot_failed';
@@ -9728,8 +9775,18 @@ export function Inbox({ projectId }: InboxProps) {
     const autopilotProofPanel = selectedIssue ? (() => {
         const proof = latestAutopilotProof(selectedIssue);
         if (!proof) return null;
+        const replyWithheld = proof.actions.some(
+            action => action.type === 'prepare_agent_reply' && action.status === 'withheld',
+        );
         const proofBadgeLabel = proof.complete ? 'Complete' : proof.failed ? 'Failed' : 'Needs review';
         const proofBadgeVariant = proof.failed ? 'destructive' : proof.complete ? 'secondary' : 'outline';
+        const proofDescription = proof.failed
+            ? 'Channel automation failed.'
+            : replyWithheld
+                ? 'Agent reply was withheld because no grounded draft was created.'
+                : proof.complete
+                    ? 'Agent package prepared from channel automation.'
+                    : 'Agent package needs review.';
         return (
             <section data-autopilot-proof-panel className="rounded-md border bg-background p-3">
                 <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
@@ -9738,8 +9795,8 @@ export function Inbox({ projectId }: InboxProps) {
                             <Sparkles className="size-4 shrink-0 text-muted-foreground" />
                             <span className="truncate">{t('Autopilot proof')}</span>
                         </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                            {t('Agent package prepared from channel automation.')}
+                        <div data-autopilot-proof-description className="mt-1 text-xs text-muted-foreground">
+                            {t(proofDescription)}
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -9766,7 +9823,12 @@ export function Inbox({ projectId }: InboxProps) {
                 )}
                 <div className="grid gap-2 sm:grid-cols-3">
                     {proof.actions.map(action => (
-                        <div key={action.type} className="rounded-md border bg-muted/20 p-2 text-xs">
+                        <div
+                            key={action.type}
+                            data-autopilot-action={action.type}
+                            data-autopilot-action-status={action.status}
+                            className="rounded-md border bg-muted/20 p-2 text-xs"
+                        >
                             <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
                                 <span className="min-w-0 truncate font-medium">{t(action.label)}</span>
                                 <Badge variant={autopilotStatusVariant(action.status)} className="font-normal">

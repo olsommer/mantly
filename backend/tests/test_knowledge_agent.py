@@ -923,6 +923,24 @@ def test_automation_draft_requires_independent_grounding_for_auto_send(
             "error",
             "grounding_check_failed",
         ),
+        (
+            AutomationGroundingOutput(
+                verdict="grounded",
+                answer_sha256=issue_agent.grounding_text_sha256("A refund has already been issued."),
+                checked_citation_ids=["unknown-citation"],
+                unit_assessments=[
+                    AutomationGroundingUnitAssessment(
+                        unit_id="u001",
+                        unit_sha256=issue_agent.grounding_text_sha256("A refund has already been issued."),
+                        supported=True,
+                        evidence_ids=["shipping-policy"],
+                    )
+                ],
+                contradictions=[],
+            ),
+            "error",
+            "grounding_check_failed",
+        ),
     ],
 )
 def test_grounding_gate_fails_closed_for_unsupported_or_unknown_evidence(
@@ -971,7 +989,7 @@ def test_grounding_answer_units_cover_every_non_whitespace_character() -> None:
     assert all(character.isspace() or index in covered for index, character in enumerate(answer))
 
 
-@pytest.mark.parametrize("failure", ["missing_unit", "wrong_hash", "unused_citation"])
+@pytest.mark.parametrize("failure", ["missing_unit", "wrong_hash"])
 def test_grounding_gate_rejects_incomplete_unit_protocol(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
@@ -989,11 +1007,8 @@ def test_grounding_gate_rejects_incomplete_unit_protocol(
     ]
     if failure == "missing_unit":
         assessments.pop()
-    elif failure == "wrong_hash":
-        assessments[0].unit_sha256 = "0" * 64
     else:
-        assessments[0].evidence_ids = ["ticket"]
-        assessments[1].evidence_ids = ["ticket"]
+        assessments[0].unit_sha256 = "0" * 64
     output = AutomationGroundingOutput(
         verdict="grounded",
         answer_sha256=issue_agent.grounding_text_sha256(answer),
@@ -1030,6 +1045,71 @@ def test_grounding_gate_rejects_incomplete_unit_protocol(
     assert result.verified is False
     assert result.status == "error"
     assert result.reason_code == "grounding_check_failed"
+
+
+@pytest.mark.parametrize(
+    "checked_citation_ids",
+    [[], ["shipping-policy", "shipping-policy"]],
+)
+def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes(
+    monkeypatch: pytest.MonkeyPatch,
+    checked_citation_ids: list[str],
+) -> None:
+    answer = "The parcel is delayed."
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeGroundingAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            return {
+                "structured_response": AutomationGroundingOutput(
+                    verdict="grounded",
+                    answer_sha256="incorrect-redundant-top-level-hash",
+                    checked_citation_ids=checked_citation_ids,
+                    unit_assessments=[
+                        AutomationGroundingUnitAssessment(
+                            unit_id="u001",
+                            unit_sha256=issue_agent.grounding_text_sha256(answer),
+                            supported=True,
+                            evidence_ids=["shipping-policy"],
+                        )
+                    ],
+                    contradictions=[],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeGroundingAgent())
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue={"id": "issue-1", "subject": "Parcel delayed"},
+        messages=[],
+        answer=answer,
+        articles=_articles(),
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.citation_ids == ("shipping-policy",)
+    assert [snapshot["id"] for snapshot in result.evidence_snapshots] == ["shipping-policy"]
+
+
+def test_grounding_prompt_allows_unused_supplied_articles() -> None:
+    prompt = issue_agent._GROUNDING_SYSTEM_PROMPT
+
+    assert "Omit unused articles; the list may be empty." in prompt
+    assert "Never force an unused article onto an answer unit" in prompt
+    assert "must contain every supplied knowledge article ID" not in prompt
+    assert "Every supplied knowledge citation ID must support" not in prompt
 
 
 def test_grounding_gate_skips_model_when_answer_has_too_many_units(
@@ -1089,8 +1169,9 @@ def test_grounding_gate_skips_model_for_incomplete_evidence(monkeypatch: pytest.
 
 def test_grounding_gate_capacity_exhaustion_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     class NoCapacity:
-        def acquire(self, *, blocking: bool) -> bool:
-            assert blocking is False
+        def acquire(self, *, blocking: bool, timeout: float) -> bool:
+            assert blocking is True
+            assert timeout == issue_agent.GROUNDING_AGENT_SLOT_WAIT_SECONDS
             return False
 
     monkeypatch.setattr(issue_agent, "_GROUNDING_AGENT_SLOTS", NoCapacity())
@@ -1109,6 +1190,59 @@ def test_grounding_gate_capacity_exhaustion_fails_closed(monkeypatch: pytest.Mon
     assert "capacity" in result.error.lower()
 
 
+def test_grounding_gate_waits_for_capacity_within_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer = "Candidate answer."
+    slot = threading.BoundedSemaphore(1)
+    assert slot.acquire(blocking=False)
+    release_timer = threading.Timer(0.02, slot.release)
+    release_timer.start()
+    monkeypatch.setattr(issue_agent, "_GROUNDING_AGENT_SLOTS", slot)
+    monkeypatch.setattr(issue_agent, "GROUNDING_AGENT_SLOT_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeGroundingAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            return {
+                "structured_response": AutomationGroundingOutput(
+                    verdict="grounded",
+                    answer_sha256=issue_agent.grounding_text_sha256(answer),
+                    checked_citation_ids=["shipping-policy"],
+                    unit_assessments=[
+                        AutomationGroundingUnitAssessment(
+                            unit_id="u001",
+                            unit_sha256=issue_agent.grounding_text_sha256(answer),
+                            supported=True,
+                            evidence_ids=["shipping-policy"],
+                        )
+                    ],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeGroundingAgent())
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue={"id": "issue-1"},
+        messages=[],
+        answer=answer,
+        articles=[_articles()[0]],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+    release_timer.join(timeout=1)
+
+    assert result.verified is True
+    assert result.status == "passed"
+
+
 def test_grounding_gate_deadline_holds_slot_and_records_late_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1119,8 +1253,9 @@ def test_grounding_gate_deadline_holds_slot_and_records_late_usage(
     usage_results: list[dict[str, Any]] = []
 
     class TrackingSlot:
-        def acquire(self, *, blocking: bool) -> bool:
-            assert blocking is False
+        def acquire(self, *, blocking: bool, timeout: float) -> bool:
+            assert blocking is True
+            assert timeout == issue_agent.GROUNDING_AGENT_SLOT_WAIT_SECONDS
             return True
 
         def release(self) -> None:

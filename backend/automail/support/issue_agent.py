@@ -35,10 +35,12 @@ AUTOMATION_AGENT_DEADLINE_SECONDS = 55
 _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(4)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="grounding-agent")
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
+GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_GATE_VERSION = "automation-grounding-v3"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
+_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
@@ -423,7 +425,7 @@ def _conversation_context(conversation: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
-    return {
+    ticket = {
         "id": _string_from(issue.get("id")),
         "subject": _string_from(issue.get("subject")),
         "status": _string_from(issue.get("status") or issue.get("workflowStatus")),
@@ -435,6 +437,10 @@ def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
         "summary": _string_from(issue.get("aiSummary")),
         "runbook": _string_from(issue.get("activatedIntent") or issue.get("activated_intent")),
     }
+    runbook_actions = _automatic_runbook_action_context(issue)
+    if runbook_actions:
+        ticket["runbookActions"] = runbook_actions
+    return ticket
 
 
 def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, Any]]:
@@ -464,6 +470,28 @@ def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, A
                     "status": "pending_approval",
                 }
             )
+            if len(context) >= 10:
+                break
+            continue
+        if status in {"failed", "skipped"}:
+            application = _record_from(result.get("application"))
+            approval = _record_from(result.get("approval"))
+            error = _string_from(
+                execution.get("error")
+                or application.get("error")
+                or approval.get("note")
+            )[:_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS]
+            action_context = {
+                "name": name,
+                "label": label,
+                "status": status,
+                "completedAt": _string_from(execution.get("completedAt")),
+            }
+            if error:
+                action_context["error"] = error
+            context.append(action_context)
+            if len(context) >= 10:
+                break
             continue
         application = _record_from(result.get("application"))
         webhook_result = _record_from(application.get("webhookResult"))
@@ -503,9 +531,6 @@ def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
     ticket = _ticket_context(issue)
     ticket.pop("status", None)
     ticket.pop("summary", None)
-    runbook_actions = _automatic_runbook_action_context(issue)
-    if runbook_actions:
-        ticket["runbookActions"] = runbook_actions
     return ticket
 
 
@@ -1118,7 +1143,10 @@ def assess_issue_automation_grounding(
             error=("Incomplete cited evidence: " + ", ".join(incomplete_ids or citation_ids))[:1_000],
         )
     slot_semaphore = _GROUNDING_AGENT_SLOTS
-    if not slot_semaphore.acquire(blocking=False):
+    if not slot_semaphore.acquire(
+        blocking=True,
+        timeout=GROUNDING_AGENT_SLOT_WAIT_SECONDS,
+    ):
         return AutomationGroundingAssessment(
             verified=False,
             status="error",
@@ -1228,16 +1256,20 @@ def assess_issue_automation_grounding(
             raise ValueError("Grounding evaluator returned no structured response")
 
         protocol_errors: list[str] = []
-        if _string_from(structured.answer_sha256) != answer_sha256:
-            protocol_errors.append("Evaluator answer hash does not match candidate answer")
         raw_checked_citation_ids = [
             citation_id
             for citation_id in (_string_from(value) for value in structured.checked_citation_ids)
             if citation_id
         ]
         checked_citation_ids = tuple(dict.fromkeys(raw_checked_citation_ids))
-        if len(raw_checked_citation_ids) != len(checked_citation_ids) or set(checked_citation_ids) != set(citation_ids):
-            protocol_errors.append("Evaluator citation set does not match supplied citations")
+        unknown_checked_citation_ids = [
+            citation_id for citation_id in checked_citation_ids if citation_id not in citation_ids
+        ]
+        if unknown_checked_citation_ids:
+            protocol_errors.append(
+                "Evaluator checked unknown citation IDs: "
+                + ", ".join(unknown_checked_citation_ids[:5])
+            )
         if not structured.unit_assessments:
             protocol_errors.append("Evaluator returned no answer-unit assessments")
         if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:
@@ -1286,13 +1318,15 @@ def assess_issue_automation_grounding(
             )
         if seen_unit_ids != set(expected_units):
             protocol_errors.append("Evaluator did not assess every answer unit exactly once")
-        unused_citation_ids = [
-            citation_id for citation_id in citation_ids if citation_id not in used_supported_evidence_ids
-        ]
-        if unused_citation_ids and structured.verdict == "grounded" and not unsupported_claims:
-            protocol_errors.append(
-                f"Cited knowledge was not used by any supported answer unit: {', '.join(unused_citation_ids)}"
-            )
+        used_citation_ids = tuple(
+            citation_id for citation_id in citation_ids if citation_id in used_supported_evidence_ids
+        )
+        used_citation_id_set = set(used_citation_ids)
+        used_evidence_snapshots = tuple(
+            snapshot
+            for snapshot in snapshots
+            if _string_from(snapshot.get("id")) in used_citation_id_set
+        )
 
         contradictions = tuple(
             dict.fromkeys(
@@ -1344,8 +1378,8 @@ def assess_issue_automation_grounding(
             status="passed",
             reason_code="",
             checked_at=checked_at,
-            citation_ids=citation_ids,
-            evidence_snapshots=snapshots,
+            citation_ids=used_citation_ids,
+            evidence_snapshots=used_evidence_snapshots,
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,

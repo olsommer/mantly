@@ -1256,20 +1256,6 @@ def assess_issue_automation_grounding(
             raise ValueError("Grounding evaluator returned no structured response")
 
         protocol_errors: list[str] = []
-        raw_checked_citation_ids = [
-            citation_id
-            for citation_id in (_string_from(value) for value in structured.checked_citation_ids)
-            if citation_id
-        ]
-        checked_citation_ids = tuple(dict.fromkeys(raw_checked_citation_ids))
-        unknown_checked_citation_ids = [
-            citation_id for citation_id in checked_citation_ids if citation_id not in citation_ids
-        ]
-        if unknown_checked_citation_ids:
-            protocol_errors.append(
-                "Evaluator checked unknown citation IDs: "
-                + ", ".join(unknown_checked_citation_ids[:5])
-            )
         if not structured.unit_assessments:
             protocol_errors.append("Evaluator returned no answer-unit assessments")
         if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:

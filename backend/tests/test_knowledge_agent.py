@@ -923,24 +923,6 @@ def test_automation_draft_requires_independent_grounding_for_auto_send(
             "error",
             "grounding_check_failed",
         ),
-        (
-            AutomationGroundingOutput(
-                verdict="grounded",
-                answer_sha256=issue_agent.grounding_text_sha256("A refund has already been issued."),
-                checked_citation_ids=["unknown-citation"],
-                unit_assessments=[
-                    AutomationGroundingUnitAssessment(
-                        unit_id="u001",
-                        unit_sha256=issue_agent.grounding_text_sha256("A refund has already been issued."),
-                        supported=True,
-                        evidence_ids=["shipping-policy"],
-                    )
-                ],
-                contradictions=[],
-            ),
-            "error",
-            "grounding_check_failed",
-        ),
     ],
 )
 def test_grounding_gate_fails_closed_for_unsupported_or_unknown_evidence(
@@ -1049,7 +1031,12 @@ def test_grounding_gate_rejects_incomplete_unit_protocol(
 
 @pytest.mark.parametrize(
     "checked_citation_ids",
-    [[], ["shipping-policy", "shipping-policy"]],
+    [
+        [],
+        ["shipping-policy", "shipping-policy"],
+        ["messages", "ticket"],
+        ["unknown-redundant-echo"],
+    ],
 )
 def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes(
     monkeypatch: pytest.MonkeyPatch,

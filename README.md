@@ -2,30 +2,34 @@
 
 **Customer support that runs itself.**
 
-Mantly is an agentic omnichannel customer-support platform. It turns messages
-into tickets, activates company-defined runbooks, performs permitted actions,
-involves humans where configured, and replies through the originating channel.
+Mantly is an agentic customer-support platform. It turns messages into tickets,
+activates company-defined runbooks, performs permitted actions, involves humans
+where configured, and replies through the originating channel.
 
 > **Status:** Active development. The [product vision](docs/product-vision.md)
-> describes intended direction, not production-readiness claims. Current
-> implementation detail lives in the
-> [support-system RFC](docs/pylon-pivot-rfc.md).
+> describes the long-term direction. The active validation boundary is the
+> [email-first V1 scope](docs/v1-scope.md), and current implementation detail
+> lives in the [support-system RFC](docs/pylon-pivot-rfc.md). No broader
+> production-readiness claim should be inferred from functionality that exists
+> outside the V1 contract.
 
 ## Product
 
 | Pillar | Purpose |
 | --- | --- |
-| **Inbox** | Omnichannel ticket inbox and system of record. |
+| **Inbox** | Ticket inbox and system of record. Email is the required V1 channel. |
 | **Runbook Agent** | Matches executable runbooks and handles configured actions and responses. |
 | **Knowledge Agent** | Helps humans investigate tickets using permitted company knowledge. |
 
 ```text
-channel -> ticket -> runbook or human handling -> actions + response -> channel
+email -> ticket -> runbook or human handling -> actions + response -> email
 ```
 
-Mantly prioritizes higher full-automation rates, lower cost per resolution,
-faster support, and consistent answer quality. It should not become a generic
-workflow builder or a legacy helpdesk with an AI sidebar.
+The long-term product is omnichannel. V1 deliberately proves one email-first
+workflow and three production-quality runbooks before channel expansion.
+Mantly prioritizes higher verified full-automation rates, lower cost per
+resolution, faster support, and consistent answer quality. It should not become
+a generic workflow builder or a legacy helpdesk with an AI sidebar.
 
 ## Repository
 
@@ -38,8 +42,8 @@ workflow builder or a legacy helpdesk with an AI sidebar.
 | `pocketbase/` | PocketBase image and startup logic |
 | `demo/` | Demo fixtures, actions, pipelines, and sample data |
 | `deploy/` | Customer deployment assets |
-| `docs/` | Product, implementation, and deployment documentation |
-| `scripts/` | Quality, release, packaging, and smoke-test tooling |
+| `docs/` | Product, implementation, operations, security, and deployment documentation |
+| `scripts/` | Quality, release, packaging, backup, and smoke-test tooling |
 
 ## Local development
 
@@ -103,7 +107,7 @@ Optional frontend development:
 
 ## Quality checks
 
-Run repository lint, type, and frontend build checks, then backend tests:
+Run repository lint, type, frontend build, and backend tests:
 
 ```sh
 ./scripts/check-quality.sh
@@ -112,6 +116,7 @@ Run repository lint, type, and frontend build checks, then backend tests:
 
 ## Documentation
 
+- [Active email-first V1 scope](docs/v1-scope.md)
 - [Product vision](docs/product-vision.md)
 - [Current support-system RFC](docs/pylon-pivot-rfc.md)
 - [Founder-led pilot runbook](PILOT_RUNBOOK.md)

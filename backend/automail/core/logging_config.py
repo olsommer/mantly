@@ -72,8 +72,8 @@ class RedactingTextFormatter(logging.Formatter):
     """Human-readable local format that still redacts common secrets/content."""
 
     def format(self, record: logging.LogRecord) -> str:
-        record.request_id = request_id() or "-"
-        record.correlation_id = correlation_id() or "-"
+        setattr(record, "request_id", request_id() or "-")
+        setattr(record, "correlation_id", correlation_id() or "-")
         return redact_text(super().format(record))
 
 

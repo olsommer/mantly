@@ -6733,6 +6733,50 @@ def test_email_http_smoke_uses_provider_pipeline_url():
     assert admin_channels._smoke_url("webhook", setup) == setup["inboundWebhookUrl"]
 
 
+def test_email_provider_smoke_payload_uses_email_webhook_shape():
+    payload, provider, event_id, message_id = admin_channels._provider_smoke_payload(
+        "email-main",
+        "email",
+        admin_channels.ChannelTestMessageInput(
+            body="Where is order ZF-1042?\nPlease use confirmed shipment facts only.",
+            author_name="Lena Schmidt",
+            author_email="lena.schmidt@example-shop.de",
+            thread_id="email-thread-1",
+            message_id="email-message-1",
+            event_id="email-event-1",
+            attachments=[{
+                "id": "packing-slip-1",
+                "filename": "packing-slip.pdf",
+                "contentType": "application/pdf",
+            }],
+        ),
+    )
+
+    assert provider == "email"
+    assert event_id == "email-event-1"
+    assert message_id == "email-message-1"
+    assert payload == {
+        "email": {
+            "messageId": "email-message-1",
+            "threadId": "email-thread-1",
+            "subject": "Where is order ZF-1042?",
+            "fromAddress": "lena.schmidt@example-shop.de",
+            "fromName": "Lena Schmidt",
+            "body": "Where is order ZF-1042?\nPlease use confirmed shipment facts only.",
+            "attachments": [{
+                "id": "packing-slip-1",
+                "filename": "packing-slip.pdf",
+                "contentType": "application/pdf",
+            }],
+        },
+        "metadata": {
+            "source": "admin_smoke",
+            "channelKey": "email-main",
+            "eventId": "email-event-1",
+        },
+    }
+
+
 def test_whatsapp_provider_smoke_payload_uses_cloud_api_shape():
     payload, provider, event_id, message_id = admin_channels._provider_smoke_payload(
         "whatsapp-main",

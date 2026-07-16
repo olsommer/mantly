@@ -8193,6 +8193,29 @@ def _provider_smoke_payload(channel_key: str, channel_type: str, body: ChannelTe
     author_name = body.author_name.strip() or "Test customer"
     author_email = body.author_email.strip() or "customer@example.com"
     attachments = _smoke_attachments(body.attachments)
+    if channel_type == "email":
+        subject = next((line.strip() for line in text.splitlines() if line.strip()), "Admin support smoke")[:160]
+        return (
+            {
+                "email": {
+                    "messageId": message_id,
+                    "threadId": thread_ref or message_id,
+                    "subject": subject,
+                    "fromAddress": author_email,
+                    "fromName": author_name,
+                    "body": text,
+                    "attachments": attachments,
+                },
+                "metadata": {
+                    "source": "admin_smoke",
+                    "channelKey": channel_key,
+                    "eventId": event_id,
+                },
+            },
+            "email",
+            event_id,
+            message_id,
+        )
     if channel_type == "slack":
         slack_ts = message_id
         event: dict[str, Any] = {
@@ -9151,6 +9174,14 @@ def _run_channel_smoke(
         )
     elif provider == "teams":
         result = ingest_teams_event(
+            channel_key,
+            payload=payload,
+            tenant_id=ctx.tenant_id,
+            project_id=ctx.project_id,
+            source="admin-smoke",
+        )
+    elif provider == "email":
+        result = ingest_email_webhook(
             channel_key,
             payload=payload,
             tenant_id=ctx.tenant_id,

@@ -442,6 +442,8 @@ AGENT_CONFIDENCE_RANK = {
 }
 AGENT_AUTO_SEND_MIN_CONFIDENCE = "high"
 AGENT_KNOWLEDGE_CORPUS_LIMIT = 100
+AUTOMATIC_KNOWLEDGE_MIN_SCORE = 10
+AUTOMATIC_KNOWLEDGE_CUSTOMER_MESSAGE_LIMIT = 3
 LOW_CSAT_RECOVERY_MAX_RATING = 2
 LOW_CSAT_TAG = "low-csat"
 DUPLICATE_SUBJECT_STOP_WORDS = KNOWLEDGE_STOP_WORDS | {
@@ -1232,6 +1234,103 @@ def _action_log(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
             }
         )
     return entries
+
+
+def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
+    result = _record_from(intent_result)
+    actions = result.get("actions")
+    if not isinstance(actions, list):
+        return []
+    proposals: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if "enabled" in action and not _bool_from(action.get("enabled")):
+            continue
+        name = _string_from(action.get("name"))
+        label = _string_from(action.get("label") or name)
+        action_type = _string_from(action.get("type") or "button").lower()
+        separate_call = _bool_from(action.get("separateCall") or action.get("separate_call"))
+        if action_type != "button" and not separate_call:
+            continue
+        webhook = _string_from(action.get("webhook"))
+        if not name or not label or not webhook:
+            continue
+        payload = _record_from(action.get("payload"))
+        payload.update({"actionName": name, "actionLabel": label})
+        initial_value = _string_from(action.get("initialValue") or action.get("initial_value"))
+        if initial_value:
+            payload[name] = initial_value
+        proposals.append(
+            {
+                "type": "runbook_webhook",
+                "name": name,
+                "label": label,
+                "actionType": action_type,
+                "webhook": webhook,
+                "method": _string_from(action.get("method") or "POST").upper(),
+                "payload": payload,
+                "query": _record_from(action.get("query")),
+                "body": _record_from(action.get("body")),
+                "headers": _record_from(action.get("headers")),
+            }
+        )
+    return proposals
+
+
+def _prepare_runbook_action_approvals(
+    *,
+    issue_id: str,
+    intent_result: dict[str, Any] | None,
+    source_message_id: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for proposed_action in _runbook_action_proposals(intent_result):
+        action_key = _key_from(
+            f"runbook:{source_message_id}:{_string_from(proposed_action.get('name'))}"
+        )
+        existing = _first(
+            "support_action_executions",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"action_key='{_escape_pb(action_key)}'"
+                ),
+            ),
+        )
+        if existing:
+            prepared.append(_normalize_action_execution(existing))
+            continue
+        execution = create_issue_action_execution(
+            issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            requested_by="automation",
+            action_key=action_key,
+            label=_string_from(proposed_action.get("label")),
+            action_type="runbook_webhook",
+            status="pending",
+            result={
+                "summary": "Runbook action ready for approval",
+                "proposedAction": proposed_action,
+            },
+            metadata={
+                "source": "runbook",
+                "approvalRequired": True,
+                "approved": False,
+                "reviewStatus": "pending",
+                "sourceMessageId": source_message_id,
+                "runbookAction": _string_from(proposed_action.get("name")),
+                "proposedAction": proposed_action,
+            },
+        )
+        if execution:
+            prepared.append(execution)
+    return prepared
 
 
 def _ai_summary(
@@ -6617,6 +6716,13 @@ def upsert_issue_from_chat(
             metadata={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
         )
         if intent_matched:
+            _prepare_runbook_action_approvals(
+                issue_id=existing["id"],
+                intent_result=intent_result,
+                source_message_id=email_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
             automation_result = _run_message_update_automations(
                 issue=issue,
                 tenant_id=tenant_id,
@@ -6761,6 +6867,13 @@ def upsert_issue_from_chat(
         },
     )
     if intent_matched:
+        _prepare_runbook_action_approvals(
+            issue_id=rec["id"],
+            intent_result=intent_result,
+            source_message_id=email_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
         automation_result = _run_automation_rules_for_issue(
             issue=rec,
             trigger="issue_created",
@@ -8379,6 +8492,39 @@ def _issue_context_text(issue: dict[str, Any], messages: list[dict[str, Any]]) -
     return "\n".join(part for part in parts if part)
 
 
+def _automatic_knowledge_context_text(
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    question: str = "",
+) -> str:
+    parts = [
+        _string_from(question),
+        _string_from(issue.get("subject")),
+        _string_from(issue.get("activatedIntent") or issue.get("activated_intent")),
+    ]
+    customer_messages: list[str] = []
+    for message in reversed(messages):
+        direction = _string_from(message.get("direction")).lower()
+        user = _string_from(message.get("user")).lower()
+        if direction not in CUSTOMER_MESSAGE_DIRECTIONS and user not in {
+            "customer",
+            "email",
+            "visitor",
+        }:
+            continue
+        body = _string_from(message.get("body"))
+        if not body:
+            body = _content_body(message.get("content"))
+        if not body:
+            continue
+        customer_messages.append(body)
+        if len(customer_messages) >= AUTOMATIC_KNOWLEDGE_CUSTOMER_MESSAGE_LIMIT:
+            break
+    parts.extend(reversed(customer_messages))
+    return "\n".join(part for part in parts if part)
+
+
 def _phrase_match(value: str, context_text: str) -> bool:
     clean = " ".join(value.lower().split())
     return len(clean) >= 4 and clean in context_text
@@ -8466,6 +8612,48 @@ def _rank_knowledge_articles_for_issue(
         )
         for match, article in scored
     ]
+
+
+def _automatic_knowledge_match_is_strong(article: dict[str, Any]) -> bool:
+    match = _record_from(article.get("metadata")).get("knowledgeMatch", {})
+    score = match.get("score", 0)
+    if not isinstance(score, (int, float)) or score < AUTOMATIC_KNOWLEDGE_MIN_SCORE:
+        return False
+    return bool(
+        match.get("exactTitle")
+        or match.get("exactTagMatches")
+        or match.get("titleMatches")
+        or match.get("tagMatches")
+    )
+
+
+def _rank_knowledge_articles_for_automatic_answer(
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    records: list[dict[str, Any]],
+    question: str = "",
+    actor_email: str = "",
+    actor_role: str = "viewer",
+) -> list[dict[str, Any]]:
+    context = _automatic_knowledge_context_text(issue, messages, question=question)
+    normalized_context = " ".join(context.lower().replace("_", " ").replace("-", " ").split())
+    context_tokens = _text_tokens(context)
+    scored = [
+        (_score_knowledge_article_match(article, normalized_context, context_tokens), article)
+        for article in records
+    ]
+    scored.sort(key=lambda item: (item[0]["score"], _string_from(item[1].get("updated"))), reverse=True)
+    ranked = [
+        _article_with_match(
+            article,
+            match,
+            actor_email=actor_email,
+            actor_role=actor_role,
+        )
+        for match, article in scored
+    ]
+    return [article for article in ranked if _automatic_knowledge_match_is_strong(article)]
 
 
 def _knowledge_suggestions_for_issue(
@@ -9940,11 +10128,21 @@ def _create_issue_agent_answer(
         actor_email=author_email,
         actor_role=knowledge_actor_role,
     )
-    fallback_articles = [
-        article
-        for article in ranked_knowledge
-        if _record_from(article.get("metadata")).get("knowledgeMatch", {}).get("score", 0) > 0
-    ][:3]
+    if use_knowledge_agent:
+        fallback_articles = [
+            article
+            for article in ranked_knowledge
+            if _record_from(article.get("metadata")).get("knowledgeMatch", {}).get("score", 0) > 0
+        ][:3]
+    else:
+        fallback_articles = _rank_knowledge_articles_for_automatic_answer(
+            issue,
+            messages,
+            records=knowledge_records,
+            question=question,
+            actor_email=author_email,
+            actor_role=knowledge_actor_role,
+        )[:3]
     knowledge_corpus = ranked_knowledge[:AGENT_KNOWLEDGE_CORPUS_LIMIT]
     fallback_answer = _agent_answer_text(
         issue=issue,
@@ -10062,32 +10260,58 @@ def _create_issue_agent_answer(
         for article in articles
     ]
     auto_send_blocked_reason = ""
+    draft_blocked_reason = ""
     grounding_gate: dict[str, Any] = {}
+    automatic_draft_requires_grounding = bool(
+        should_create_reply
+        and not use_knowledge_agent
+        and _string_from(clean_automation_context.get("source")) == "channel_autopilot"
+    )
+    if automatic_draft_requires_grounding:
+        grounding_assessment = assess_issue_automation_grounding(
+            issue=issue,
+            messages=messages,
+            answer=answer,
+            articles=articles,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            account_context=account_context,
+            conversation_context=conversation_context,
+            on_late_usage=usage_sink.report_late,
+        )
+        grounding_gate = grounding_assessment.as_metadata()
+        if not grounding_assessment.verified:
+            draft_blocked_reason = grounding_assessment.reason_code or "grounding_check_failed"
+            confidence = "low"
+            should_create_reply = False
     if requested_auto_send:
         if clean_approval_required:
             auto_send_blocked_reason = "approval_required"
         else:
-            auto_send_blocked_reason = _agent_auto_send_static_blocked_reason(
-                confidence=confidence,
-                articles=articles,
-                generation_mode=draft.generation_mode,
-                generation_error=draft.error,
-                missing_information=draft.missing_information,
-                knowledge_agent_requested=use_knowledge_agent,
+            auto_send_blocked_reason = draft_blocked_reason or (
+                _agent_auto_send_static_blocked_reason(
+                    confidence=confidence,
+                    articles=articles,
+                    generation_mode=draft.generation_mode,
+                    generation_error=draft.error,
+                    missing_information=draft.missing_information,
+                    knowledge_agent_requested=use_knowledge_agent,
+                )
             )
             if not auto_send_blocked_reason:
-                grounding_assessment = assess_issue_automation_grounding(
-                    issue=issue,
-                    messages=messages,
-                    answer=answer,
-                    articles=articles,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    account_context=account_context,
-                    conversation_context=conversation_context,
-                    on_late_usage=usage_sink.report_late,
-                )
-                grounding_gate = grounding_assessment.as_metadata()
+                if not grounding_gate:
+                    grounding_assessment = assess_issue_automation_grounding(
+                        issue=issue,
+                        messages=messages,
+                        answer=answer,
+                        articles=articles,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        account_context=account_context,
+                        conversation_context=conversation_context,
+                        on_late_usage=usage_sink.report_late,
+                    )
+                    grounding_gate = grounding_assessment.as_metadata()
                 if not grounding_assessment.verified:
                     auto_send_blocked_reason = (
                         grounding_assessment.reason_code or "grounding_check_failed"
@@ -10125,11 +10349,15 @@ def _create_issue_agent_answer(
         )
     )
     grounding_error = _string_from(grounding_gate.get("error"))[:1_000]
-    effective_approval_required = bool(clean_approval_required or (
-        requested_auto_send
-        and auto_send_blocked_reason
-        and auto_send_blocked_reason != "approval_required"
-    ))
+    effective_approval_required = bool(
+        clean_approval_required
+        or draft_blocked_reason
+        or (
+            requested_auto_send
+            and auto_send_blocked_reason
+            and auto_send_blocked_reason != "approval_required"
+        )
+    )
     effective_auto_send = requested_auto_send and not effective_approval_required and not auto_send_blocked_reason
     if effective_auto_send:
         auto_send_policy = "approval_not_required"
@@ -10145,6 +10373,8 @@ def _create_issue_agent_answer(
             }
             else "confidence_guard"
         )
+    elif draft_blocked_reason:
+        auto_send_policy = "grounding_guard"
     else:
         auto_send_policy = ""
     reply_status = "queued" if effective_auto_send else "draft"
@@ -10255,7 +10485,7 @@ def _create_issue_agent_answer(
         confidence=confidence,
         articles=articles,
         reply=reply,
-        approval_required=should_create_reply and effective_approval_required,
+        approval_required=(should_create_reply and effective_approval_required) or bool(draft_blocked_reason),
         generation_mode=draft.generation_mode,
         generation_error=draft.error,
         include_feedback_link=include_feedback_link and should_create_reply,
@@ -10336,6 +10566,8 @@ def _create_issue_agent_answer(
         event_metadata["weakKnowledgeSignals"] = _parse(knowledge_gap.get("metadata"), dict).get("weakSignals", [])
     if auto_send_blocked_reason:
         event_metadata["autoSendBlockedReason"] = auto_send_blocked_reason
+    if draft_blocked_reason:
+        event_metadata["draftBlockedReason"] = draft_blocked_reason
     if clean_automation_context:
         event_metadata["automationContext"] = clean_automation_context
     if clean_revision_context:
@@ -10356,7 +10588,7 @@ def _create_issue_agent_answer(
         "citations": citation_previews,
         "reply": reply,
         "run": run,
-        "approvalRequired": should_create_reply and effective_approval_required,
+        "approvalRequired": (should_create_reply and effective_approval_required) or bool(draft_blocked_reason),
         "priorAgentRunIds": prior_agent_run_ids,
         "accountContext": account_context,
         "conversationContext": conversation_context,
@@ -10382,6 +10614,7 @@ def _create_issue_agent_answer(
         "autoSendRequested": requested_auto_send,
         "autoSendPolicy": auto_send_policy,
         "autoSendBlockedReason": auto_send_blocked_reason,
+        "draftBlockedReason": draft_blocked_reason,
     }
 
 
@@ -11253,6 +11486,7 @@ def _channel_auto_prepare_agent_reply(
                     "autoSend": bool(answer.get("autoSend")),
                     "autoSendPolicy": _string_from(answer.get("autoSendPolicy")),
                     "autoSendBlockedReason": _string_from(answer.get("autoSendBlockedReason")),
+                    "draftBlockedReason": _string_from(answer.get("draftBlockedReason")),
                     "actions": autopilot_actions,
                     "automationContext": automation_context,
                 },
@@ -11405,11 +11639,13 @@ def _ensure_email_channel_autopilot_package(
         return None
     reply = result.get("reply")
     run = result.get("run")
-    if not isinstance(reply, dict) or not _string_from(reply.get("id")):
-        return None
     if not isinstance(run, dict) or not _string_from(run.get("id")):
         return None
-    return result
+    if isinstance(reply, dict) and _string_from(reply.get("id")):
+        return result
+    if _string_from(result.get("draftBlockedReason")):
+        return result
+    return None
 
 
 def get_issue(
@@ -15531,6 +15767,7 @@ def _approved_action_application(
     tenant_id: str | None,
     project_id: str,
     approved_by: str,
+    authorization_header: str = "",
 ) -> dict[str, Any]:
     action_type = _string_from(
         proposed_action.get("type")
@@ -15614,11 +15851,40 @@ def _approved_action_application(
             body=body,
         )
         return {"applied": True, "type": "add_note", "noteId": _string_from((note or {}).get("id"))}
-    return {
-        "applied": False,
-        "type": action_type or _string_from(proposed_action.get("tool")),
-        "reason": "No built-in executor for proposed action",
-    }
+    if action_type == "runbook_webhook":
+        from automail.api.admin.actions import ActionTriggerRequest, execute_action_webhook_sync
+
+        webhook = _string_from(proposed_action.get("webhook"))
+        if not webhook:
+            raise ValueError("Runbook action webhook is required")
+        result = execute_action_webhook_sync(
+            ActionTriggerRequest(
+                webhook=webhook,
+                method=_string_from(proposed_action.get("method") or "POST"),
+                payload=_record_from(proposed_action.get("payload")),
+                query=_record_from(proposed_action.get("query")),
+                body=_record_from(proposed_action.get("body")),
+                headers={
+                    str(key): _string_from(value)
+                    for key, value in _record_from(proposed_action.get("headers")).items()
+                    if _string_from(key) and _string_from(value)
+                },
+            ),
+            tenant_id=tenant_id or "",
+            project_id=project_id,
+            user_email=approved_by,
+            authorization_header=authorization_header,
+        )
+        return {
+            "applied": True,
+            "type": "runbook_webhook",
+            "name": _string_from(proposed_action.get("name")),
+            "webhookResult": result,
+        }
+    raise ValueError(
+        "No built-in executor for proposed action: "
+        + (action_type or _string_from(proposed_action.get("tool")) or "unknown")
+    )
 
 
 def approve_issue_action_execution(
@@ -15628,6 +15894,7 @@ def approve_issue_action_execution(
     tenant_id: str | None,
     project_id: str,
     approved_by: str,
+    authorization_header: str = "",
 ) -> dict[str, Any] | None:
     rec = _get_issue_action_execution(issue_id, execution_id, tenant_id=tenant_id, project_id=project_id)
     if not rec:
@@ -15636,13 +15903,55 @@ def approve_issue_action_execution(
     if _string_from(rec.get("status")) != "pending" or metadata.get("approvalRequired") is not True:
         raise ValueError("Action is not pending approval")
     proposed_action = _proposed_action_from_execution(rec)
-    applied = _approved_action_application(
-        issue_id,
-        proposed_action,
-        tenant_id=tenant_id,
-        project_id=project_id,
-        approved_by=approved_by,
-    )
+    try:
+        applied = _approved_action_application(
+            issue_id,
+            proposed_action,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            approved_by=approved_by,
+            authorization_header=authorization_header,
+        )
+        if applied.get("applied") is not True:
+            raise ValueError("Approved action did not report a successful application")
+    except Exception as exc:
+        now = _now_iso()
+        error = _string_from(getattr(exc, "detail", "")) or str(exc) or "Action execution failed"
+        result = {
+            **_parse(rec.get("result"), dict),
+            "proposedAction": proposed_action,
+            "application": {"applied": False, "error": error[:1_000]},
+            "approval": {"status": "failed", "approvedBy": approved_by, "approvedAt": now},
+        }
+        next_metadata = {
+            **metadata,
+            "reviewStatus": "failed",
+            "approved": False,
+            "approvedBy": approved_by,
+            "approvedAt": now,
+        }
+        data = {
+            "status": "failed",
+            "result": result,
+            "metadata": next_metadata,
+            "error": error[:1_000],
+            "completed_at": now,
+        }
+        _patch(f"/api/collections/support_action_executions/records/{rec['id']}", data)
+        _record_issue_event(
+            issue_id=issue_id,
+            event_type="action_failed",
+            tenant_id=tenant_id,
+            project_id=project_id,
+            actor_email=approved_by,
+            title="Action failed",
+            body=error[:500],
+            metadata={
+                "actionExecutionId": _string_from(rec.get("id")),
+                "actionKey": _string_from(rec.get("action_key")),
+            },
+        )
+        raise ValueError(error) from exc
     now = _now_iso()
     result = {
         **_parse(rec.get("result"), dict),

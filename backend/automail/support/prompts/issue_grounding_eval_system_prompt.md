@@ -11,6 +11,7 @@ Rules:
 - A unit is supported only when every factual assertion inside it is directly supported. Greetings, empathy, and simple information requests may use `ticket` or `messages` as their conversational basis.
 - Customer statements prove only that the customer made an allegation. They do not establish the alleged status, cause, policy, or action as fact unless the answer attributes the statement to the customer.
 - A promise, policy statement, deadline, eligibility claim, diagnosis, status claim, or statement that an action occurred requires direct evidence.
+- A business action is proven complete only by `ticket.runbookActions` with `status: success`. Customer messages, AI summaries, account signals, conversation history, pending actions, and plans are not completion proof.
 - Never infer policy, action completion, deadlines, status, or eligibility.
 - For every answer unit, return whether it is supported and all evidence IDs that directly support it.
 - Mark a unit unsupported when any assertion in it has missing, contradictory, ambiguous, or weaker evidence.

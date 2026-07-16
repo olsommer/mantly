@@ -324,6 +324,135 @@ class TestWebhookProxy:
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Action webhooks only support GET and POST"
 
+    @pytest.mark.no_gemini
+    def test_sync_action_trigger_maps_payload_and_forwards_demo_auth(self, monkeypatch):
+        from automail.api.admin.actions import ActionTriggerRequest, execute_action_webhook_sync
+
+        captured = {}
+        monkeypatch.setenv("PUBLIC_URL", "https://api.mantly.io")
+
+        class FakeResponse:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"ticketReference": "ZF-TKT-ABC123"}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                captured["timeout"] = kwargs["timeout"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, **kwargs):
+                captured["request"] = kwargs
+                return FakeResponse()
+
+        monkeypatch.setattr("automail.api.admin.actions.httpx.Client", FakeClient)
+        monkeypatch.setattr("automail.api.admin.actions._validate_webhook_url", lambda url: None)
+        monkeypatch.setattr(
+            "automail.api.admin.actions.record_action_run",
+            lambda **kwargs: captured.setdefault("recorded", kwargs),
+        )
+        monkeypatch.setattr(
+            "automail.core.runtime_secrets.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {"ACTION_TOKEN": "secret-token"},
+        )
+
+        result = execute_action_webhook_sync(
+            ActionTriggerRequest(
+                webhook="https://api.mantly.io/demo/logistics/open-ticket",
+                payload={"order_number": "ZF-10482", "title": "Delivery exception"},
+                headers={"X-Token": "{ACTION_TOKEN}"},
+                body={"orderNumber": "{order_number}", "subject": "{title}"},
+            ),
+            tenant_id="tenant-a",
+            project_id=PROJECT_ID,
+            user_email="agent@example.com",
+            authorization_header="Bearer demo-token",
+        )
+
+        assert result == {"status": "ok", "response": {"ticketReference": "ZF-TKT-ABC123"}}
+        assert captured["timeout"] == 15.0
+        assert captured["request"] == {
+            "method": "POST",
+            "url": "https://api.mantly.io/demo/logistics/open-ticket",
+            "headers": {"X-Token": "secret-token", "Authorization": "Bearer demo-token"},
+            "params": None,
+            "json": {"orderNumber": "ZF-10482", "subject": "Delivery exception"},
+        }
+        assert captured["recorded"]["user_email"] == "agent@example.com"
+        assert captured["recorded"]["response"] == {"ticketReference": "ZF-TKT-ABC123"}
+
+    @pytest.mark.no_gemini
+    def test_action_trigger_never_forwards_auth_to_untrusted_demo_path(self, monkeypatch):
+        from automail.api.admin.actions import ActionTriggerRequest, _prepare_action_request
+
+        monkeypatch.setenv("PUBLIC_URL", "https://api.mantly.io")
+        monkeypatch.setattr("automail.api.admin.actions._validate_webhook_url", lambda url: None)
+        monkeypatch.setattr(
+            "automail.core.runtime_secrets.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {},
+        )
+
+        prepared = _prepare_action_request(
+            ActionTriggerRequest(webhook="https://attacker.example/demo/steal"),
+            tenant_id="tenant-a",
+            project_id=PROJECT_ID,
+            authorization_header="Bearer must-not-leak",
+        )
+
+        assert "Authorization" not in prepared.headers
+
+    @pytest.mark.no_gemini
+    def test_sync_action_trigger_records_http_failure(self, monkeypatch):
+        from automail.api.admin.actions import ActionTriggerRequest, execute_action_webhook_sync
+
+        captured = {}
+        request = httpx.Request("POST", "https://api.example.com/hook")
+        response = httpx.Response(503, request=request, text="temporarily unavailable")
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, **kwargs):
+                return response
+
+        monkeypatch.setattr("automail.api.admin.actions.httpx.Client", FakeClient)
+        monkeypatch.setattr("automail.api.admin.actions._validate_webhook_url", lambda url: None)
+        monkeypatch.setattr(
+            "automail.api.admin.actions.record_action_run",
+            lambda **kwargs: captured.setdefault("recorded", kwargs),
+        )
+        monkeypatch.setattr(
+            "automail.core.runtime_secrets.load_runtime_secrets",
+            lambda tenant_id=None, project_id=None: {},
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            execute_action_webhook_sync(
+                ActionTriggerRequest(webhook="https://api.example.com/hook"),
+                tenant_id="tenant-a",
+                project_id=PROJECT_ID,
+            )
+
+        assert getattr(exc_info.value, "status_code", None) == 502
+        assert getattr(exc_info.value, "detail", "") == "Webhook returned 503: temporarily unavailable"
+        assert captured["recorded"]["error"] == "Webhook returned 503"
+
 
 class TestSecurityHeaders:
     @pytest.mark.no_gemini
@@ -441,6 +570,23 @@ class TestAuthBoundaries:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok", "name": "test-intent"}
         assert seen["name"] == "test-intent"
+
+    @pytest.mark.no_gemini
+    def test_intent_action_validation_is_returned_as_bad_request(self, client, project_for_root, monkeypatch):
+        monkeypatch.setattr("automail.api.admin.intents.ensure_draft_exists", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "automail.api.admin.intents.upsert_project_intent",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("Webhook URL is required")),
+        )
+
+        resp = client.put(
+            f"/api/admin/projects/{PROJECT_ID}/intents/test-intent",
+            json={"content": VALID_INTENT_MD},
+            headers=root_header(),
+        )
+
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "Webhook URL is required"}
 
     @pytest.mark.no_gemini
     def test_demo_tenant_root_can_update_tenant_settings(self, client, monkeypatch):

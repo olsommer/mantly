@@ -1,10 +1,12 @@
 """Demo shipment-status adapter backed by repo-root demo data."""
 
+import hashlib
 import json
 import os
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 
 def _demo_root() -> Path:
@@ -57,4 +59,17 @@ def lookup_demo_shipment_status(
             "matchedBy": None,
         },
         "status": "not_found" if (lookup_order or lookup_tracking) else "missing_identifier",
+    }
+
+
+def open_demo_logistics_ticket(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return deterministic proof for a synthetic logistics ticket action."""
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:10].upper()
+    return {
+        "ok": True,
+        "action": "open-logistics-ticket",
+        "status": "open",
+        "ticketReference": f"ZF-TKT-{digest}",
+        "received": deepcopy(payload),
     }

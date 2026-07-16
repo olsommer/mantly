@@ -1351,6 +1351,17 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
         const slug = form.name.trim().toLowerCase().replace(/\s+/g, '-');
         if (!slug) { toast.error(t('Intent name is required')); return; }
         if (slug !== '_else' && !form.description.trim()) { toast.error(t('Short description is required')); return; }
+        const invalidAction = form.actions.find(action =>
+            action.name.trim()
+            && (action.type === 'button' || action.separateCall)
+            && !action.webhook.trim()
+        );
+        if (invalidAction) {
+            toast.error(t('Webhook URL is required for action {action}', {
+                action: invalidAction.label.trim() || invalidAction.name.trim(),
+            }));
+            return;
+        }
         const invalidTool = form.tools.find(t => t.name.trim() && !t.urlTemplate.trim());
         if (invalidTool) {
             toast.error(t('Endpoint is required for tool {tool}', { tool: invalidTool.name.trim() }));

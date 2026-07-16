@@ -1121,6 +1121,7 @@ async def _bulk_review_issue_actions(
     body: IssueBulkActionApproval,
     ctx: ProjectEditorDep,
     auth: AuthDep,
+    request: Request,
     *,
     mode: str,
 ) -> dict[str, Any]:
@@ -1161,6 +1162,7 @@ async def _bulk_review_issue_actions(
                     tenant_id=ctx.tenant_id,
                     project_id=ctx.project_id,
                     approved_by=auth.email,
+                    authorization_header=request.headers.get("Authorization", ""),
                 ) if mode == "approve" else reject_issue_action_execution(
                     issue_id,
                     execution_id,
@@ -1211,8 +1213,9 @@ async def bulk_approve_issue_actions(
     body: IssueBulkActionApproval,
     ctx: ProjectEditorDep,
     auth: AuthDep,
+    request: Request,
 ) -> dict[str, Any]:
-    return await _bulk_review_issue_actions(body, ctx, auth, mode="approve")
+    return await _bulk_review_issue_actions(body, ctx, auth, request, mode="approve")
 
 
 @router.post("/projects/{pid}/issues/actions/bulk-reject")
@@ -1220,8 +1223,9 @@ async def bulk_reject_issue_actions(
     body: IssueBulkActionApproval,
     ctx: ProjectEditorDep,
     auth: AuthDep,
+    request: Request,
 ) -> dict[str, Any]:
-    return await _bulk_review_issue_actions(body, ctx, auth, mode="reject")
+    return await _bulk_review_issue_actions(body, ctx, auth, request, mode="reject")
 
 
 @router.post("/projects/{pid}/issues/replies/bulk-retry-failed")
@@ -1840,6 +1844,7 @@ async def approve_issue_action(
     execution_id: str,
     ctx: ProjectEditorDep,
     auth: AuthDep,
+    request: Request,
 ) -> dict[str, Any]:
     try:
         result = approve_issue_action_execution(
@@ -1848,6 +1853,7 @@ async def approve_issue_action(
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             approved_by=auth.email,
+            authorization_header=request.headers.get("Authorization", ""),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

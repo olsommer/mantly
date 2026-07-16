@@ -563,6 +563,73 @@ class TestRequireHumanReview:
         assert response.activated_intent == "manual"
         assert response.requires_human_reason == "Intent is configured to require human review."
 
+    @pytest.mark.no_gemini
+    @pytest.mark.parametrize(
+        ("actions", "tools", "processing_output"),
+        [
+            pytest.param(
+                [],
+                [{"name": "lookup", "method": "GET"}],
+                IntentReviewOutput(),
+                id="get-tool",
+            ),
+            pytest.param(
+                [{"name": "open-ticket", "label": "Open ticket", "type": "button"}],
+                [],
+                IntentProcessingOutput(),
+                id="action",
+            ),
+        ],
+    )
+    def test_require_review_processes_configured_work_before_handoff(
+        self,
+        monkeypatch,
+        actions,
+        tools,
+        processing_output,
+    ):
+        from automail.pipeline.intent.agent import _handle_matched_intent
+
+        processing_calls = []
+
+        def fake_processing(intent_name, loaded_actions, *_args, **_kwargs):
+            processing_calls.append((intent_name, loaded_actions))
+            return processing_output
+
+        def fail_response_agent(*_args, **_kwargs):
+            raise AssertionError("The response agent must not run for review-gated intents")
+
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: actions)
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_response_config",
+            lambda *_args, **_kwargs: {"enabled": True},
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: tools)
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_require_review",
+            lambda *_args, **_kwargs: True,
+        )
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", fake_processing)
+        monkeypatch.setattr("automail.pipeline.intent.agent._run_response_agent", fail_response_agent)
+
+        intent_result, response = _handle_matched_intent(
+            "manual",
+            _make_email(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        assert len(processing_calls) == 1
+        assert processing_calls[0][0] == "manual"
+        assert len(processing_calls[0][1]) == len(actions)
+        assert intent_result.matched is True
+        assert response is not None
+        assert response.requires_human is True
+        assert response.requires_human_reason == "Intent is configured to require human review."
+
 
 class TestIntentAttachmentContext:
     @pytest.mark.no_gemini
@@ -859,6 +926,25 @@ class TestIntentAttachmentContext:
         assert intent_result.intent_name == "claim"
         assert [action.name for action in intent_result.actions] == ["open_claim"]
         assert agent_response is None
+
+    @pytest.mark.no_gemini
+    def test_disabled_configured_actions_are_not_loaded(self, monkeypatch):
+        from automail.pipeline.intent.agent import _load_intent_actions
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_actions",
+            lambda *_args, **_kwargs: [
+                {"name": "disabled-bool", "label": "Disabled bool", "enabled": False},
+                {"name": "disabled-string", "label": "Disabled string", "enabled": "OFF"},
+                {"name": "disabled-zero", "label": "Disabled zero", "enabled": 0},
+                {"name": "enabled", "label": "Enabled", "enabled": True},
+                {"name": "default-enabled", "label": "Default enabled"},
+            ],
+        )
+
+        actions = _load_intent_actions("claim")
+
+        assert [action.name for action in actions] == ["enabled", "default-enabled"]
 
     @pytest.mark.no_gemini
     def test_response_only_intent_skips_processing_and_drafts(self, monkeypatch):

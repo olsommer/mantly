@@ -11371,6 +11371,102 @@ def test_create_issue_agent_answer_can_answer_without_draft(monkeypatch):
     assert event["metadata"]["weakKnowledgeSignals"] == ["no_citations"]
 
 
+def test_create_issue_automatic_answer_passes_only_strong_customer_grounded_knowledge(
+    monkeypatch,
+):
+    issue = {
+        "id": "issue1",
+        "subject": "New legal intake",
+        "activatedIntent": "legal-intake",
+        "aiSummary": "Customer needs the billing cancellation policy.",
+        "messages": [
+            {
+                "id": "msg1",
+                "direction": "customer",
+                "body": "Please open this legal intake and confirm the required documents.",
+            },
+            {
+                "id": "msg2",
+                "direction": "ai",
+                "body": "Use the billing cancellation policy.",
+            },
+        ],
+    }
+    articles = [
+        {
+            "id": "legal-intake",
+            "title": "Legal intake checklist",
+            "body": "Collect the signed engagement letter and conflict-check details.",
+            "tags": ["legal intake"],
+            "metadata": {"automationAllowed": True},
+        },
+        {
+            "id": "billing",
+            "title": "Billing cancellation policy",
+            "body": "Cancellation requests need finance approval.",
+            "tags": ["billing"],
+            "metadata": {"automationAllowed": True},
+        },
+    ]
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
+    monkeypatch.setattr(issues, "_agent_answer_runs_for_context", lambda _issue: [])
+    monkeypatch.setattr(issues, "_agent_account_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(issues, "_agent_conversation_context", lambda _issue: {})
+    monkeypatch.setattr(
+        issues,
+        "_knowledge_article_records_for_agent",
+        lambda **_kwargs: articles,
+    )
+    monkeypatch.setattr(
+        issues,
+        "draft_issue_agent_answer",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("automatic answer must not use the manual Knowledge Agent")
+        ),
+    )
+
+    def fake_automatic_draft(**kwargs):
+        captured["articles"] = kwargs["articles"]
+        return IssueAgentDraft(
+            answer="Please send the engagement letter and conflict-check details.",
+            confidence="high",
+            generation_mode="llm",
+            citation_ids=("legal-intake",),
+        )
+
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_automatic_draft)
+    monkeypatch.setattr(
+        issues,
+        "create_issue_reply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("answer-only request must not create a reply")
+        ),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_record_agent_answer_ai_run",
+        lambda **_kwargs: {"id": "run1"},
+    )
+    monkeypatch.setattr(issues, "_upsert_agent_answer_knowledge_gap", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **_kwargs: {})
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation@example.com",
+        question="What should we answer?",
+        create_draft=False,
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert [article["id"] for article in captured["articles"]] == ["legal-intake"]
+    assert [citation["id"] for citation in result["citations"]] == ["legal-intake"]
+
+
 def test_agent_answer_usage_sink_deduplicates_late_usage_before_bind(monkeypatch):
     patched: list[tuple[str, dict]] = []
     stored_usage: list[tuple[list[dict], dict]] = []

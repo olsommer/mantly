@@ -281,6 +281,17 @@ def _message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dic
     return context
 
 
+def _automatic_message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dict[str, str]]:
+    customer_messages = [
+        message
+        for message in messages
+        if isinstance(message, dict)
+        and _string_from(message.get("direction") or message.get("user") or message.get("role")).lower()
+        in {"customer", "email", "visitor", "user"}
+    ]
+    return _message_context(customer_messages, limit=limit)
+
+
 def _knowledge_failure_answer(
     question: str,
     messages: list[dict[str, Any]] | None = None,
@@ -426,10 +437,75 @@ def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = issue.get("actionExecutions")
+    if not isinstance(actions, list):
+        return []
+    context: list[dict[str, Any]] = []
+    for execution in actions[:25]:
+        if not isinstance(execution, dict):
+            continue
+        metadata = _record_from(execution.get("metadata"))
+        if (
+            _string_from(execution.get("type")) != "runbook_webhook"
+            and _string_from(metadata.get("source")) != "runbook"
+        ):
+            continue
+        result = _record_from(execution.get("result"))
+        proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
+        name = _string_from(proposed.get("name") or execution.get("actionKey"))
+        label = _string_from(proposed.get("label") or execution.get("label") or name)
+        status = _string_from(execution.get("status"))
+        if status == "pending" and metadata.get("approvalRequired") is True:
+            context.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "status": "pending_approval",
+                }
+            )
+            continue
+        application = _record_from(result.get("application"))
+        webhook_result = _record_from(application.get("webhookResult"))
+        if status != "success" or application.get("applied") is not True or webhook_result.get("status") != "ok":
+            continue
+        response = webhook_result.get("response")
+        proof: dict[str, Any] = {}
+        if isinstance(response, dict):
+            for key in (
+                "action",
+                "status",
+                "ok",
+                "id",
+                "reference",
+                "ticketReference",
+                "confirmationNumber",
+            ):
+                value = response.get(key)
+                if isinstance(value, (str, int, float, bool)):
+                    proof[key] = value
+        context.append(
+            {
+                "name": name,
+                "label": label,
+                "status": "success",
+                "completedAt": _string_from(execution.get("completedAt")),
+                "proof": proof,
+            }
+        )
+        if len(context) >= 10:
+            break
+    return context
+
+
 def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
-    """Exclude workflow state changed by queueing from customer-facing evidence."""
+    """Exclude generated and queue-mutated state from customer-facing evidence."""
     ticket = _ticket_context(issue)
     ticket.pop("status", None)
+    ticket.pop("summary", None)
+    runbook_actions = _automatic_runbook_action_context(issue)
+    if runbook_actions:
+        ticket["runbookActions"] = runbook_actions
     return ticket
 
 
@@ -466,7 +542,13 @@ def _automatic_conversation_context(
             for item in conversation.get("tickets", [])
             if isinstance(item, dict)
         ],
-        "messages": conversation.get("messages", []),
+        "messages": [
+            message
+            for message in conversation.get("messages", [])
+            if isinstance(message, dict)
+            and _string_from(message.get("direction")).lower()
+            in {"customer", "email", "visitor", "user"}
+        ],
     }
 
 
@@ -497,7 +579,7 @@ def grounding_context_snapshots(
 
     payloads: list[tuple[str, Any]] = [
         ("ticket", ticket),
-        ("messages", _message_context(messages)),
+        ("messages", _automatic_message_context(messages)),
         ("account", _record_from(account_context)),
         ("conversation", conversation),
     ]
@@ -799,7 +881,7 @@ def draft_issue_automation_answer(
             ticket=_json(_automatic_ticket_context(issue)),
             account_intelligence=_json(_record_from(account_context)),
             conversation_context=_json(_automatic_conversation_context(conversation_context)),
-            messages=_json(_message_context(messages)),
+            messages=_json(_automatic_message_context(messages)),
             knowledge_articles=_json(_article_context(articles)),
             prior_agent_answers=_json(_agent_chat_context(prior_agent_runs)),
             question=(question.strip() or "Prepare the best support answer and next step.")[:4_000],
@@ -1071,7 +1153,7 @@ def assess_issue_automation_grounding(
             provider = _string_from(usage_context.get("provider")) or provider
             model = _string_from(usage_context.get("model")) or model
         ticket_evidence = _automatic_ticket_context(issue)
-        message_evidence = _message_context(messages)
+        message_evidence = _automatic_message_context(messages)
         account_evidence = _record_from(account_context)
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]

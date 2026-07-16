@@ -48,10 +48,21 @@ from automail.pipeline.intent.intents_factory import (
 logger = logging.getLogger(__name__)
 
 
+def _action_is_enabled(raw: dict[str, Any]) -> bool:
+    value = raw.get("enabled")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"false", "0", "no", "off"}
+
+
 def _load_intent_actions(intent_name: str, intents_dir: Any = None) -> list[IntentAction]:
     actions: list[IntentAction] = []
     for raw in get_intent_actions(intent_name, intents_dir=intents_dir):
         try:
+            if not _action_is_enabled(raw):
+                continue
             actions.append(IntentAction(**raw))
         except Exception as exc:
             logger.warning("Invalid action in intent '%s': %s", intent_name, exc)
@@ -503,25 +514,13 @@ def _handle_matched_intent(
     project_id: str | None = None,
 ) -> tuple[IntentResult, AgentResponse | None]:
     intent_result = _build_intent_result(intent_name, intents_dir=intents_dir)
-
-    if get_intent_require_review(intent_name, intents_dir=intents_dir):
-        return intent_result, _maybe_draft_response(
-            intent_result,
-            email,
-            identity_result,
-            intents_dir,
-            config_path,
-            parsed_attachments,
-            creator,
-            tenant_id=tenant_id,
-            project_id=project_id,
-        )
+    requires_review = get_intent_require_review(intent_name, intents_dir=intents_dir)
 
     if _intent_needs_processing(
         intent_name,
         intent_result.actions,
         intents_dir=intents_dir,
-        response_enabled=intent_result.response.enabled,
+        response_enabled=intent_result.response.enabled and not requires_review,
     ):
         output = _run_processing_agent(
             intent_name,

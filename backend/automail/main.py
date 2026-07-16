@@ -246,7 +246,7 @@ def create_app() -> FastAPI:
             mock_demo_update_title,
         )
         from automail.demo.crm import lookup_demo_customer
-        from automail.demo.shipments import lookup_demo_shipment_status
+        from automail.demo.shipments import lookup_demo_shipment_status, open_demo_logistics_ticket
 
         @app.get("/demo/crm")
         async def demo_crm_lookup(sender_email: str, request: Request):
@@ -266,6 +266,11 @@ def create_app() -> FastAPI:
                 order_number=order_number,
                 tracking_number=tracking_number,
             )
+
+        @app.post("/demo/logistics/open-ticket")
+        async def demo_logistics_open_ticket(payload: dict[str, Any], request: Request):
+            require_demo_endpoint_access(request)
+            return open_demo_logistics_ticket(payload)
 
         @app.post("/demo/process-start")
         async def demo_process_start(payload: DemoProcessStartRequest, request: Request):

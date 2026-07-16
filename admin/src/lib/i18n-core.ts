@@ -732,6 +732,7 @@ const de: Record<string, string> = {
     'Delete intent "{name}"?': 'Anliegen "{name}" löschen?',
     'Endpoint is required': 'Endpunkt ist erforderlich',
     'Endpoint is required for tool {tool}': 'Endpunkt ist für Tool {tool} erforderlich',
+    'Webhook URL is required for action {action}': 'Webhook-URL ist für Aktion {action} erforderlich',
     'Short description is required': 'Kurzbeschreibung ist erforderlich',
     'Short description of when this intent matches': 'Kurzbeschreibung, wann dieses Anliegen passt',
     'Intent name is required': 'Anliegen-Name ist erforderlich',

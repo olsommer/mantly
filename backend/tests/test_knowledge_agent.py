@@ -2194,3 +2194,130 @@ def test_agent_corpus_ranking_keeps_older_relevant_article() -> None:
 
     assert ranked[0]["id"] == "older-relevant"
     assert any(article["id"] == "older-relevant" for article in ranked[: issues.AGENT_KNOWLEDGE_CORPUS_LIMIT])
+
+
+def test_automatic_knowledge_ranking_excludes_generated_and_conversation_content() -> None:
+    article = {
+        "id": "billing-policy",
+        "title": "Retainer billing fees",
+        "body": "Retainer billing fees include a CHF 3,000 advance payment.",
+        "status": "published",
+        "tags": ["billing", "retainer"],
+        "metadata": {"visibility": "public", "public": True},
+    }
+    issue = {
+        "subject": "Beglaubigte Kopien für Italien – sichere Übermittlung",
+        "activatedIntent": "legal-intake-qa",
+        "aiSummary": "The draft quoted retainer billing fees and a CHF 3,000 advance payment.",
+        "accountName": "Retainer Billing Customer",
+        "contactEmail": "billing@example.test",
+        "conversation": {
+            "messages": [
+                {
+                    "direction": "agent",
+                    "body": "The related ticket discussed retainer billing fees.",
+                }
+            ]
+        },
+    }
+    messages = [
+        {
+            "direction": "customer",
+            "body": "Darf ich vertrauliche PDFs per E-Mail senden?",
+        },
+        {
+            "direction": "ai",
+            "body": "The retainer billing fee is CHF 3,000.",
+        },
+    ]
+
+    manual = issues._rank_knowledge_articles_for_issue(
+        issue,
+        messages,
+        records=[article],
+        question="Prepare an answer.",
+    )
+    automatic = issues._rank_knowledge_articles_for_automatic_answer(
+        issue,
+        messages,
+        records=[article],
+        question="Prepare an answer.",
+    )
+
+    assert manual[0]["metadata"]["knowledgeMatch"]["score"] > 0
+    assert automatic == []
+
+
+def test_automatic_knowledge_ranking_rejects_high_scoring_body_only_overlap() -> None:
+    article = {
+        "id": "fulfillment-b2b",
+        "title": "Merchant operations handbook",
+        "body": "Urgent escalation requires human review before the termination deadline.",
+        "status": "published",
+        "tags": ["fulfillment"],
+        "metadata": {"visibility": "public", "public": True},
+    }
+    issue = {
+        "subject": "Employment termination deadline",
+        "activatedIntent": "employment-termination-urgent-qa",
+    }
+    messages = [
+        {
+            "direction": "customer",
+            "body": "This urgent termination needs escalation and human review before the deadline.",
+        }
+    ]
+    context = issues._automatic_knowledge_context_text(
+        issue,
+        messages,
+        question="Prepare an answer.",
+    )
+    match = issues._score_knowledge_article_match(
+        article,
+        " ".join(context.lower().replace("_", " ").replace("-", " ").split()),
+        issues._text_tokens(context),
+    )
+
+    automatic = issues._rank_knowledge_articles_for_automatic_answer(
+        issue,
+        messages,
+        records=[article],
+        question="Prepare an answer.",
+    )
+
+    assert match["score"] >= issues.AUTOMATIC_KNOWLEDGE_MIN_SCORE
+    assert match["signals"] == ["body"]
+    assert automatic == []
+
+
+def test_automatic_knowledge_ranking_keeps_strong_activated_intent_tag_match() -> None:
+    article = {
+        "id": "legal-intake",
+        "title": "Client onboarding checklist",
+        "body": "Collect the legal name, opposing parties, and critical dates.",
+        "status": "published",
+        "tags": ["legal-intake"],
+        "metadata": {"visibility": "public", "public": True},
+    }
+    issue = {
+        "subject": "Beglaubigte Kopien für Italien",
+        "activatedIntent": "legal-intake-qa",
+    }
+    messages = [
+        {
+            "direction": "customer",
+            "body": "Welche Unterlagen benötigen Sie?",
+        }
+    ]
+
+    automatic = issues._rank_knowledge_articles_for_automatic_answer(
+        issue,
+        messages,
+        records=[article],
+        question="Prepare an answer.",
+    )
+
+    assert [item["id"] for item in automatic] == ["legal-intake"]
+    match = automatic[0]["metadata"]["knowledgeMatch"]
+    assert match["score"] >= issues.AUTOMATIC_KNOWLEDGE_MIN_SCORE
+    assert {"legal", "intake"}.issubset(set(match["tagMatches"]))

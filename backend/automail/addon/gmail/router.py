@@ -611,6 +611,7 @@ def _review_issue_action(event: GmailAddonEvent, request: Request, *, mode: str)
             tenant_id=identity.tenant_id,
             project_id=project_id,
             approved_by=identity.email,
+            authorization_header=request.headers.get("Authorization", ""),
         ) if mode == "approve" else reject_issue_action_execution(
             issue_id,
             action_id,

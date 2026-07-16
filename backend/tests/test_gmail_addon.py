@@ -1304,6 +1304,7 @@ def test_gmail_approve_issue_action_refreshes_issue_card(client, monkeypatch):
         "tenant_id": "tenant-a",
         "project_id": "project-a",
         "approved_by": "user@example.com",
+        "authorization_header": "",
     }]
     card = response.json()["action"]["navigations"][0]["updateCard"]
     section_by_header = {section["header"]: section for section in card["sections"]}

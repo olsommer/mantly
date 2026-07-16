@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mantly.io/schemas/pilot-ticket-metric.schema.json",
+  "title": "Mantly pilot ticket metric",
+  "description": "One privacy-minimized metric record for an eligible or explicitly excluded pilot ticket.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "pilot_id",
+    "tenant_id",
+    "ticket_id",
+    "source_message_id",
+    "received_at",
+    "eligibility",
+    "handling_classification"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "pilot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_message_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "first_response_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "observation_window_end": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "eligibility": {
+      "type": "string",
+      "enum": ["eligible", "excluded"]
+    },
+    "exclusion_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "spam_or_malware",
+        "duplicate_ingestion",
+        "workflow_out_of_scope",
+        "source_system_outage",
+        "customer_withdrawal_or_deletion",
+        "synthetic_or_training",
+        "other_preapproved"
+      ]
+    },
+    "runbook_id": {
+      "type": ["string", "null"]
+    },
+    "runbook_version": {
+      "type": ["string", "null"]
+    },
+    "match_confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "match_review": {
+      "type": ["string", "null"],
+      "enum": [null, "correct", "incorrect", "not_reviewed", "no_match_expected"]
+    },
+    "handling_classification": {
+      "type": "string",
+      "enum": [
+        "verified_autonomous",
+        "autonomous_candidate_observing",
+        "assisted",
+        "manual",
+        "failed_automation",
+        "excluded"
+      ]
+    },
+    "human_touch_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "approval_required": {
+      "type": "boolean",
+      "default": false
+    },
+    "material_edit": {
+      "type": ["boolean", "null"]
+    },
+    "action_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "action_failures": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "duplicate_side_effect": {
+      "type": "boolean",
+      "default": false
+    },
+    "delivery_status": {
+      "type": ["string", "null"],
+      "enum": [null, "not_required", "queued", "sent", "delivered", "failed", "unknown"]
+    },
+    "delivery_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "review_result": {
+      "type": ["string", "null"],
+      "enum": [null, "pass", "minor_issue", "major_issue", "critical_issue", "not_reviewed"]
+    },
+    "review_categories": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "runbook_match",
+          "customer_context",
+          "policy_grounding",
+          "factual_correctness",
+          "action_correctness",
+          "permission_or_approval",
+          "response_completeness",
+          "tone_or_language",
+          "disclosure",
+          "delivery",
+          "trace_completeness",
+          "tenant_isolation",
+          "other"
+        ]
+      }
+    },
+    "unsafe_or_materially_incorrect": {
+      "type": "boolean",
+      "default": false
+    },
+    "critical_outcome": {
+      "type": "boolean",
+      "default": false
+    },
+    "recovery_required": {
+      "type": "boolean",
+      "default": false
+    },
+    "model_provider": {
+      "type": ["string", "null"]
+    },
+    "model_name": {
+      "type": ["string", "null"]
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "llm_cost": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "tool_and_delivery_cost": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "human_minutes": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "evidence_refs": {
+      "type": "array",
+      "description": "Permission-controlled record identifiers; do not copy customer message bodies into the metric dataset.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "eligibility": {"const": "excluded"}
+        }
+      },
+      "then": {
+        "required": ["exclusion_reason"],
+        "properties": {
+          "handling_classification": {"const": "excluded"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "handling_classification": {"const": "verified_autonomous"}
+        }
+      },
+      "then": {
+        "required": [
+          "resolved_at",
+          "observation_window_end",
+          "review_result",
+          "delivery_status"
+        ],
+        "properties": {
+          "human_touch_count": {"const": 0},
+          "recovery_required": {"const": false},
+          "review_result": {"const": "pass"},
+          "unsafe_or_materially_incorrect": {"const": false},
+          "critical_outcome": {"const": false}
+        }
+      }
+    }
+  ]
+}

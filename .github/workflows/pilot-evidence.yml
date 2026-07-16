@@ -1,0 +1,84 @@
+name: Pilot evidence
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-evidence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence-pipeline:
+    name: Reproduce pilot KPI evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv
+
+      - name: Install locked backend dependencies
+        working-directory: backend
+        run: uv sync --frozen
+
+      - name: Validate script syntax
+        run: python3 -m py_compile scripts/pilot-evidence.py
+
+      - name: Validate synthetic evidence folder
+        working-directory: backend
+        run: >
+          uv run python ../scripts/pilot-evidence.py validate
+          ../tests/fixtures/pilot-evidence
+          --now 2026-07-16T00:00:00Z
+
+      - name: Generate deterministic summary
+        working-directory: backend
+        run: >
+          uv run python ../scripts/pilot-evidence.py summarize
+          ../tests/fixtures/pilot-evidence
+          --now 2026-07-16T00:00:00Z
+          --json-out summary.json
+          --markdown-out summary.md
+
+      - name: Assert expected synthetic result
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('tests/fixtures/pilot-evidence/summary.json').read_text(encoding='utf-8'))
+          assert summary['sample']['eligible'] == 6, summary
+          assert summary['sample']['excluded'] == 0, summary
+          assert summary['handling']['verified_autonomous'] == 2, summary
+          assert summary['verifiedFullAutomationRate'] >= 0.20, summary
+          assert summary['runbookMatchPrecision'] == 1.0, summary
+          assert summary['unsafeOrMateriallyIncorrectRate'] == 0.0, summary
+          assert summary['criticalOutcomes'] == 0, summary
+          assert summary['cost']['recurringReduction'] >= 0.15, summary
+          assert summary['allTargetsPassed'] is True, summary
+          assert summary['commercialDecision'] == 'commercial_trial', summary
+          PY
+          grep -q "All precommitted targets passed: yes" tests/fixtures/pilot-evidence/summary.md
+
+      - name: Upload reproducible summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-pilot-evidence-summary
+          path: |
+            tests/fixtures/pilot-evidence/summary.json
+            tests/fixtures/pilot-evidence/summary.md
+          if-no-files-found: error
+          retention-days: 14

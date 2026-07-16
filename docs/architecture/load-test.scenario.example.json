@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Synthetic pilot-readiness scenario. Replace or extend with authenticated ticket, inbox, knowledge, and delivery-fixture routes in an isolated environment.",
+  "targets": [
+    {
+      "name": "liveness",
+      "method": "GET",
+      "path": "/api/health",
+      "weight": 1,
+      "expectedStatuses": [200]
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/api/ready",
+      "weight": 1,
+      "expectedStatuses": [200]
+    }
+  ],
+  "thresholds": {
+    "errorRateMax": 0.01,
+    "p95MsMax": 500,
+    "p99MsMax": 1000,
+    "throughputPerSecondMin": 4.5
+  }
+}

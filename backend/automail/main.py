@@ -39,6 +39,7 @@ from automail.core.brand import get_brand
 
 # Set up structured logging right after env is loaded
 from automail.core.logging_config import setup_logging
+from automail.core.observability import install_observability, runtime_observability
 from automail.core.rate_limit import limiter
 from automail.core.runtime_flags import demo_routes_available
 from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema
@@ -58,7 +59,7 @@ from automail.support.scheduler import (
 setup_logging()
 
 logger = logging.getLogger(__name__)
-logger.info("ENV loaded: %s", is_loaded)
+logger.info("environment_loaded", extra={"event": "environment_loaded", "configEnvLoaded": is_loaded})
 brand = get_brand()
 
 # ── Startup validation ────────────────────────────────────────────────────────
@@ -81,39 +82,42 @@ if REQUIRE_AUTH:
 
 validate_pb_bootstrap_env(REQUIRE_AUTH)
 
-# PocketBase handles email verification and password reset.  Startup syncs
+# PocketBase handles email verification and password reset. Startup syncs
 # the public app URL and SMTP settings into PocketBase from env.
 
 PB_URL: str = os.getenv("PB_URL", "http://localhost:8090")
-logger.info("PocketBase URL: %s", PB_URL)
+logger.info("pocketbase_configured", extra={"event": "pocketbase_configured", "pocketbaseUrl": PB_URL})
 
 # Static files directory for the built Outlook add-in
-STATIC_FILES_DIR = Path(os.getenv(
-    "STATIC_FILES_DIR",
-    Path(__file__).resolve().parent.parent.parent / "addin" / "dist"
-))
+STATIC_FILES_DIR = Path(
+    os.getenv(
+        "STATIC_FILES_DIR",
+        Path(__file__).resolve().parent.parent.parent / "addin" / "dist",
+    )
+)
 
-ADMIN_STATIC_DIR = Path(os.getenv(
-    "ADMIN_STATIC_FILES_DIR",
-    Path(__file__).resolve().parent.parent.parent / "admin" / "dist"
-))
+ADMIN_STATIC_DIR = Path(
+    os.getenv(
+        "ADMIN_STATIC_FILES_DIR",
+        Path(__file__).resolve().parent.parent.parent / "admin" / "dist",
+    )
+)
 
-ASSETS_DIR = Path(os.getenv(
-    "ASSETS_DIR",
-    Path(__file__).resolve().parent.parent / "assets"
-))
+ASSETS_DIR = Path(
+    os.getenv(
+        "ASSETS_DIR",
+        Path(__file__).resolve().parent.parent / "assets",
+    )
+)
 
 
 class SPAStaticFiles(StaticFiles):
-    """StaticFiles subclass that serves index.html for any path not matching a
-    real file — the standard SPA catch-all pattern."""
+    """Serve index.html for SPA paths that do not match a real file."""
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         except Exception:
-            # Path didn't match a static file — serve index.html so the SPA
-            # router can handle it client-side.
             scope["path"] = "/index.html"
             await super().__call__(scope, receive, send)
 
@@ -125,36 +129,58 @@ def _admin_index_response() -> FileResponse:
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        if REQUIRE_AUTH:
-            result = ensure_users_collection_schema()
-            if result.updated:
-                logger.info("PocketBase users collection bootstrap completed")
-            else:
-                logger.info("PocketBase users collection schema already current")
-            sync_pocketbase_mail_settings()
-
-        ensure_app_collections_schema()
-        bootstrap_onprem_tenant()
-        migrate_project_config_to_tenant()
-        mark_orphaned_eval_runs_failed()
-
-        # Migrate existing tenants to projects architecture (idempotent)
+        startup_started = runtime_observability.mark_started(
+            "application.startup",
+            details={"requireAuth": REQUIRE_AUTH, "demoRoutes": demo_routes_available()},
+        )
         try:
-            migrate_to_projects()
-        except Exception:
-            logger.exception("Projects migration failed — continuing with degraded functionality")
+            if REQUIRE_AUTH:
+                result = ensure_users_collection_schema()
+                if result.updated:
+                    logger.info("pocketbase_users_schema_updated", extra={"event": "pocketbase_users_schema_updated"})
+                else:
+                    logger.info("pocketbase_users_schema_current", extra={"event": "pocketbase_users_schema_current"})
+                sync_pocketbase_mail_settings()
 
-        # License validation (on-prem only — noop when LICENSE_KEY is not set)
-        validate_license_on_startup()
+            ensure_app_collections_schema()
+            bootstrap_onprem_tenant()
+            migrate_project_config_to_tenant()
+            mark_orphaned_eval_runs_failed()
 
-        start_support_sync_scheduler()
-        start_support_delivery_scheduler()
-        start_support_crm_sync_scheduler()
-        start_support_sla_scheduler()
+            try:
+                migrate_to_projects()
+            except Exception as exc:
+                runtime_observability.mark_failure("migration.projects", exc)
+                logger.exception("projects_migration_failed", extra={"event": "projects_migration_failed"})
+            else:
+                runtime_observability.mark_success("migration.projects")
 
-        yield
+            validate_license_on_startup()
+
+            scheduler_state = {
+                "sync": start_support_sync_scheduler(),
+                "delivery": start_support_delivery_scheduler(),
+                "crm": start_support_crm_sync_scheduler(),
+                "sla": start_support_sla_scheduler(),
+            }
+            runtime_observability.mark_success(
+                "application.startup",
+                started_monotonic=startup_started,
+                details={"schedulers": scheduler_state},
+            )
+        except Exception as exc:
+            runtime_observability.mark_failure("application.startup", exc, started_monotonic=startup_started)
+            logger.exception("application_startup_failed", extra={"event": "application_startup_failed"})
+            raise
+
+        logger.info("application_ready", extra={"event": "application_ready"})
+        try:
+            yield
+        finally:
+            logger.info("application_shutdown", extra={"event": "application_shutdown"})
 
     app = FastAPI(
         title=brand.name,
@@ -163,15 +189,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Attach rate limiter and its exception handler
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, cast(Any, _rate_limit_exceeded_handler))
 
-    # Configure CORS
-    # Set CORS_ORIGINS env var to a comma-separated list of allowed origins.
-    # Defaults to "*" for local dev; restrict this in production.
     raw_origins = os.getenv("CORS_ORIGINS", "*")
-    allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+    allow_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
@@ -180,40 +202,55 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Security response headers
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        # The Outlook add-in runs inside an iframe hosted by Office.
-        # X-Frame-Options: SAMEORIGIN would block it, so we skip it for
-        # /addin/ and /assets/ paths.  All other routes keep the header.
         path = request.url.path
         if not (path.startswith("/addin") or path.startswith("/assets")):
             response.headers["X-Frame-Options"] = "SAMEORIGIN"
         return response
 
-    # License enforcement (on-prem only — noop when LICENSE_KEY is not set)
     if is_license_required():
         app.add_middleware(LicenseMiddleware)
 
-    # Request / response logging middleware
     @app.middleware("http")
     async def log_requests(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        start = time.monotonic()
-        response = await call_next(request)
-        duration_ms = int((time.monotonic() - start) * 1000)
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.exception(
+                "request_failed",
+                extra={
+                    "event": "request_failed",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "statusCode": 500,
+                    "durationMs": duration_ms,
+                },
+            )
+            raise
+        duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
-            '{"method": "%s", "path": "%s", "status": %d, "duration_ms": %d}',
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration_ms,
+            "request_completed",
+            extra={
+                "event": "request_completed",
+                "method": request.method,
+                "path": request.url.path,
+                "statusCode": response.status_code,
+                "durationMs": duration_ms,
+            },
         )
         return response
 
-    # Include API routes first so they take priority over static files
+    # Install this after the other middleware so it is the outer correlation
+    # boundary and request IDs are present in downstream logs.
+    install_observability(app)
+
+    # Include API routes first so they take priority over static files.
     app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
     app.include_router(email_router, prefix="/api", tags=["email"])
     app.include_router(internal_support_router, prefix="/api/internal", tags=["internal"])
@@ -221,14 +258,13 @@ def create_app() -> FastAPI:
     app.include_router(support_portal_router, tags=["support-portal"])
     app.include_router(support_web_chat_router, tags=["support-web-chat"])
     app.include_router(gmail_addon_router)
-    app.include_router(admin_router, tags=["admin"])  # prefix="/api/admin" set in router.py
-    app.include_router(eval_router, tags=["eval"])  # prefix="/api/admin/eval" set in eval_router.py
-    app.include_router(license_public_router, tags=["license"])  # POST /api/license/validate
+    app.include_router(admin_router, tags=["admin"])
+    app.include_router(eval_router, tags=["eval"])
+    app.include_router(license_public_router, tags=["license"])
     app.include_router(license_admin_router, prefix="/api/admin", tags=["license-admin"])
-    app.include_router(billing_admin_router, tags=["billing"])  # /api/admin/billing/*
-    app.include_router(billing_webhook_router, tags=["billing-webhook"])  # POST /api/webhooks/stripe
+    app.include_router(billing_admin_router, tags=["billing"])
+    app.include_router(billing_webhook_router, tags=["billing-webhook"])
 
-    # Verification links are deep links into the admin SPA.
     @app.get("/verify-email")
     @app.get("/verify-email/")
     async def verify_email_entry():
@@ -285,13 +321,12 @@ def create_app() -> FastAPI:
         async def demo_green_card(payload: DemoGreenCardRequest):
             return mock_demo_green_card_request(payload)
     else:
-        logger.info("Demo endpoints disabled. Set ENABLE_DEMO_MODE=true to enable /demo/* routes.")
+        logger.info("demo_endpoints_disabled", extra={"event": "demo_endpoints_disabled"})
 
         @app.api_route("/demo/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
         async def demo_disabled(full_path: str):
             raise HTTPException(status_code=404, detail="Demo endpoints are disabled")
 
-    # /addin (no trailing slash) → /addin/ so StaticFiles can serve index.html
     @app.get("/addin")
     async def addin_redirect(request: Request):
         target = "/addin/"
@@ -299,26 +334,23 @@ def create_app() -> FastAPI:
             target = f"{target}?{request.url.query}"
         return RedirectResponse(url=target, status_code=301)
 
-    # Serve icon/asset files at /assets (referenced by Outlook manifest)
     if ASSETS_DIR.exists() and ASSETS_DIR.is_dir():
-        logger.info("Serving assets from: %s", ASSETS_DIR)
+        logger.info("assets_enabled", extra={"event": "assets_enabled", "path": str(ASSETS_DIR)})
         app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets-static")
     else:
-        logger.info("No assets directory found at %s", ASSETS_DIR)
+        logger.info("assets_disabled", extra={"event": "assets_disabled", "path": str(ASSETS_DIR)})
 
-    # Serve add-in static files at /addin if built
     if STATIC_FILES_DIR.exists() and STATIC_FILES_DIR.is_dir():
-        logger.info("Serving add-in from: %s", STATIC_FILES_DIR)
+        logger.info("addin_static_enabled", extra={"event": "addin_static_enabled", "path": str(STATIC_FILES_DIR)})
         app.mount("/addin", StaticFiles(directory=str(STATIC_FILES_DIR), html=True), name="addin-static")
     else:
-        logger.info("No add-in build found at %s — add-in disabled", STATIC_FILES_DIR)
+        logger.info("addin_static_disabled", extra={"event": "addin_static_disabled", "path": str(STATIC_FILES_DIR)})
 
-    # Serve admin SPA at / if built
     if ADMIN_STATIC_DIR.exists() and ADMIN_STATIC_DIR.is_dir():
-        logger.info("Serving admin SPA from: %s", ADMIN_STATIC_DIR)
+        logger.info("admin_static_enabled", extra={"event": "admin_static_enabled", "path": str(ADMIN_STATIC_DIR)})
         app.mount("/", SPAStaticFiles(directory=str(ADMIN_STATIC_DIR), html=True), name="admin-static")
     else:
-        logger.info("No admin build found at %s", ADMIN_STATIC_DIR)
+        logger.info("admin_static_disabled", extra={"event": "admin_static_disabled", "path": str(ADMIN_STATIC_DIR)})
 
     return app
 

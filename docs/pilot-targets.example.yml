@@ -1,0 +1,59 @@
+schema_version: "1.0"
+pilot_id: "replace-with-pilot-id"
+customer_identifier: "anonymized-or-contract-approved-name"
+operational_owner: "name-or-role"
+economic_buyer: "name-or-role"
+pilot_window:
+  start: "YYYY-MM-DD"
+  end: "YYYY-MM-DD"
+mailbox_or_queue: "support@example.com"
+workflow: "email-based order and delivery support"
+expected_eligible_ticket_count: 200
+minimum_eligible_ticket_count: 200
+observation_window_days: 7
+baseline:
+  start: "YYYY-MM-DD"
+  end: "YYYY-MM-DD"
+  labour_cost_per_hour: 0.0
+runbooks:
+  - id: "delivery-status"
+    version: "replace-with-published-version"
+    autonomy: "automatic|semi-automatic|manual"
+  - id: "delivery-address-change"
+    version: "replace-with-published-version"
+    autonomy: "automatic|semi-automatic|manual"
+  - id: "cancellation-or-refund-eligibility"
+    version: "replace-with-published-version"
+    autonomy: "automatic|semi-automatic|manual"
+targets:
+  verified_full_automation_rate_min: 0.20
+  recurring_cost_reduction_min: 0.15
+  runbook_match_precision_min: 0.95
+  critical_outcomes_max: 0
+  unsafe_or_materially_incorrect_rate_max: 0.00
+  first_response_time_p90_seconds_max: null
+  resolution_time_p90_seconds_max: null
+review_sampling:
+  first_eligible_tickets_full_review: 50
+  autonomous_sample_rate_after_initial: 0.20
+  assisted_sample_rate: 0.10
+pause_conditions:
+  - "critical unsafe or materially incorrect outcome"
+  - "suspected tenant-isolation or unauthorized disclosure incident"
+  - "duplicate irreversible side effect"
+  - "missing required execution trace"
+  - "unknown runbook version"
+  - "delivery or action failures above agreed threshold"
+approved_exclusion_reasons:
+  - "spam_or_malware"
+  - "duplicate_ingestion"
+  - "workflow_out_of_scope"
+  - "source_system_outage"
+  - "customer_withdrawal_or_deletion"
+  - "synthetic_or_training"
+commercial_decision_date: "YYYY-MM-DD"
+approvals:
+  product_owner: null
+  engineering_owner: null
+  customer_operational_owner: null
+  privacy_or_legal_owner: null

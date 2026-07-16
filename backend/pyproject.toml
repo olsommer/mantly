@@ -29,6 +29,7 @@ postgres = ["psycopg2-binary>=2.9"]
 markers = [
     "no_gemini: tests that don't call the Gemini API",
 ]
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
@@ -77,3 +78,21 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["automail"]
+
+[tool.coverage.run]
+branch = true
+source = ["automail"]
+omit = [
+    "automail/demo/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

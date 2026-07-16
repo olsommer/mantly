@@ -1,4 +1,4 @@
-"""Scheduled support channel sync runner."""
+"""Scheduled support channel sync runner with observable heartbeats."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
+from automail.core.observability import runtime_observability
 from automail.db.pocketbase.client import (
     deliver_queued_issue_replies_for_scope,
     record_delivery_run,
@@ -71,6 +72,64 @@ def _delivery_run_error_summary(result: dict[str, Any]) -> str:
     return f"{prefix}: {'; '.join(errors)}"
 
 
+def _numeric_details(result: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "status",
+        "channels",
+        "connectors",
+        "processed",
+        "created",
+        "updated",
+        "sent",
+        "failed",
+        "blocked",
+        "deferred",
+        "skipped",
+        "escalated",
+        "claimed",
+        "retried",
+    }
+    details: dict[str, Any] = {}
+    for key in allowed:
+        value = result.get(key)
+        if isinstance(value, (str, bool, int, float)) or value is None:
+            details[key] = value
+    return details
+
+
+def _run_observed(
+    component: str,
+    callback: Callable[[], dict[str, Any]],
+    *,
+    failure_keys: tuple[str, ...] = ("failed",),
+) -> dict[str, Any]:
+    started = runtime_observability.mark_started(component)
+    try:
+        result = callback()
+    except Exception as exc:
+        runtime_observability.mark_failure(component, exc, started_monotonic=started)
+        raise
+
+    failures = sum(int(result.get(key) or 0) for key in failure_keys)
+    details = _numeric_details(result)
+    if failures > 0:
+        runtime_observability.mark_failure(
+            component,
+            f"run reported {failures} failed or blocked item(s)",
+            started_monotonic=started,
+            details=details,
+        )
+    else:
+        status = str(result.get("status") or "ok")
+        runtime_observability.mark_success(
+            component,
+            started_monotonic=started,
+            status=status,
+            details=details,
+        )
+    return result
+
+
 def run_scheduled_support_sync(
     *,
     tenant_id: str | None = None,
@@ -78,12 +137,15 @@ def run_scheduled_support_sync(
     limit: int = 25,
     source: str = "scheduler",
 ) -> dict[str, Any]:
-    return sync_support_channels_for_scope(
-        tenant_id=tenant_id,
-        project_id=project_id,
-        actor_email="support-sync",
-        limit=max(1, min(limit, 100)),
-        source=source,
+    return _run_observed(
+        "support.sync",
+        lambda: sync_support_channels_for_scope(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            actor_email="support-sync",
+            limit=max(1, min(limit, 100)),
+            source=source,
+        ),
     )
 
 
@@ -96,30 +158,32 @@ def run_scheduled_support_delivery(
     retry_failed: bool = False,
 ) -> dict[str, Any]:
     started_at = _now_iso()
-    result = deliver_queued_issue_replies_for_scope(
-        tenant_id=tenant_id,
-        project_id=project_id,
-        limit=max(1, min(limit, 100)),
-        include_failed=retry_failed,
-    )
-    failed = int(result.get("failed") or 0)
-    blocked = int(result.get("blocked") or 0)
-    sent = int(result.get("sent") or 0)
-    status = "idle"
-    if result.get("processed"):
-        if failed or blocked:
-            status = "partial" if sent else "blocked" if blocked and not failed else "failed"
-        else:
-            status = "success"
-    elif result.get("deferred"):
-        status = "deferred"
-    error = _delivery_run_error_summary(result)
-    result = {
-        **result,
-        "status": status,
-    }
-    if error:
-        result["error"] = error
+
+    def deliver() -> dict[str, Any]:
+        result = deliver_queued_issue_replies_for_scope(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            limit=max(1, min(limit, 100)),
+            include_failed=retry_failed,
+        )
+        failed = int(result.get("failed") or 0)
+        blocked = int(result.get("blocked") or 0)
+        sent = int(result.get("sent") or 0)
+        status = "idle"
+        if result.get("processed"):
+            if failed or blocked:
+                status = "partial" if sent else "blocked" if blocked and not failed else "failed"
+            else:
+                status = "success"
+        elif result.get("deferred"):
+            status = "deferred"
+        error = _delivery_run_error_summary(result)
+        normalized = {**result, "status": status}
+        if error:
+            normalized["error"] = error
+        return normalized
+
+    result = _run_observed("support.delivery", deliver, failure_keys=("failed", "blocked"))
     completed_at = _now_iso()
     try:
         record_delivery_run(
@@ -130,8 +194,15 @@ def run_scheduled_support_delivery(
             started_at=started_at,
             completed_at=completed_at,
         )
-    except Exception:
-        logger.warning("Failed to record support delivery run", exc_info=True)
+    except Exception as exc:
+        runtime_observability.mark_failure("support.delivery.record", exc)
+        logger.warning(
+            "support_delivery_run_record_failed",
+            exc_info=True,
+            extra={"event": "support_delivery_run_record_failed"},
+        )
+    else:
+        runtime_observability.mark_success("support.delivery.record", details={"recorded": True})
     return result
 
 
@@ -142,11 +213,14 @@ def run_scheduled_support_crm_sync(
     limit: int = 25,
     source: str = "scheduler",
 ) -> dict[str, Any]:
-    return sync_support_crm_connectors_for_scope(
-        tenant_id=tenant_id,
-        project_id=project_id,
-        limit=max(1, min(limit, 100)),
-        source=source,
+    return _run_observed(
+        "support.crm_sync",
+        lambda: sync_support_crm_connectors_for_scope(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            limit=max(1, min(limit, 100)),
+            source=source,
+        ),
     )
 
 
@@ -158,7 +232,7 @@ def run_scheduled_support_sla_escalations(
     source: str = "scheduler",
 ) -> dict[str, Any]:
     if not project_id:
-        return {
+        result = {
             "processed": 0,
             "escalated": 0,
             "skipped": 0,
@@ -166,13 +240,23 @@ def run_scheduled_support_sla_escalations(
             "items": [],
             "error": "projectId is required for SLA escalation scans",
         }
-    return run_sla_breach_escalations_for_scope(
-        tenant_id=tenant_id,
-        project_id=project_id,
-        limit=max(1, min(limit, 200)),
-        actor_email="sla-monitor",
-        source=source,
+        runtime_observability.mark_failure("support.sla", result["error"], details=_numeric_details(result))
+        return result
+    return _run_observed(
+        "support.sla",
+        lambda: run_sla_breach_escalations_for_scope(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            limit=max(1, min(limit, 200)),
+            actor_email="sla-monitor",
+            source=source,
+        ),
     )
+
+
+def _sleep_after(started: float, interval_seconds: int) -> None:
+    elapsed = time.monotonic() - started
+    time.sleep(max(1, interval_seconds - int(elapsed)))
 
 
 def _loop_sync(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
@@ -186,15 +270,12 @@ def _loop_sync(interval_seconds: int, tenant_id: str | None, project_id: str | N
                 source="scheduler",
             )
             logger.info(
-                "Support sync scheduler run: channels=%s processed=%s failed=%s",
-                result.get("channels"),
-                result.get("processed"),
-                result.get("failed"),
+                "support_sync_scheduler_run",
+                extra={"event": "support_sync_scheduler_run", **_numeric_details(result)},
             )
         except Exception:
-            logger.warning("Support sync scheduler run failed", exc_info=True)
-        elapsed = time.monotonic() - started
-        time.sleep(max(1, interval_seconds - int(elapsed)))
+            logger.warning("support_sync_scheduler_failed", exc_info=True, extra={"event": "support_sync_scheduler_failed"})
+        _sleep_after(started, interval_seconds)
 
 
 def _loop_delivery(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
@@ -208,15 +289,16 @@ def _loop_delivery(interval_seconds: int, tenant_id: str | None, project_id: str
                 source="scheduler",
             )
             logger.info(
-                "Support delivery scheduler run: processed=%s sent=%s failed=%s",
-                result.get("processed"),
-                result.get("sent"),
-                result.get("failed"),
+                "support_delivery_scheduler_run",
+                extra={"event": "support_delivery_scheduler_run", **_numeric_details(result)},
             )
         except Exception:
-            logger.warning("Support delivery scheduler run failed", exc_info=True)
-        elapsed = time.monotonic() - started
-        time.sleep(max(1, interval_seconds - int(elapsed)))
+            logger.warning(
+                "support_delivery_scheduler_failed",
+                exc_info=True,
+                extra={"event": "support_delivery_scheduler_failed"},
+            )
+        _sleep_after(started, interval_seconds)
 
 
 def _loop_crm_sync(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
@@ -230,15 +312,16 @@ def _loop_crm_sync(interval_seconds: int, tenant_id: str | None, project_id: str
                 source="scheduler",
             )
             logger.info(
-                "Support CRM sync scheduler run: connectors=%s processed=%s failed=%s",
-                result.get("connectors"),
-                result.get("processed"),
-                result.get("failed"),
+                "support_crm_sync_scheduler_run",
+                extra={"event": "support_crm_sync_scheduler_run", **_numeric_details(result)},
             )
         except Exception:
-            logger.warning("Support CRM sync scheduler run failed", exc_info=True)
-        elapsed = time.monotonic() - started
-        time.sleep(max(1, interval_seconds - int(elapsed)))
+            logger.warning(
+                "support_crm_sync_scheduler_failed",
+                exc_info=True,
+                extra={"event": "support_crm_sync_scheduler_failed"},
+            )
+        _sleep_after(started, interval_seconds)
 
 
 def _loop_sla(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
@@ -252,29 +335,35 @@ def _loop_sla(interval_seconds: int, tenant_id: str | None, project_id: str | No
                 source="scheduler",
             )
             logger.info(
-                "Support SLA scheduler run: processed=%s escalated=%s failed=%s",
-                result.get("processed"),
-                result.get("escalated"),
-                result.get("failed"),
+                "support_sla_scheduler_run",
+                extra={"event": "support_sla_scheduler_run", **_numeric_details(result)},
             )
         except Exception:
-            logger.warning("Support SLA scheduler run failed", exc_info=True)
-        elapsed = time.monotonic() - started
-        time.sleep(max(1, interval_seconds - int(elapsed)))
+            logger.warning("support_sla_scheduler_failed", exc_info=True, extra={"event": "support_sla_scheduler_failed"})
+        _sleep_after(started, interval_seconds)
+
+
+def _configure_component(name: str, interval_seconds: int, project_id: str | None) -> None:
+    if interval_seconds <= 0:
+        runtime_observability.mark_disabled(name, reason="interval not configured")
+        return
+    runtime_observability.mark_started(
+        name,
+        stale_after_seconds=max(interval_seconds * 3, interval_seconds + 60),
+        details={"intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
 
 
 def start_support_sync_scheduler() -> bool:
-    """Start optional in-process sync loop.
+    """Start optional in-process sync loop."""
 
-    Disabled unless SUPPORT_SYNC_INTERVAL_SECONDS is set to a positive value.
-    External cron can use /api/internal/support/sync instead.
-    """
     global _started
     interval_seconds = _int_env("SUPPORT_SYNC_INTERVAL_SECONDS", 0)
-    if interval_seconds <= 0:
-        return False
     tenant_id = os.getenv("SUPPORT_SYNC_TENANT_ID", "").strip() or None
     project_id = os.getenv("SUPPORT_SYNC_PROJECT_ID", "").strip() or None
+    _configure_component("support.sync", interval_seconds, project_id)
+    if interval_seconds <= 0:
+        return False
     limit = _int_env("SUPPORT_SYNC_LIMIT", 25)
     with _lock:
         if _started:
@@ -287,22 +376,23 @@ def start_support_sync_scheduler() -> bool:
         )
         thread.start()
         _started = True
-    logger.info("Support sync scheduler started interval=%ss project=%s", interval_seconds, project_id or "*")
+    logger.info(
+        "support_sync_scheduler_started",
+        extra={"event": "support_sync_scheduler_started", "intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
     return True
 
 
 def start_support_delivery_scheduler() -> bool:
-    """Start optional outbound delivery loop.
+    """Start optional outbound delivery loop."""
 
-    Disabled unless SUPPORT_DELIVERY_INTERVAL_SECONDS is set to a positive value.
-    External cron can use /api/internal/support/delivery instead.
-    """
     global _delivery_started
     interval_seconds = _int_env("SUPPORT_DELIVERY_INTERVAL_SECONDS", 0)
-    if interval_seconds <= 0:
-        return False
     tenant_id = os.getenv("SUPPORT_DELIVERY_TENANT_ID", "").strip() or None
     project_id = os.getenv("SUPPORT_DELIVERY_PROJECT_ID", "").strip() or None
+    _configure_component("support.delivery", interval_seconds, project_id)
+    if interval_seconds <= 0:
+        return False
     limit = _int_env("SUPPORT_DELIVERY_LIMIT", 25)
     with _delivery_lock:
         if _delivery_started:
@@ -315,22 +405,23 @@ def start_support_delivery_scheduler() -> bool:
         )
         thread.start()
         _delivery_started = True
-    logger.info("Support delivery scheduler started interval=%ss project=%s", interval_seconds, project_id or "*")
+    logger.info(
+        "support_delivery_scheduler_started",
+        extra={"event": "support_delivery_scheduler_started", "intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
     return True
 
 
 def start_support_crm_sync_scheduler() -> bool:
-    """Start optional CRM connector polling loop.
+    """Start optional CRM connector polling loop."""
 
-    Disabled unless SUPPORT_CRM_SYNC_INTERVAL_SECONDS is set to a positive value.
-    External cron can use /api/internal/support/crm-sync instead.
-    """
     global _crm_started
     interval_seconds = _int_env("SUPPORT_CRM_SYNC_INTERVAL_SECONDS", 0)
-    if interval_seconds <= 0:
-        return False
     tenant_id = os.getenv("SUPPORT_CRM_SYNC_TENANT_ID", "").strip() or None
     project_id = os.getenv("SUPPORT_CRM_SYNC_PROJECT_ID", "").strip() or None
+    _configure_component("support.crm_sync", interval_seconds, project_id)
+    if interval_seconds <= 0:
+        return False
     limit = _int_env("SUPPORT_CRM_SYNC_LIMIT", 25)
     with _crm_lock:
         if _crm_started:
@@ -343,22 +434,23 @@ def start_support_crm_sync_scheduler() -> bool:
         )
         thread.start()
         _crm_started = True
-    logger.info("Support CRM sync scheduler started interval=%ss project=%s", interval_seconds, project_id or "*")
+    logger.info(
+        "support_crm_sync_scheduler_started",
+        extra={"event": "support_crm_sync_scheduler_started", "intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
     return True
 
 
 def start_support_sla_scheduler() -> bool:
-    """Start optional SLA breach escalation loop.
+    """Start optional SLA breach escalation loop."""
 
-    Disabled unless SUPPORT_SLA_INTERVAL_SECONDS is set to a positive value.
-    External cron can use /api/internal/support/sla instead.
-    """
     global _sla_started
     interval_seconds = _int_env("SUPPORT_SLA_INTERVAL_SECONDS", 0)
-    if interval_seconds <= 0:
-        return False
     tenant_id = os.getenv("SUPPORT_SLA_TENANT_ID", "").strip() or None
     project_id = os.getenv("SUPPORT_SLA_PROJECT_ID", "").strip() or None
+    _configure_component("support.sla", interval_seconds, project_id)
+    if interval_seconds <= 0:
+        return False
     limit = _int_env("SUPPORT_SLA_LIMIT", 100)
     with _sla_lock:
         if _sla_started:
@@ -371,5 +463,8 @@ def start_support_sla_scheduler() -> bool:
         )
         thread.start()
         _sla_started = True
-    logger.info("Support SLA scheduler started interval=%ss project=%s", interval_seconds, project_id or "*")
+    logger.info(
+        "support_sla_scheduler_started",
+        extra={"event": "support_sla_scheduler_started", "intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
     return True

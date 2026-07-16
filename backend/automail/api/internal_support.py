@@ -1264,7 +1264,10 @@ async def receive_support_channel_webhook(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_channel_webhook_request(
+    # Channel lookup and adapter processing are synchronous and may run the
+    # complete inbound email pipeline. Keep both outside the ASGI event loop.
+    await run_in_threadpool(
+        _require_channel_webhook_request,
         channel_key,
         request,
         raw_body,
@@ -1272,7 +1275,8 @@ async def receive_support_channel_webhook(
         project_id=scoped_project_id,
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,

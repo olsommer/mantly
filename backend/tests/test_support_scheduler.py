@@ -3,6 +3,8 @@ import json
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from automail.api.admin import channels as admin_channels
 from automail.api.admin import issues as admin_issue_api
 from automail.support import scheduler
@@ -635,6 +637,102 @@ def test_internal_support_channel_webhook_ingests_with_token(client, monkeypatch
         "project_id": "project1",
         "source": "webhook",
     }]
+
+
+def test_internal_support_channel_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {
+            "messageId": "msg-generic-liveness",
+            "fromAddress": "customer@example.com",
+            "body": "Where is my order?",
+        },
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0, "items": []}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, "ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr(internal_support, "_require_channel_webhook_request", fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/channel-webhooks/fulfillment-main",
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_channel_webhook("fulfillment-main", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert len(auth_threads) == 1
+            assert len(worker_threads) == 1
+            assert auth_threads[0] != event_loop_thread
+            assert worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("message", "status_code"),
+    [("Channel not found", 404), ("Invalid inbound payload", 400)],
+)
+def test_internal_support_channel_webhook_preserves_value_error_mapping(
+    client,
+    monkeypatch,
+    message,
+    status_code,
+):
+    from automail.api import internal_support
+
+    monkeypatch.setattr(internal_support, "_require_channel_webhook_request", lambda *_args, **_kwargs: None)
+
+    def fail_ingest(*_args, **_kwargs):
+        raise ValueError(message)
+
+    monkeypatch.setattr(internal_support, "ingest_channel_webhook", fail_ingest)
+
+    response = client.post(
+        "/api/internal/support/channel-webhooks/fulfillment-main",
+        json={"tenantId": "tenant1", "projectId": "project1", "payload": {}},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == message
 
 
 def test_internal_support_channel_webhook_prefers_channel_token(client, monkeypatch):

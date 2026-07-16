@@ -58,11 +58,11 @@ print(json.dumps({"ready": result.ok, "checked": result.checked}, separators=(",
 PY
 )"
 
-# Clean and create staging directory
+# Clean and create staging directory.
 rm -rf "$STAGING"
-mkdir -p "$STAGING"
+mkdir -p "$STAGING/scripts" "$STAGING/docs/operations"
 
-# Copy delivery files
+# Copy deployment and support files.
 cp "$ROOT/deploy/docker-compose.yml"  "$STAGING/docker-compose.yml"
 cp "$ROOT/deploy/.env.example"        "$STAGING/.env.example"
 cp "$ROOT/deploy/Caddyfile"           "$STAGING/Caddyfile"
@@ -70,7 +70,15 @@ install -m 755 "$ROOT/deploy/support-launch-gate.sh" "$STAGING/support-launch-ga
 install -m 755 "$ROOT/deploy/support-schema-gate.sh" "$STAGING/support-schema-gate.sh"
 install -m 755 "$ROOT/deploy/support-channel-lifecycle-smoke.sh" "$STAGING/support-channel-lifecycle-smoke.sh"
 install -m 755 "$ROOT/deploy/support-channel-activation-plan.sh" "$STAGING/support-channel-activation-plan.sh"
-cp "$ROOT/docs/deploy-onprem.md"      "$STAGING/README.md"
+cp "$ROOT/docs/deploy-onprem.md" "$STAGING/README.md"
+
+# Recovery is part of the production customer handoff, not an optional source-only tool.
+install -m 755 "$ROOT/scripts/backup.sh" "$STAGING/scripts/backup.sh"
+install -m 755 "$ROOT/scripts/restore.sh" "$STAGING/scripts/restore.sh"
+install -m 755 "$ROOT/scripts/verify-restore.py" "$STAGING/scripts/verify-restore.py"
+cp "$ROOT/docs/deploy-onprem-recovery.md" "$STAGING/BACKUP-AND-RECOVERY.md"
+cp "$ROOT/docs/operations/backup-and-recovery.md" "$STAGING/docs/operations/backup-and-recovery.md"
+cp "$ROOT/docs/operations/restore-drill-template.md" "$STAGING/docs/operations/restore-drill-template.md"
 
 IMAGE_TAG="${VERSION:-latest}"
 GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -91,6 +99,15 @@ cat > "$STAGING/release-manifest.json" <<EOF
     "support-channel-lifecycle-smoke.sh",
     "support-channel-activation-plan.sh"
   ],
+  "recovery": {
+    "backupScript": "scripts/backup.sh",
+    "restoreScript": "scripts/restore.sh",
+    "verifyScript": "scripts/verify-restore.py",
+    "runbook": "docs/operations/backup-and-recovery.md",
+    "drillTemplate": "docs/operations/restore-drill-template.md",
+    "encryptedByDefault": true,
+    "formatVersion": "1"
+  },
   "supportLaunchProof": {
     "firstRun": "./support-launch-gate.sh --run",
     "steadyStateGate": "./support-launch-gate.sh",
@@ -109,9 +126,8 @@ cat > "$STAGING/release-manifest.json" <<EOF
 }
 EOF
 
-# If version specified, pin it in the compose file
+# If version specified, pin it in the compose file.
 if [ -n "$VERSION" ]; then
-    # Uncomment the VERSION line in .env.example and set the value
     sed -i.bak "s/^# VERSION=.*/VERSION=$VERSION/" "$STAGING/.env.example"
     rm -f "$STAGING/.env.example.bak"
 fi
@@ -119,7 +135,7 @@ fi
 sed -i.bak "s|^REGISTRY=.*|REGISTRY=$REGISTRY|" "$STAGING/.env.example"
 rm -f "$STAGING/.env.example.bak"
 
-# Create the tarball
+# Create the tarball.
 cd "$OUT_DIR"
 tar czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
 rm -rf "$STAGING"

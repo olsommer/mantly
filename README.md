@@ -114,9 +114,20 @@ Run repository lint, type, frontend build, and backend tests:
 (cd backend && uv run pytest)
 ```
 
+## Security
+
+Report suspected vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+Do not put credentials, customer content, or exploit details in a public issue.
+The production trust boundaries and response procedures are documented in:
+
+- [Threat model](docs/security/threat-model.md)
+- [Incident response](docs/security/incident-response.md)
+- [Retention and deletion](docs/security/data-retention.md)
+
 ## Documentation
 
 - [Active email-first V1 scope](docs/v1-scope.md)
+- [Pilot success criteria](docs/pilot-success-criteria.md)
 - [Product vision](docs/product-vision.md)
 - [Current support-system RFC](docs/pylon-pivot-rfc.md)
 - [Founder-led pilot runbook](PILOT_RUNBOOK.md)

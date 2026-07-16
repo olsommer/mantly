@@ -17,8 +17,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, asdict
-from typing import Any
+from dataclasses import asdict, dataclass
+from typing import Any, Callable
 
 DEFAULT_COLLECTIONS = (
     "tenants",
@@ -75,7 +75,7 @@ def request_json(
         return exc.code, detail
 
 
-def timed_check(name: str, fn: Any) -> Check:
+def timed_check(name: str, fn: Callable[[], object]) -> Check:
     started = time.monotonic()
     try:
         detail = fn()
@@ -94,7 +94,7 @@ def require_success(url: str, label: str) -> str:
     if status < 200 or status >= 300:
         raise RuntimeError(f"{label} returned HTTP {status}")
     if isinstance(payload, dict):
-        safe_keys = sorted(str(key) for key in payload.keys())
+        safe_keys = sorted(str(key) for key in payload)
         return f"HTTP {status}; JSON keys={safe_keys}"
     return f"HTTP {status}"
 
@@ -168,15 +168,26 @@ def main() -> int:
 
     token = ""
     if args.pb_url and args.pb_admin_email and args.pb_admin_password:
-        auth_check = timed_check(
-            "pocketbase_superuser_auth",
-            lambda: authenticate(args.pb_url, args.pb_admin_email, args.pb_admin_password),
-        )
-        if auth_check.ok:
-            # The detail returned by authenticate is a credential; never retain it.
+        started = time.monotonic()
+        try:
             token = authenticate(args.pb_url, args.pb_admin_email, args.pb_admin_password)
-            auth_check.detail = "authenticated; token redacted"
-        checks.append(auth_check)
+            checks.append(
+                Check(
+                    "pocketbase_superuser_auth",
+                    True,
+                    "authenticated; token redacted",
+                    int((time.monotonic() - started) * 1000),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - verifier reports the failed boundary
+            checks.append(
+                Check(
+                    "pocketbase_superuser_auth",
+                    False,
+                    f"{type(exc).__name__}: {exc}",
+                    int((time.monotonic() - started) * 1000),
+                )
+            )
     elif args.pb_url:
         checks.append(
             Check(

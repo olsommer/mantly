@@ -12,7 +12,7 @@ ALLOW_UNENCRYPTED="${ALLOW_UNENCRYPTED_BACKUP:-false}"
 AGE_RECIPIENT="${BACKUP_AGE_RECIPIENT:-}"
 BACKUP_REASON="${BACKUP_REASON:-scheduled}"
 BACKUP_OPERATOR="${BACKUP_OPERATOR:-unknown}"
-COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}" 
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}"
 
 mkdir -p "$OUTPUT_DIR"
 chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
@@ -61,10 +61,20 @@ is_running() {
 mount_source() {
   local container_id="$1"
   local destination="$2"
-  local source
-  source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "'"$destination"'"}}{{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}}{{end}}{{end}}' "$container_id")"
-  [[ -n "$source" ]] || fail "No mount found at $destination in container $container_id"
-  printf '%s\n' "$source"
+  docker inspect "$container_id" | python3 -c '
+import json
+import sys
+
+container = json.load(sys.stdin)[0]
+destination = sys.argv[1]
+for mount in container.get("Mounts", []):
+    if mount.get("Destination") == destination:
+        source = mount.get("Name") or mount.get("Source")
+        if source:
+            print(source)
+            raise SystemExit(0)
+raise SystemExit(f"No mount found at {destination}")
+' "$destination"
 }
 
 restart_services() {

@@ -696,6 +696,8 @@ def test_issue_kanban_board_groups_lanes_and_attention(monkeypatch):
         "pending action approvals",
         "queued replies",
         "failed deliveries",
+        "a customer response",
+        "requested reply changes",
     ]
     assert board["workflow"]["dragDropEnabled"] is True
     assert board["workflow"]["bulkMoveEnabled"] is True
@@ -1427,6 +1429,190 @@ def test_update_issue_blocks_done_with_queued_delivery(monkeypatch):
     assert patched == []
 
 
+def test_update_issue_blocks_done_while_customer_still_needs_response(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "status": "ongoing",
+            "assignee_email": "agent@example.com",
+            "priority": "normal",
+        },
+    )
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection == "support_messages":
+            return [
+                {
+                    "id": "message1",
+                    "issue": "issue1",
+                    "direction": "customer",
+                    "occurred_at": "2026-07-16T10:00:00Z",
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+
+    with pytest.raises(ValueError, match="a customer response"):
+        issues.update_issue(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            updates={"status": "done"},
+        )
+
+    assert patched == []
+
+
+def test_update_issue_request_changes_and_rejected_action_do_not_allow_done(monkeypatch):
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "status": "ongoing",
+            "assignee_email": "agent@example.com",
+            "priority": "normal",
+        },
+    )
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection == "support_outbound_messages":
+            return [
+                {
+                    "id": "reply1",
+                    "issue": "issue1",
+                    "status": "draft",
+                    "metadata": {
+                        "approvalRequired": True,
+                        "approved": False,
+                        "reviewStatus": "changes_requested",
+                    },
+                },
+            ]
+        if collection == "support_action_executions":
+            return [
+                {
+                    "id": "action1",
+                    "issue": "issue1",
+                    "status": "skipped",
+                    "metadata": {"approvalRequired": True, "reviewStatus": "rejected"},
+                },
+            ]
+        if collection == "support_messages":
+            return [
+                {
+                    "id": "message1",
+                    "issue": "issue1",
+                    "direction": "customer",
+                    "occurred_at": "2026-07-16T10:00:00Z",
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+
+    with pytest.raises(ValueError) as exc_info:
+        issues.update_issue(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            updates={"status": "done"},
+        )
+
+    assert "a customer response" in str(exc_info.value)
+    assert "requested reply changes" in str(exc_info.value)
+
+
+def test_update_issue_explicit_no_response_resolution_allows_done(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "status": "ongoing",
+            "assignee_email": "agent@example.com",
+            "priority": "normal",
+            "metadata": {},
+        },
+    )
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection == "support_outbound_messages":
+            return [
+                {
+                    "id": "reply1",
+                    "issue": "issue1",
+                    "status": "draft",
+                    "metadata": {"reviewStatus": "changes_requested"},
+                },
+            ]
+        if collection == "support_messages":
+            return [
+                {
+                    "id": "message1",
+                    "issue": "issue1",
+                    "direction": "customer",
+                    "occurred_at": "2026-07-16T10:00:00Z",
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_mark_issue_sla_met", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_mark_issue_knowledge_gaps_resolved", lambda **_kwargs: None)
+
+    result = issues.update_issue(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        updates={
+            "status": "done",
+            "resolve_without_reply": True,
+            "resolution_note": "Marketing message; no customer response required.",
+            "assigned_by": "agent@example.com",
+        },
+    )
+
+    assert result is not None
+    issue_patch = next(data for path, data in patched if path.endswith("/issue1"))
+    assert issue_patch["status"] == "done"
+    assert issue_patch["metadata"]["responseResolution"] == {
+        "outcome": "no_response_required",
+        "reason": "Marketing message; no customer response required.",
+        "resolvedAt": issue_patch["metadata"]["responseResolution"]["resolvedAt"],
+        "resolvedBy": "agent@example.com",
+    }
+
+
+def test_update_issue_close_without_reply_requires_resolution_note(monkeypatch):
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "status": "ongoing",
+            "assignee_email": "agent@example.com",
+            "priority": "normal",
+        },
+    )
+
+    with pytest.raises(ValueError, match="resolution note"):
+        issues.update_issue(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            updates={"status": "done", "resolve_without_reply": True},
+        )
+
+
 def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
@@ -1494,10 +1680,14 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
                 "data": {"companyName": "Example Co", "contactName": "Ada Lovelace"},
             },
             "intent_result": {
+                "matched": True,
                 "actions": [
                     {"name": "open_ticket", "label": "Open ticket", "type": "button"},
                 ],
             },
+            "tools_used": [
+                {"name": "lookup_shipment", "method": "GET", "status": "success"},
+            ],
         },
         tenant_id="tenant1",
         project_id="project1",
@@ -1554,6 +1744,9 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     assert ai_run_posts[0]["issue"] == "issue123"
     assert ai_run_posts[0]["activated_intent"] == "shipment_status"
     assert ai_run_posts[0]["status"] == "needs_human"
+    assert ai_run_posts[0]["tool_calls"] == [
+        {"name": "lookup_shipment", "method": "GET", "status": "success"},
+    ]
     reply_posts = [data for path, data in posted if path == "/api/collections/support_outbound_messages/records"]
     assert reply_posts[0]["issue"] == "issue123"
     assert reply_posts[0]["status"] == "draft"
@@ -1562,6 +1755,21 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     assert reply_posts[0]["metadata"]["approvalRequired"] is True
     assert reply_posts[0]["metadata"]["approved"] is False
     assert any(path == "/api/collections/support_accounts/records/account123" for path, _data in patched)
+
+
+def test_tool_calls_from_chat_restores_persisted_pipeline_tool_provenance():
+    assert issues._tool_calls_from_chat(
+        identity_result={},
+        chat={
+            "metadata": {
+                "toolsUsed": [
+                    {"name": "lookup_shipment", "method": "GET", "status": "success"},
+                ],
+            },
+        },
+    ) == [
+        {"name": "lookup_shipment", "method": "GET", "status": "success"},
+    ]
 
 
 def test_upsert_issue_from_channel_email_runs_channel_autopilot(monkeypatch):
@@ -1608,9 +1816,10 @@ def test_upsert_issue_from_channel_email_runs_channel_autopilot(monkeypatch):
             "subject": "Need support",
             "from_address": "customer@example.com",
             "messages": [{"user": "email", "role": "email", "content": "Need support."}],
+            "activated_intent": "customer_support",
             "requires_human": True,
             "identity_result": {"data": {}},
-            "intent_result": {"actions": []},
+            "intent_result": {"matched": True, "actions": []},
         },
         tenant_id="tenant1",
         project_id="project1",
@@ -1629,6 +1838,84 @@ def test_upsert_issue_from_channel_email_runs_channel_autopilot(monkeypatch):
     assert autopilot_calls[0]["context"]["issueSourceId"] == "channel:email:support:provider-msg-1"
     issue_post = next(data for path, data in posted if path == "/api/collections/support_issues/records")
     assert issue_post["source"] == "channel:email:support"
+
+
+def test_upsert_issue_from_chat_no_match_skips_autopilot_and_support_side_effects(monkeypatch):
+    calls = {
+        "external_objects": 0,
+        "insights": 0,
+        "gaps": 0,
+        "automations": 0,
+        "autopilot": 0,
+        "fallback_draft": 0,
+    }
+    monkeypatch.setattr(issues, "generate_id", lambda: "issue123")
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        issues,
+        "_ensure_channel",
+        lambda **_kwargs: {
+            "id": "channel1",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True},
+        },
+    )
+    monkeypatch.setattr(issues, "_upsert_account", lambda **_kwargs: {"id": "account1"})
+    monkeypatch.setattr(issues, "_upsert_contact", lambda **_kwargs: {"id": "contact1"})
+    monkeypatch.setattr(issues, "_apply_default_queue", lambda data, **_kwargs: data.update({"queue_key": "support", "queue_name": "Support"}))
+    monkeypatch.setattr(issues, "_apply_default_assignee", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(issues, "_mark_assignment_required", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "_record_default_assignment", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_ensure_issue_sla_events", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_upsert_messages", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_refresh_account_contact_counts", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_external_objects", lambda **_kwargs: calls.__setitem__("external_objects", calls["external_objects"] + 1))
+    monkeypatch.setattr(issues, "_upsert_ai_run_from_chat", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_post", lambda _path, data: data)
+    monkeypatch.setattr(issues, "_sync_account_insights", lambda **_kwargs: calls.__setitem__("insights", calls["insights"] + 1))
+    monkeypatch.setattr(issues, "_sync_knowledge_gap", lambda **_kwargs: calls.__setitem__("gaps", calls["gaps"] + 1))
+    monkeypatch.setattr(issues, "_run_automation_rules_for_issue", lambda **_kwargs: calls.__setitem__("automations", calls["automations"] + 1))
+    monkeypatch.setattr(issues, "_ensure_email_channel_autopilot_package", lambda **_kwargs: calls.__setitem__("autopilot", calls["autopilot"] + 1))
+    monkeypatch.setattr(issues, "_ensure_email_pipeline_reply_draft", lambda **_kwargs: calls.__setitem__("fallback_draft", calls["fallback_draft"] + 1))
+
+    issue = issues.upsert_issue_from_chat(
+        {
+            "email_id": "newsletter-1",
+            "subject": "Our July product newsletter",
+            "from_address": "marketing@example.com",
+            "messages": [
+                {"user": "email", "role": "email", "content": "See our latest product news."},
+                {
+                    "user": "response",
+                    "role": "response",
+                    "content": {"emailBody": "", "requiresHuman": True},
+                },
+            ],
+            "requires_human": True,
+            "identity_result": {"data": {}},
+            "intent_result": {
+                "matched": False,
+                "actions": [],
+                "error": "No configured intent matches this email.",
+            },
+        },
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert issue is not None
+    assert issue["priority"] == "normal"
+    assert calls == {
+        "external_objects": 0,
+        "insights": 0,
+        "gaps": 0,
+        "automations": 0,
+        "autopilot": 0,
+        "fallback_draft": 0,
+    }
 
 
 def test_upsert_issue_from_chat_preserves_manual_status_and_assignee(monkeypatch):
@@ -1681,9 +1968,10 @@ def test_upsert_issue_from_chat_preserves_manual_status_and_assignee(monkeypatch
             "subject": "Need manual help",
             "from_address": "customer@example.com",
             "messages": [],
+            "activated_intent": "manual_support",
             "requires_human": True,
             "identity_result": {"data": {}},
-            "intent_result": {"actions": []},
+            "intent_result": {"matched": True, "actions": []},
         },
         tenant_id="tenant1",
         project_id="project1",
@@ -1762,9 +2050,10 @@ def test_upsert_issue_from_chat_appends_and_reopens_done_email_thread_ticket(mon
             "messages": [
                 {"user": "email", "role": "email", "content": "Subject: Re: Need help\n\nStill blocked."},
             ],
+            "activated_intent": "customer_support",
             "requires_human": True,
             "identity_result": {"data": {}},
-            "intent_result": {"actions": []},
+            "intent_result": {"matched": True, "actions": []},
         },
         tenant_id="tenant1",
         project_id="project1",
@@ -10289,7 +10578,8 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
         lambda **_kwargs: IssueAgentDraft(
             answer="We are investigating the API outage and checking the status page with the incident owner.",
             confidence="high",
-            generation_mode="llm",
+            generation_mode="knowledge_agent",
+            citation_ids=("article1",),
         ),
     )
     result = issues.create_issue_agent_answer(
@@ -10309,7 +10599,7 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
 
     assert result is not None
     assert result["confidence"] == "high"
-    assert result["generationMode"] == "llm"
+    assert result["generationMode"] == "knowledge_agent"
     assert result["reply"]["status"] == "draft"
     assert result["run"]["source"] == "agent_answer"
     assert result["run"]["metadata"]["question"] == "What should we answer?"
@@ -10318,7 +10608,7 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
     outbound = next(data for path, data in posted if path == "/api/collections/support_outbound_messages/records")
     assert outbound["metadata"]["source"] == "agent_answer"
     assert outbound["metadata"]["approvalRequired"] is True
-    assert outbound["metadata"]["generationMode"] == "llm"
+    assert outbound["metadata"]["generationMode"] == "knowledge_agent"
     assert outbound["metadata"]["citations"][0]["title"] == "API outage runbook"
     assert outbound["metadata"]["citations"][0]["body"] == "Check status page and incident owner."
     assert outbound["metadata"]["citations"][0]["tags"] == ["api"]
@@ -10338,14 +10628,14 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
     assert ai_run["metadata"]["citations"][0]["body"] == "Check status page and incident owner."
     assert ai_run["metadata"]["citations"][0]["sourceUrl"] == "https://docs.example.com/api-outage"
     assert ai_run["metadata"]["citations"][0]["visibility"] == "internal"
-    assert ai_run["metadata"]["generationMode"] == "llm"
+    assert ai_run["metadata"]["generationMode"] == "knowledge_agent"
     assert ai_run["metadata"]["includeFeedbackLink"] is False
     assert ai_run["tool_calls"][0]["body"] == "Check status page and incident owner."
     assert ai_run["tool_calls"][0]["sourceUrl"] == "https://docs.example.com/api-outage"
     assert ai_run["tool_calls"][0]["visibility"] == "internal"
     assert ai_run["metadata"]["automationContext"]["ruleId"] == "rule123"
     assert ai_run["intent_result"]["automationContext"]["trigger"] == "issue_created"
-    assert ai_run["intent_result"]["generationMode"] == "llm"
+    assert ai_run["intent_result"]["generationMode"] == "knowledge_agent"
     event = next(data for path, data in posted
                  if path == "/api/collections/support_issue_events/records"
                  and data["event_type"] == "agent_answer_prepared")
@@ -10354,6 +10644,96 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
     assert event["metadata"]["citations"][0]["sourceUrl"] == "https://docs.example.com/api-outage"
     event_types = [data["event_type"] for path, data in posted if path == "/api/collections/support_issue_events/records"]
     assert event_types == ["reply_drafted", "agent_answer_prepared"]
+
+
+def test_create_issue_agent_failure_has_low_confidence_no_citations_or_reply(monkeypatch):
+    posted: list[tuple[str, dict]] = []
+    ids = iter(["aiRun123", "event123"])
+    issue = {
+        "id": "issue1",
+        "channel": "email",
+        "contactEmail": "customer@example.com",
+        "subject": "API outage",
+        "messages": [
+            {
+                "id": "msg1",
+                "direction": "customer",
+                "body": "Production API is down.",
+            }
+        ],
+    }
+    article = {
+        "id": "article1",
+        "title": "API outage runbook",
+        "body": "Check the incident owner.",
+        "status": "published",
+        "tags": ["api"],
+        "metadata": {"visibility": "public", "public": True},
+    }
+
+    monkeypatch.setattr(issues, "generate_id", lambda: next(ids))
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
+    monkeypatch.setattr(
+        issues,
+        "_list_all",
+        lambda collection, *_args, **_kwargs: [article] if collection == "knowledge_articles" else [],
+    )
+    monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_upsert_agent_answer_knowledge_gap", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "update_issue",
+        lambda _issue_id, **_kwargs: {"id": "issue1"},
+    )
+    monkeypatch.setattr(
+        issues,
+        "create_issue_reply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("failed knowledge research must not create a customer draft")
+        ),
+    )
+    monkeypatch.setattr(
+        issues,
+        "draft_issue_agent_answer",
+        lambda **_kwargs: IssueAgentDraft(
+            answer="Knowledge research could not be completed.",
+            confidence="low",
+            generation_mode="deterministic_fallback",
+            error="knowledge_bash tool call limit reached",
+            tool_calls=({"type": "knowledge_bash", "command": "cat README.md"},),
+        ),
+    )
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="agent@example.com",
+        question="What should we answer?",
+        create_draft=True,
+        use_knowledge_agent=True,
+    )
+
+    assert result is not None
+    assert result["confidence"] == "low"
+    assert result["generationError"] == "knowledge_bash tool call limit reached"
+    assert result["reply"] is None
+    assert result["approvalRequired"] is False
+    assert result["citations"] == []
+    assert not any(
+        path == "/api/collections/support_outbound_messages/records"
+        for path, _data in posted
+    )
+    ai_run = next(
+        data for path, data in posted
+        if path == "/api/collections/support_ai_runs/records"
+    )
+    assert ai_run["metadata"]["confidence"] == "low"
+    assert ai_run["metadata"]["citations"] == []
+    assert ai_run["metadata"]["generationError"] == "knowledge_bash tool call limit reached"
+    assert ai_run["tool_calls"] == [
+        {"type": "knowledge_bash", "command": "cat README.md"}
+    ]
 
 
 def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
@@ -10410,7 +10790,8 @@ def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
         lambda **_kwargs: IssueAgentDraft(
             answer="We are investigating the API outage and checking the incident owner.",
             confidence="high",
-            generation_mode="llm",
+            generation_mode="knowledge_agent",
+            citation_ids=("article1",),
         ),
     )
 
@@ -10442,6 +10823,7 @@ def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
     assert transcript_posts[1]["metadata"]["kind"] == "agent_chat_answer"
     assert transcript_posts[1]["metadata"]["questionMessageId"] == "agentUser123"
     assert transcript_posts[1]["metadata"]["confidence"] == "high"
+    assert transcript_posts[1]["metadata"]["generationError"] == ""
     assert result["userMessage"]["id"] == "agentUser123"
     assert result["assistantMessage"]["id"] == "agentAssistant123"
     assert [message["role"] for message in result["agentMessages"]] == ["user", "assistant"]

@@ -30,6 +30,9 @@ from automail.pipeline.drafts import ensure_draft_exists, get_live_source
 
 logger = logging.getLogger(__name__)
 
+MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS = 8_000
+MAX_EXTRACTED_ATTACHMENT_TEXT_TOTAL_CHARS = 24_000
+
 router = APIRouter()
 
 
@@ -65,9 +68,13 @@ def _decoded_attachment_size(raw_base64: str) -> int:
         return 0
 
 
-def _email_attachment_metadata(email) -> list[dict]:
+def _email_attachment_metadata(
+    email,
+    parsed_attachments: dict[str, str] | None = None,
+) -> list[dict]:
     attachments = getattr(email, "attachments", None) or []
     items: list[dict] = []
+    remaining_extracted_chars = MAX_EXTRACTED_ATTACHMENT_TEXT_TOTAL_CHARS
     for attachment in attachments:
         filename = str(getattr(attachment, "filename", "") or "").strip()
         if not filename:
@@ -86,11 +93,25 @@ def _email_attachment_metadata(email) -> list[dict]:
         size = _decoded_attachment_size(raw_base64)
         if size:
             item["size"] = size
+        extracted_text = str((parsed_attachments or {}).get(filename) or "").strip()
+        if extracted_text:
+            if remaining_extracted_chars > 0:
+                text_limit = min(MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS, remaining_extracted_chars)
+                bounded_text = extracted_text[:text_limit]
+                item["extractedText"] = bounded_text
+                remaining_extracted_chars -= len(bounded_text)
+            else:
+                bounded_text = ""
+            if len(bounded_text) < len(extracted_text):
+                item["extractedTextTruncated"] = True
         items.append(item)
     return items
 
 
-def _email_thread_metadata(email) -> dict:
+def _email_thread_metadata(
+    email,
+    parsed_attachments: dict[str, str] | None = None,
+) -> dict:
     refs = [str(item).strip() for item in (email.references or []) if str(item).strip()]
     return {
         key: value
@@ -100,7 +121,7 @@ def _email_thread_metadata(email) -> dict:
             "internetMessageId": email.internet_message_id or "",
             "inReplyTo": email.in_reply_to or "",
             "references": refs,
-            "attachments": _email_attachment_metadata(email),
+            "attachments": _email_attachment_metadata(email, parsed_attachments),
         }.items()
         if value
     }
@@ -316,7 +337,12 @@ def process_email_for_context(
         ]
 
         try:
-            email_metadata = _email_thread_metadata(email)
+            pipeline_tools_used = list(getattr(pipeline_result, "tools_used", []) or [])
+            email_metadata = _email_thread_metadata(email, parsed_attachments)
+            if pipeline_tools_used:
+                # Persist the bounded name/method/status audit emitted by the HTTP
+                # tool collector so a later cached re-sync retains provenance.
+                email_metadata["toolsUsed"] = pipeline_tools_used
             record_id = store_email_analysis(
                 email_id,
                 creator,
@@ -368,6 +394,7 @@ def process_email_for_context(
                         prompt_injection_result.model_dump(by_alias=True) if prompt_injection_result else None
                     ),
                     "token_usage": token_usage,
+                    "tools_used": pipeline_tools_used,
                     "project_id": project_id,
                 },
                 tenant_id=tenant_id,

@@ -69,6 +69,8 @@ class IssueUpdate(CamelCaseModel):
     tags: list[str] | None = None
     custom_fields: dict[str, Any] | None = None
     workflow_source: str | None = None
+    resolve_without_reply: bool | None = None
+    resolution_note: str | None = None
 
 
 class IssueCreate(CamelCaseModel):
@@ -166,6 +168,8 @@ def run_workflow_lifecycle_proof(
             "status": "done",
             "actor_email": clean_actor,
             "workflow_source": "launch_proof",
+            "resolve_without_reply": True,
+            "resolution_note": "Synthetic workflow proof requires no customer reply.",
         },
     )
     if not done:

@@ -32,11 +32,14 @@ function messageText(message: SupportIssueMessage): string {
         const body = textFrom(message.content.emailBody) || textFrom(message.content.email_body);
         if (body) return body;
     }
-    try {
-        return JSON.stringify(message.content ?? message, null, 2);
-    } catch {
-        return '';
+    return '';
+}
+
+function messagePlaceholder(message: SupportIssueMessage, t: TranslateFn): string {
+    if (message.direction === 'ai' || message.user === 'response') {
+        return t('No customer-facing draft was produced.');
     }
+    return t('No message text available.');
 }
 
 function messageLabel(message: SupportIssueMessage) {
@@ -125,7 +128,7 @@ export function InboxMessageTimeline({
                                 </div>
                             </div>
                             <pre className={`${compact ? 'max-h-32' : 'max-h-80'} overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground`}>
-                                {messageText(message)}
+                                {messageText(message) || messagePlaceholder(message, t)}
                             </pre>
                             <InboxAttachments attachments={attachmentItems(message)} t={t} />
                         </div>

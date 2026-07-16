@@ -4,8 +4,11 @@ import logging
 import re
 from typing import Any
 
+import httpx
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.messages import AIMessage
-from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from langgraph.errors import GraphRecursionError
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.integrations.http_tool import _make_http_tool, current_generated_attachments, raw_tool_to_definition
@@ -24,6 +27,13 @@ def _retry_exception(retry_state: RetryCallState) -> BaseException | str:
         return ""
     exc = outcome.exception()
     return exc if exc is not None else ""
+
+
+def _is_retryable_agent_error(exc: BaseException) -> bool:
+    """Retry transport failures only; model clients handle provider retries."""
+    if isinstance(exc, (GraphRecursionError, ToolCallLimitExceededError, RecursionError)):
+        return False
+    return isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError))
 
 
 def _generated_attachment_prompt_items() -> list[dict]:
@@ -53,7 +63,7 @@ def _generated_attachment_prompt_items() -> list[dict]:
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=2, min=2, max=10),
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception(_is_retryable_agent_error),
     reraise=True,
     before_sleep=lambda rs: logger.warning(
         "Intent agent invoke failed (attempt %d), retrying: %s",
@@ -68,6 +78,7 @@ def _invoke_agent(
     run_name: str | None = None,
     tags: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    recursion_limit: int | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [{"role": "user", "content": user_prompt}]}
     if parsed_attachments is not None:
@@ -80,6 +91,8 @@ def _invoke_agent(
         config["tags"] = tags
     if metadata:
         config["metadata"] = metadata
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
 
     result = agent.invoke(payload, config=config) if config else agent.invoke(payload)
     from automail.llm.usage import record_usage_from_result

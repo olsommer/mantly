@@ -14,6 +14,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+from langgraph.errors import GraphRecursionError
 
 from automail.models import (
     AgentResponse,
@@ -27,6 +29,66 @@ from automail.models import (
     ResponseDraft,
 )
 from automail.pipeline.response.prompt_factory import create_response_system_prompt, create_response_user_prompt
+
+
+@pytest.mark.no_gemini
+def test_intent_router_tools_use_context_local_intent_sources(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from automail.pipeline.intent.activate_intent import activate_intent, use_intents_dir
+
+    barrier = Barrier(2)
+
+    def fake_get_intent_body(_intent_name, intents_dir=None):
+        return str(getattr(intents_dir, "project_id", "default"))
+
+    monkeypatch.setattr("automail.pipeline.intent.activate_intent.get_intent_body", fake_get_intent_body)
+
+    def invoke_for(project_id: str) -> str:
+        with use_intents_dir(SimpleNamespace(project_id=project_id)):
+            barrier.wait(timeout=2)
+            result = activate_intent.invoke({"intent_name": "claim"})
+            barrier.wait(timeout=2)
+            return str(result)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(invoke_for, "project-one")
+        second = executor.submit(invoke_for, "project-two")
+
+    assert {first.result(), second.result()} == {"project-one", "project-two"}
+    assert activate_intent.invoke({"intent_name": "claim"}) == "default"
+
+
+@pytest.mark.no_gemini
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ValueError("invalid structured model output"), id="validation"),
+        pytest.param(GraphRecursionError("router loop"), id="graph-recursion"),
+        pytest.param(
+            ToolCallLimitExceededError(0, 2, None, 1),
+            id="tool-call-limit",
+        ),
+    ],
+)
+def test_deterministic_agent_error_is_not_retried(error):
+    from automail.pipeline.intent.helpers import _invoke_agent
+
+    class InvalidAgent:
+        calls = 0
+
+        def invoke(self, _payload, config=None):
+            self.calls += 1
+            assert config == {"recursion_limit": 4}
+            raise error
+
+    agent = InvalidAgent()
+
+    with pytest.raises(type(error)):
+        _invoke_agent(agent, "Classify this", recursion_limit=4)
+
+    assert agent.calls == 1
 
 
 @pytest.mark.no_gemini
@@ -209,6 +271,9 @@ class TestEmailPrompt:
         assert "<intent_specific_rules>" not in prompt
         assert "<attachment_rules>" not in prompt
         assert "learnings > rules > Base Boundaries" in prompt
+        assert "pending approval" in prompt
+        assert "successful tool result" in prompt
+        assert "action truth boundary always wins" in prompt
         assert "Keep the reply concise" not in prompt
         assert "The intent/concern of the incoming email is" not in prompt
         assert "{instructions}" not in prompt
@@ -596,6 +661,7 @@ class TestIntentAttachmentContext:
         from langchain.messages import AIMessage
 
         from automail.core.config import AdminConfig
+        from automail.pipeline.intent.activate_intent import activate_intent, no_match
         from automail.pipeline.intent.agent import run_intent_agent
 
         captured = {}
@@ -606,6 +672,7 @@ class TestIntentAttachmentContext:
                 captured["run_name"] = (config or {}).get("run_name")
                 captured["tags"] = (config or {}).get("tags")
                 captured["metadata"] = (config or {}).get("metadata")
+                captured["recursion_limit"] = (config or {}).get("recursion_limit")
                 return {
                     "messages": [
                         AIMessage(
@@ -622,6 +689,7 @@ class TestIntentAttachmentContext:
         def fake_create_agent(*_args, **kwargs):
             captured["tools"] = [getattr(tool, "name", "") for tool in kwargs.get("tools", [])]
             captured["response_format"] = kwargs.get("response_format")
+            captured["middleware"] = kwargs.get("middleware")
             return FakeAgent()
 
         monkeypatch.setattr(
@@ -640,13 +708,74 @@ class TestIntentAttachmentContext:
         )
 
         assert captured["tools"] == ["activate_intent", "no_match"]
+        assert all(getattr(tool, "return_direct", False) for tool in (activate_intent, no_match))
         assert captured["response_format"] is None
+        assert len(captured["middleware"]) == 1
+        assert captured["middleware"][0].run_limit == 1
+        assert captured["recursion_limit"] == 4
         assert captured["run_name"] == "intent_router_agent"
         assert captured["tags"] == ["mantly", "intent", "router"]
         assert captured["metadata"]["source"] == "pipeline.intent.agent"
         assert "## Attachments" in captured["content"]
         assert "claim.pdf" in captured["content"]
         assert "Schadennummer AXA-123" in captured["content"]
+
+    @pytest.mark.no_gemini
+    def test_classification_looping_model_stops_after_first_tool_call(self, monkeypatch):
+        from langchain.messages import AIMessage
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import _run_intent_router_agent
+
+        model_calls: list[int] = []
+
+        class LoopingModel(FakeMessagesListChatModel):
+            def bind_tools(self, *_args, **_kwargs):
+                return self
+
+            def _generate(self, *args, **kwargs):
+                model_calls.append(1)
+                return super()._generate(*args, **kwargs)
+
+        model = LoopingModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "activate_intent",
+                        "args": {"intent_name": "claim"},
+                        "id": "call_1",
+                    }],
+                )
+            ]
+        )
+        intent_source = SimpleNamespace(project_id="project-one")
+
+        monkeypatch.setattr("automail.core.config.read_config", lambda config_path=None: AdminConfig(llm_api_key="key"))
+        monkeypatch.setattr("automail.llm.resolve_effective_config", lambda config, tenant_id=None, project_id=None: config)
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: model)
+        monkeypatch.setattr("automail.pipeline.intent.agent._build_intents_list", lambda intents_dir=None: "**claim**: Claim")
+        monkeypatch.setattr(
+            "automail.pipeline.intent.activate_intent.get_intent_body",
+            lambda intent_name, intents_dir=None: "Claim runbook"
+            if intent_name == "claim" and intents_dir is intent_source
+            else None,
+        )
+
+        intent_name, reason = _run_intent_router_agent(
+            _make_email(body="Please open a claim."),
+            {"claim"},
+            intent_source,
+            None,
+            None,
+            "tenant-one",
+            "project-one",
+        )
+
+        assert intent_name == "claim"
+        assert reason is None
+        assert len(model_calls) == 1
 
     @pytest.mark.no_gemini
     def test_classification_no_tool_result_is_no_match(self, monkeypatch):

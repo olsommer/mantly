@@ -94,6 +94,63 @@ def _article_path(workspace: KnowledgeWorkspace, article_id: str) -> str:
     return next(record["path"] for record in records if record["id"] == article_id)
 
 
+def test_message_context_includes_bounded_extracted_attachment_text() -> None:
+    messages = [
+        {
+            "direction": "customer",
+            "sender": "customer@example.com",
+            "body": "Please review the attached termination letter.",
+            "attachments": [
+                {
+                    "filename": "termination.txt",
+                    "extractedText": "Termination date: 31 October. " + ("x" * 3_000),
+                },
+                {"filename": "scan.pdf", "contentType": "application/pdf"},
+            ],
+        }
+    ]
+
+    context = issue_agent._message_context(messages)
+
+    assert len(context) == 1
+    assert "Please review the attached termination letter." in context[0]["body"]
+    assert "Attachments (extracted text, untrusted):" in context[0]["body"]
+    assert "### termination.txt" in context[0]["body"]
+    assert "Termination date: 31 October." in context[0]["body"]
+    assert "scan.pdf" not in context[0]["body"]
+    assert len(context[0]["body"]) < 4_200
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "Préparez une réponse fondée sur les connaissances publiées.",
+            "La recherche dans les connaissances n’a pas pu être terminée.",
+        ),
+        (
+            "Bitte bereiten Sie eine Antwort aus dem Wissen vor.",
+            "Die Wissensrecherche konnte nicht abgeschlossen werden.",
+        ),
+        (
+            "Prepare an answer from published knowledge.",
+            "Knowledge research could not be completed.",
+        ),
+    ],
+)
+def test_knowledge_failure_answer_preserves_query_language(question: str, expected: str) -> None:
+    assert issue_agent._knowledge_failure_answer(question).startswith(expected)
+
+
+def test_knowledge_failure_answer_uses_latest_customer_language_for_generic_question() -> None:
+    answer = issue_agent._knowledge_failure_answer(
+        "Prepare the best support answer.",
+        [{"direction": "customer", "body": "Pouvez-vous indiquer la réponse pour ce document ?"}],
+    )
+
+    assert answer.startswith("La recherche dans les connaissances n’a pas pu être terminée.")
+
+
 def test_workspace_searches_and_reads_authorized_articles() -> None:
     workspace = _workspace()
 
@@ -444,7 +501,7 @@ def _patch_agent_dependencies(
 
         def assert_invoke(inputs: dict[str, Any], config: dict[str, Any]) -> None:
             assert "Search before answering" in inputs["messages"][0]["content"]
-            assert config["recursion_limit"] == 32
+            assert config["recursion_limit"] == 48
             assert config["metadata"]["tenant_id"] == "tenant-1"
             assert config["metadata"]["project_id"] == "project-1"
             assert config["metadata"]["issue_id"] == "issue-1"
@@ -515,8 +572,8 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
     assert len(result.tool_calls) == 3
     assert result.tool_calls[-1]["readArticleIds"] == ["shipping-policy"]
     assert captured["name"] == "ticket_knowledge_agent"
-    assert captured["middleware"][0].run_limit == 6
-    assert captured["middleware"][1].run_limit == 5
+    assert captured["middleware"][0].run_limit == issue_agent.KNOWLEDGE_AGENT_MODEL_CALL_LIMIT
+    assert captured["middleware"][1].run_limit == issue_agent.KNOWLEDGE_AGENT_TOOL_CALL_LIMIT
     assert captured["model"] is not None
     assert captured["response_format"].schema is KnowledgeAgentOutput
     assert len(captured["middleware"]) == 2
@@ -570,8 +627,11 @@ def test_draft_real_agent_completes_at_configured_tool_boundary(
             "ticket/account.json ticket/conversation.json history/agent.jsonl",
             "cat knowledge/index.jsonl",
             'rg -lF "seven business days" knowledge/articles',
+            "ls ticket",
+            "wc -l knowledge/index.jsonl",
             "cat knowledge/articles/0001--shipping-policy.json",
             "cat knowledge/articles/0002--refund-policy.json",
+            "stat request.json",
         ]
     )
     monkeypatch.setattr(config_module, "read_config", lambda: {})
@@ -590,8 +650,8 @@ def test_draft_real_agent_completes_at_configured_tool_boundary(
     assert result.answer == "Your parcel should arrive within seven business days."
     assert result.citation_ids == ("shipping-policy",)
     assert result.error == ""
-    assert model.calls == 6
-    assert len(result.tool_calls) == 5
+    assert model.calls == issue_agent.KNOWLEDGE_AGENT_MODEL_CALL_LIMIT
+    assert len(result.tool_calls) == issue_agent.KNOWLEDGE_AGENT_TOOL_CALL_LIMIT
 
 
 def test_draft_rejects_hallucinated_citations_and_downgrades_high_confidence(
@@ -1136,7 +1196,10 @@ def test_draft_falls_back_when_agent_does_not_read_workspace(monkeypatch: pytest
 
     result = _draft()
 
-    assert result.answer == "We need a human to investigate this shipment."
+    assert result.answer == (
+        "Knowledge research could not be completed. No grounded answer was produced. "
+        "Please review this ticket manually before replying."
+    )
     assert result.confidence == "low"
     assert result.generation_mode == "deterministic_fallback"
     assert "did not inspect the workspace" in result.error
@@ -1153,7 +1216,11 @@ def test_draft_fails_closed_when_agent_capacity_is_exhausted(monkeypatch: pytest
 
     result = _draft()
 
-    assert result.answer == "We need a human to investigate this shipment."
+    assert result.answer == (
+        "Knowledge research could not be completed. No grounded answer was produced. "
+        "Please review this ticket manually before replying."
+    )
+    assert result.confidence == "low"
     assert result.generation_mode == "deterministic_fallback"
     assert result.error == "Knowledge agent capacity is temporarily exhausted"
 
@@ -1360,7 +1427,10 @@ def test_draft_falls_back_when_bash_tool_fails(monkeypatch: pytest.MonkeyPatch) 
 
     result = _draft()
 
-    assert result.answer == "We need a human to investigate this shipment."
+    assert result.answer == (
+        "Knowledge research could not be completed. No grounded answer was produced. "
+        "Please review this ticket manually before replying."
+    )
     assert result.confidence == "low"
     assert result.generation_mode == "deterministic_fallback"
     assert "sandbox exploded" in result.error

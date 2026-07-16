@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 _KNOWLEDGE_AGENT_SLOTS = threading.BoundedSemaphore(4)
 _KNOWLEDGE_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="knowledge-agent")
 KNOWLEDGE_AGENT_DEADLINE_SECONDS = 75
+KNOWLEDGE_AGENT_MODEL_CALL_LIMIT = 9
+KNOWLEDGE_AGENT_TOOL_CALL_LIMIT = 8
 _AUTOMATION_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _AUTOMATION_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="automation-agent")
 AUTOMATION_AGENT_DEADLINE_SECONDS = 55
@@ -217,6 +219,39 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
+def _attachment_text_context(message: dict[str, Any], *, limit: int = 4_000) -> str:
+    raw_attachments = message.get("attachments")
+    if not isinstance(raw_attachments, list):
+        content = _record_from(message.get("content"))
+        raw_attachments = content.get("emailAttachments") or content.get("email_attachments")
+    if not isinstance(raw_attachments, list):
+        return ""
+
+    sections: list[str] = []
+    remaining = limit
+    for index, raw_attachment in enumerate(raw_attachments[:10], start=1):
+        attachment = _record_from(raw_attachment)
+        extracted_text = _string_from(
+            attachment.get("extractedText") or attachment.get("extracted_text")
+        )
+        if not extracted_text or remaining <= 0:
+            continue
+        filename = _string_from(
+            attachment.get("filename") or attachment.get("name")
+        ) or f"attachment-{index}"
+        header = f"### {filename[:240]}\n"
+        available = max(0, remaining - len(header))
+        if available <= 0:
+            break
+        excerpt = extracted_text[: min(2_000, available)]
+        section = f"{header}{excerpt}"
+        sections.append(section)
+        remaining -= len(section)
+    if not sections:
+        return ""
+    return "Attachments (extracted text, untrusted):\n" + "\n\n".join(sections)
+
+
 def _message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dict[str, str]]:
     context: list[dict[str, str]] = []
     for message in messages[-limit:]:
@@ -229,17 +264,68 @@ def _message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dic
                 body = _string_from(
                     content.get("emailBody") or content.get("email_body") or content.get("responseText")
                 )
-        if not body:
+        attachment_context = _attachment_text_context(message)
+        if not body and not attachment_context:
             continue
+        context_body = body[:2_000]
+        if attachment_context:
+            context_body = f"{context_body}\n\n{attachment_context}".strip()
         context.append(
             {
                 "direction": _string_from(message.get("direction") or message.get("user") or message.get("role")),
                 "sender": _string_from(message.get("sender") or message.get("from") or message.get("authorEmail")),
-                "body": body[:2000],
+                "body": context_body,
                 "occurredAt": _string_from(message.get("occurredAt") or message.get("created")),
             }
         )
     return context
+
+
+def _knowledge_failure_answer(
+    question: str,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
+    language_parts = [question]
+    for message in reversed(messages or []):
+        message_body = _string_from(message.get("body") or message.get("content"))
+        if message_body:
+            language_parts.append(message_body[:1_000])
+            break
+    clean = "\n".join(language_parts).casefold()
+    language_markers = {
+        "fr": ("é", "è", "ê", "à", "ç", " vous ", " pour ", " réponse", " question", " indiquez", " dites"),
+        "de": ("ä", "ö", "ü", "ß", " bitte ", " antwort", " frage", " nicht ", " wissen", " sagen"),
+        "es": ("¿", "¡", "ñ", " respuesta", " pregunta", " por favor", " indique", " dígame"),
+        "it": (" risposta", " domanda", " per favore", " dica", " conoscenza"),
+    }
+    padded = f" {clean} "
+    scores = {
+        language: sum(marker in padded for marker in markers)
+        for language, markers in language_markers.items()
+    }
+    language = max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
+    return {
+        "de": (
+            "Die Wissensrecherche konnte nicht abgeschlossen werden. Es wurde keine belegte Antwort erstellt. "
+            "Bitte prüfen Sie dieses Ticket manuell, bevor Sie antworten."
+        ),
+        "fr": (
+            "La recherche dans les connaissances n’a pas pu être terminée. Aucune réponse étayée n’a été "
+            "produite. Veuillez faire vérifier ce ticket avant de répondre."
+        ),
+        "es": (
+            "No se pudo completar la búsqueda en la base de conocimiento. No se generó una respuesta "
+            "fundamentada. Revise este ticket manualmente antes de responder."
+        ),
+        "it": (
+            "La ricerca nella knowledge base non è stata completata. Non è stata generata una risposta "
+            "supportata da fonti. Verifica manualmente il ticket prima di rispondere."
+        ),
+        "en": (
+            "Knowledge research could not be completed. No grounded answer was produced. "
+            "Please review this ticket manually before replying."
+        ),
+    }[language]
 
 
 def _article_context(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -524,8 +610,8 @@ def draft_issue_agent_answer(
     slot_semaphore = _KNOWLEDGE_AGENT_SLOTS
     if not slot_semaphore.acquire(blocking=False):
         return IssueAgentDraft(
-            answer=fallback_answer,
-            confidence=fallback_confidence,
+            answer=_knowledge_failure_answer(question, messages),
+            confidence="low",
             generation_mode="deterministic_fallback",
             error="Knowledge agent capacity is temporarily exhausted",
         )
@@ -563,14 +649,21 @@ def draft_issue_agent_answer(
             system_prompt=_SYSTEM_PROMPT,
             response_format=ToolStrategy(KnowledgeAgentOutput),
             middleware=[
-                ModelCallLimitMiddleware(run_limit=6, exit_behavior="error"),
-                ToolCallLimitMiddleware(tool_name="knowledge_bash", run_limit=5, exit_behavior="error"),
+                ModelCallLimitMiddleware(
+                    run_limit=KNOWLEDGE_AGENT_MODEL_CALL_LIMIT,
+                    exit_behavior="error",
+                ),
+                ToolCallLimitMiddleware(
+                    tool_name="knowledge_bash",
+                    run_limit=KNOWLEDGE_AGENT_TOOL_CALL_LIMIT,
+                    exit_behavior="error",
+                ),
             ],
             name="ticket_knowledge_agent",
         )
         user_prompt = _USER_TEMPLATE.format(question=clean_question)
         invoke_config = {
-            "recursion_limit": 32,
+            "recursion_limit": 48,
             "run_name": "ticket_knowledge_agent",
             "tags": ["mantly", "support", "knowledge-agent"],
             "metadata": {
@@ -655,8 +748,8 @@ def draft_issue_agent_answer(
     except Exception as exc:
         logger.info("Falling back to deterministic issue agent answer: %s", exc)
         return IssueAgentDraft(
-            answer=fallback_answer,
-            confidence=fallback_confidence,
+            answer=_knowledge_failure_answer(question, messages),
+            confidence="low",
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
             tool_calls=workspace.tool_calls if workspace else (),

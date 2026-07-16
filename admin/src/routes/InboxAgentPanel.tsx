@@ -83,6 +83,15 @@ function textListFrom(value: unknown): string[] {
     return [...new Set(value.map(textFrom).filter(Boolean))].slice(0, 10);
 }
 
+function percentageFromScore(score: number): number {
+    const percentage = score >= 0 && score <= 1 ? score * 100 : score;
+    return Math.round(Math.max(0, Math.min(100, percentage)));
+}
+
+function generationErrorFrom(metadata: Record<string, unknown>): string {
+    return textFrom(metadata.generationError ?? metadata.generation_error);
+}
+
 function formatTime(value: string) {
     if (!value) return '-';
     const date = new Date(value);
@@ -152,13 +161,14 @@ function agentRunAnswer(run: SupportAiRun): string {
 }
 
 function agentAnswerCitationPreviews(answer: SupportAgentAnswer | null): AgentCitationPreview[] {
-    if (!answer) return [];
+    if (!answer || textFrom(answer.generationError)) return [];
     return (answer.citations ?? [])
         .map(citationFromRecord)
         .filter((item): item is AgentCitationPreview => Boolean(item));
 }
 
 function agentRunCitationPreviews(run: SupportAiRun): AgentCitationPreview[] {
+    if (generationErrorFrom(run.metadata)) return [];
     const raw = Array.isArray(run.metadata.citations)
         ? run.metadata.citations
         : Array.isArray(run.metadata.knowledgeCitations)
@@ -257,7 +267,8 @@ function AgentMessageTranscript({ messages, compact, t }: { messages: SupportAge
                     const role = textFrom(message.role).toLowerCase();
                     const assistant = role === 'assistant';
                     const metadata = isRecord(message.metadata) ? message.metadata : {};
-                    const confidence = textFrom(metadata.confidence);
+                    const generationError = generationErrorFrom(metadata);
+                    const confidence = generationError ? 'low' : textFrom(metadata.confidence);
                     return (
                         <div
                             key={message.id}
@@ -287,7 +298,9 @@ function AgentMessageTranscript({ messages, compact, t }: { messages: SupportAge
                                 </div>
                             </div>
                             <div className="whitespace-pre-wrap text-muted-foreground">
-                                {message.body}
+                                {generationError
+                                    ? t('Knowledge research failed. No grounded answer was produced.')
+                                    : message.body}
                             </div>
                         </div>
                     );
@@ -320,7 +333,7 @@ function AgentCitationCards({ citations, compact = false, t }: { citations: Agen
                                 )}
                                 {typeof citation.score === 'number' && (
                                     <Badge variant="secondary" className="font-normal">
-                                        {Math.round(citation.score * 100)}%
+                                        {percentageFromScore(citation.score)}%
                                     </Badge>
                                 )}
                             </div>
@@ -471,6 +484,7 @@ function AgentAnswerCard({
     const conversationCounts = agentConversationContextCounts(agentAnswerConversationContext(answer));
     const missingInformation = textListFrom(answer.missingInformation);
     const researchStepCount = answer.knowledgeToolCalls?.length ?? 0;
+    const generationError = textFrom(answer.generationError);
     return (
         <div className={`${compact ? 'mt-3' : ''} space-y-3 rounded-md border bg-muted/20 p-3`}>
             {citations.length > 0 && <AgentCitationCards citations={citations} compact={compact} t={t} />}
@@ -510,14 +524,32 @@ function AgentAnswerCard({
                 t={t}
             />
             <AgentMissingInformation items={missingInformation} t={t} />
-            <pre className={`${compact ? 'max-h-44' : 'max-h-72'} overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground`}>
-                {answer.answer}
-            </pre>
+            {generationError ? (
+                <div
+                    className="rounded-md border border-destructive/40 bg-destructive/5 p-2.5"
+                    data-ticket-agent-generation-failed
+                    role="alert"
+                >
+                    <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+                        <TriangleAlert className="size-4 shrink-0" />
+                        {t('Knowledge research failed')}
+                    </div>
+                    <div className="mt-1 text-sm text-muted-foreground">
+                        {t('No grounded answer was produced. Review this ticket manually before replying.')}
+                    </div>
+                </div>
+            ) : (
+                <pre className={`${compact ? 'max-h-44' : 'max-h-72'} overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground`}>
+                    {answer.answer}
+                </pre>
+            )}
             <div className="text-xs text-muted-foreground">
-                {answer.reply ? t('Approval draft ready.') : t('Answer saved to agent chat.')}
+                {generationError
+                    ? t('Research failure saved to agent chat.')
+                    : answer.reply ? t('Approval draft ready.') : t('Answer saved to agent chat.')}
             </div>
             {answer.knowledgeGap && renderKnowledgeGap(answer.knowledgeGap, compact)}
-            <div className="flex flex-wrap justify-end gap-2">
+            {!generationError && <div className="flex flex-wrap justify-end gap-2">
                 <Button
                     type="button"
                     size="sm"
@@ -543,10 +575,10 @@ function AgentAnswerCard({
                     <Copy className="size-3.5" />
                     {t(compact ? 'Use as reply' : 'Use as reply')}
                 </Button>
-            </div>
-            {answer.generationError && (
-                <div className="rounded-md border bg-background p-2 text-xs text-muted-foreground">
-                    {answer.generationError}
+            </div>}
+            {generationError && (
+                <div className="rounded-md border bg-background p-2 text-xs text-muted-foreground" data-ticket-agent-generation-error>
+                    {generationError}
                 </div>
             )}
         </div>
@@ -570,7 +602,7 @@ function AgentRunCard({
     const conversationCounts = agentConversationContextCounts(agentRunConversationContext(run));
     const missingInformation = textListFrom(run.metadata.missingInformation ?? run.metadata.missing_information);
     const knowledgeToolCalls = agentRunKnowledgeToolCalls(run);
-    const generationError = textFrom(run.metadata.generationError ?? run.metadata.generation_error);
+    const generationError = generationErrorFrom(run.metadata);
     const groundingGate = run.metadata.groundingGate ?? run.metadata.grounding_gate;
     const groundingVerified = run.metadata.groundingVerified ?? run.metadata.grounding_verified;
     const groundingIssues = run.metadata.groundingIssues ?? run.metadata.grounding_issues;
@@ -614,7 +646,7 @@ function AgentRunCard({
                         </Badge>
                     )}
                     <Badge variant="outline" className="font-normal">
-                        {textFrom(run.metadata.confidence) || run.status}
+                        {generationError ? 'low' : textFrom(run.metadata.confidence) || run.status}
                     </Badge>
                 </div>
             </div>
@@ -636,16 +668,26 @@ function AgentRunCard({
                     {generationError}
                 </div>
             )}
-            <pre className={`${compact ? 'max-h-36' : 'max-h-72'} overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground`}>
-                {agentRunAnswer(run)}
-            </pre>
+            {generationError ? (
+                <div
+                    className="rounded-md border border-destructive/40 bg-destructive/5 p-2.5 text-sm text-muted-foreground"
+                    data-ticket-agent-generation-failed
+                    role="alert"
+                >
+                    {t('No grounded answer was produced. Review this ticket manually before replying.')}
+                </div>
+            ) : (
+                <pre className={`${compact ? 'max-h-36' : 'max-h-72'} overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground`}>
+                    {agentRunAnswer(run)}
+                </pre>
+            )}
             {runCitations.length > 0 && (
                 <div className="mt-3">
                     <AgentCitationCards citations={runCitations} compact={compact} t={t} />
                 </div>
             )}
             <div className="mt-3 flex flex-wrap justify-end gap-2">
-                <Button
+                {!generationError && <Button
                     type="button"
                     size="sm"
                     variant="outline"
@@ -661,19 +703,19 @@ function AgentRunCard({
                         ? <Loader className="size-3.5 animate-spin" />
                         : <BookOpen className="size-3.5" />}
                     {t('Save article')}
-                </Button>
+                </Button>}
                 <Button type="button" size="sm" variant="outline" onClick={() => onStartFollowUp(run)}>
                     <Sparkles className="size-3.5" />
                     {t('Follow up')}
                 </Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => onApplyRunToReply(run, 'append')}>
+                {!generationError && <Button type="button" size="sm" variant="outline" onClick={() => onApplyRunToReply(run, 'append')}>
                     <Plus className="size-3.5" />
                     {t(compact ? 'Append' : 'Append')}
-                </Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => onApplyRunToReply(run, 'replace')}>
+                </Button>}
+                {!generationError && <Button type="button" size="sm" variant="outline" onClick={() => onApplyRunToReply(run, 'replace')}>
                     <Copy className="size-3.5" />
                     {t('Use as reply')}
-                </Button>
+                </Button>}
             </div>
         </div>
     );
@@ -717,7 +759,7 @@ export function InboxAgentPanel({
                             </Badge>
                         )}
                         <Badge variant="outline" className="font-normal">
-                            {answer.confidence}
+                            {answer.generationError ? 'low' : answer.confidence}
                         </Badge>
                     </div>
                 ) : asking ? (

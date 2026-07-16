@@ -4,7 +4,10 @@ import logging
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.structured_output import ToolStrategy
+from langgraph.errors import GraphRecursionError
 
 from automail.integrations.http_tool import current_generated_attachments
 from automail.llm.usage import llm_stage
@@ -19,7 +22,7 @@ from automail.models import (
     IntentReviewOutput,
     ResponseDraft,
 )
-from automail.pipeline.intent.activate_intent import activate_intent, no_match, set_intents_dir
+from automail.pipeline.intent.activate_intent import activate_intent, no_match, use_intents_dir
 from automail.pipeline.intent.classification import _CLASSIFY_SYSTEM_PROMPT
 from automail.pipeline.intent.helpers import (
     _append_feedback_learnings,
@@ -124,8 +127,10 @@ def _run_intent_router_agent(
     llm = create_llm(config, timeout=180, max_retries=2)
     usage_context = getattr(llm, "_mantly_usage_context", None)
 
-    set_intents_dir(intents_dir)
     try:
+        # The router makes one classification decision. Returning directly from
+        # either tool is the primary stop condition; the middleware and graph
+        # limit are independent guards against future tool or prompt changes.
         agent = create_agent(
             model=llm,
             tools=[activate_intent, no_match],
@@ -133,9 +138,15 @@ def _run_intent_router_agent(
                 intents_list=_build_intents_list(intents_dir=intents_dir),
             ),
             response_format=None,
+            middleware=[
+                ToolCallLimitMiddleware(
+                    run_limit=1,
+                    exit_behavior="error",
+                )
+            ],
         )
 
-        with llm_stage("intent"):
+        with use_intents_dir(intents_dir), llm_stage("intent"):
             raw_result = _invoke_agent(
                 agent,
                 _classification_user_prompt(email, parsed_attachments),
@@ -148,9 +159,11 @@ def _run_intent_router_agent(
                     "project_id": project_id,
                     "source": "pipeline.intent.agent",
                 },
+                recursion_limit=4,
             )
-    finally:
-        set_intents_dir(None)
+    except (GraphRecursionError, ToolCallLimitExceededError) as exc:
+        logger.error("Intent router stopped at its execution limit: %s", exc)
+        return None, "Intent classification stopped safely; human review is required."
 
     messages = raw_result.get("messages")
     if not isinstance(messages, list):

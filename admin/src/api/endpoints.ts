@@ -3423,7 +3423,11 @@ export const api = {
     updateIssue: async (
         projectId: string,
         issueId: string,
-        data: Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & { workflowSource?: string },
+        data: Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & {
+            workflowSource?: string;
+            resolveWithoutReply?: boolean;
+            resolutionNote?: string;
+        },
     ): Promise<ApiResponse<SupportIssue>> => {
         return apiClient.patch(`${p(projectId)}/issues/${encodeURIComponent(issueId)}`, data);
     },

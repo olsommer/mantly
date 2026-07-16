@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.db.pocketbase.client import (
@@ -692,7 +693,10 @@ async def receive_support_email_event(
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
     if not scoped_project_id:
         raise HTTPException(status_code=400, detail="projectId is required")
-    _require_provider_channel_request(
+    # Channel lookup and the full email pipeline use synchronous HTTP/LLM clients.
+    # Keep both outside the ASGI event loop so unrelated requests remain responsive.
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -705,7 +709,8 @@ async def receive_support_email_event(
     if isinstance(body, dict):
         actor_email = str(body.get("actorEmail") or body.get("actor_email") or body.get("creator") or actor_email).strip()
     try:
-        return ingest_email_webhook(
+        return await run_in_threadpool(
+            ingest_email_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,

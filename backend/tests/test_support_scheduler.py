@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 from automail.api.admin import channels as admin_channels
@@ -716,6 +717,74 @@ def test_internal_support_email_webhook_ingests_with_email_token(client, monkeyp
         "actor_email": "ingress@example.com",
         "source": "email-webhook",
     }]
+
+
+def test_internal_support_email_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {
+            "messageId": "msg-liveness",
+            "fromAddress": "customer@example.com",
+            "body": "Need help",
+        },
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0, "items": []}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, "ingest_email_webhook", fake_ingest)
+    monkeypatch.setattr(internal_support, "_require_provider_channel_request", fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/email/email:support",
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_email_event("email:support", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert len(auth_threads) == 1
+            assert len(worker_threads) == 1
+            assert auth_threads[0] != event_loop_thread
+            assert worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
 
 
 def test_internal_support_channel_webhook_outbound_echo_uses_outbound_token(client, monkeypatch):

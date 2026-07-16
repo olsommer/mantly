@@ -451,6 +451,7 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
         phishing_result = None
         prompt_injection_result = None
         token_usage = {}
+        tools_used = [{"name": "lookup_shipment", "method": "GET", "status": "success"}]
 
         class AgentResponse:
             response_text = "Reply"
@@ -480,7 +481,15 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
         return DummyPipelineResult()
 
     monkeypatch.setattr("automail.api.process.run_pipeline", fake_run_pipeline)
-    monkeypatch.setattr("automail.api.process.store_email_analysis", lambda *args, **kwargs: "rec-1")
+    stored: dict = {}
+    monkeypatch.setattr(
+        "automail.api.process.store_email_analysis",
+        lambda *args, **kwargs: stored.update(kwargs) or "rec-1",
+    )
+    monkeypatch.setattr(
+        "automail.api.process._sync_issue_from_chat",
+        lambda chat, **_kwargs: seen.update({"tools_used": chat.get("tools_used")}),
+    )
 
     response = client.post(
         "/api/process",
@@ -499,7 +508,13 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
     )
 
     assert response.status_code == 200
-    assert seen == {"tenant_id": "tenant-a"}
+    assert seen == {
+        "tenant_id": "tenant-a",
+        "tools_used": [{"name": "lookup_shipment", "method": "GET", "status": "success"}],
+    }
+    assert stored["metadata"]["toolsUsed"] == [
+        {"name": "lookup_shipment", "method": "GET", "status": "success"},
+    ]
 
 
 def test_email_thread_metadata_keeps_attachment_metadata():
@@ -526,6 +541,28 @@ def test_email_thread_metadata_keeps_attachment_metadata():
         {"filename": "contract.pdf", "size": 8},
         {"filename": "screenshot.png", "contentType": "image/png", "size": 3},
     ]
+
+
+def test_email_thread_metadata_persists_bounded_extracted_attachment_text():
+    email = Email(
+        id="email-1",
+        subject="Damaged parcel",
+        from_address="client@example.com",
+        body="Please inspect the attachment.",
+        attachments=[
+            {"filename": "claim.txt", "base64": "Y2xhaW0="},
+        ],
+    )
+
+    metadata = _email_thread_metadata(
+        email,
+        {"claim.txt": "Order FUL-1001, item SKU-RED-42. " + ("x" * 10_000)},
+    )
+
+    attachment = metadata["attachments"][0]
+    assert attachment["extractedText"].startswith("Order FUL-1001, item SKU-RED-42.")
+    assert len(attachment["extractedText"]) == 8_000
+    assert attachment["extractedTextTruncated"] is True
 
 
 @pytest.mark.no_gemini

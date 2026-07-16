@@ -49,6 +49,8 @@ WORKFLOW_DONE_BLOCKERS = (
     "pending action approvals",
     "queued replies",
     "failed deliveries",
+    "a customer response",
+    "requested reply changes",
 )
 ISSUE_STATUSES = CANONICAL_ISSUE_STATUSES | {"pending", "triaged", "closed"}
 WORKFLOW_STATUS_ALIASES = {
@@ -1488,6 +1490,23 @@ def _reply_needs_approval(rec: dict[str, Any]) -> bool:
     return _string_from(rec.get("status")) not in {"sent", "failed"}
 
 
+def _reply_has_requested_changes(rec: dict[str, Any]) -> bool:
+    metadata = _parse(rec.get("metadata"), dict)
+    return (
+        _string_from(rec.get("status")) == "draft"
+        and _string_from(metadata.get("reviewStatus")) == "changes_requested"
+    )
+
+
+def _has_no_response_resolution(metadata: dict[str, Any]) -> bool:
+    resolution = _record_from(metadata.get("responseResolution"))
+    return (
+        _string_from(resolution.get("outcome")) == "no_response_required"
+        and bool(_string_from(resolution.get("reason")))
+        and bool(_string_from(resolution.get("resolvedAt")))
+    )
+
+
 def _reply_has_failed_delivery(rec: dict[str, Any]) -> bool:
     return _string_from(rec.get("status")) in {"failed", "delivery_uncertain"}
 
@@ -1834,6 +1853,7 @@ def _issue_done_blockers(
     *,
     tenant_id: str | None,
     project_id: str,
+    allow_no_response_resolution: bool = False,
 ) -> list[str]:
     outbound_messages = _list_all(
         "support_outbound_messages",
@@ -1864,6 +1884,25 @@ def _issue_done_blockers(
         blockers.append(WORKFLOW_DONE_BLOCKERS[2])
     if any(_reply_has_failed_delivery(rec) for rec in outbound_messages):
         blockers.append(WORKFLOW_DONE_BLOCKERS[3])
+    if not allow_no_response_resolution:
+        message_records = _list_all(
+            "support_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"issue='{_escape_pb(issue_id)}'",
+            ),
+            sort="-occurred_at",
+            per_page=200,
+        )
+        response_summary = _message_response_summary_from_records(
+            message_records,
+            issue_status="ongoing",
+        )
+        if bool(response_summary.get("needsResponse")):
+            blockers.append(WORKFLOW_DONE_BLOCKERS[4])
+        if any(_reply_has_requested_changes(rec) for rec in outbound_messages):
+            blockers.append(WORKFLOW_DONE_BLOCKERS[5])
     return blockers
 
 
@@ -6138,7 +6177,14 @@ def _tool_calls_from_chat(
     for name in identity_result.get("toolCallsMade") or identity_result.get("tool_calls_made") or []:
         if isinstance(name, str) and name.strip():
             collected.append({"name": name.strip(), "stage": "identity", "status": "called"})
-    raw_tools = chat.get("tools_used") or chat.get("toolsUsed") or []
+    chat_metadata = _record_from(chat.get("metadata"))
+    raw_tools = (
+        chat.get("tools_used")
+        or chat.get("toolsUsed")
+        or chat_metadata.get("toolsUsed")
+        or chat_metadata.get("tools_used")
+        or []
+    )
     if isinstance(raw_tools, list):
         for item in raw_tools:
             if isinstance(item, dict):
@@ -6358,6 +6404,11 @@ def upsert_issue_from_chat(
     requires_human = bool(chat.get("requires_human", False))
     identity_result = _record_from(chat.get("identity_result"))
     intent_result = _record_from(chat.get("intent_result"))
+    intent_matched = bool(
+        activated_intent
+        or intent_result.get("matched") is True
+        or _string_from(intent_result.get("intentName") or intent_result.get("intent_name"))
+    )
     phishing_result = _record_from(chat.get("phishing_result"))
     prompt_injection_result = _record_from(chat.get("prompt_injection_result"))
     identity = _identity_fields(identity_result, from_address)
@@ -6397,7 +6448,9 @@ def upsert_issue_from_chat(
         project_id=project_id,
     ) if account else None
     priority = _priority(
-        requires_human=requires_human,
+        # A router no-match is a normal inbox item, not automatically a high-risk
+        # support incident. Security monitoring can still independently make it urgent.
+        requires_human=requires_human if intent_matched else False,
         phishing_result=phishing_result,
         prompt_injection_result=prompt_injection_result,
     )
@@ -6434,7 +6487,7 @@ def upsert_issue_from_chat(
         "activated_intent": activated_intent,
         "requires_human": requires_human,
         "message_count": len(messages),
-        "action_log": _action_log(intent_result),
+        "action_log": _action_log(intent_result) if intent_matched else [],
         "latest_message_at": _now_iso(),
     }
     if chat_record_id:
@@ -6454,7 +6507,11 @@ def upsert_issue_from_chat(
         )
         resolver_metadata = _email_resolver_metadata(issue_resolver)
         update = dict(base_data)
-        update["metadata"] = {**_parse(existing.get("metadata"), dict), **resolver_metadata}
+        existing_metadata = _parse(existing.get("metadata"), dict)
+        # A new customer message invalidates any earlier explicit resolution that
+        # said no response was required.
+        existing_metadata.pop("responseResolution", None)
+        update["metadata"] = {**existing_metadata, **resolver_metadata}
         if existing_redirected:
             update.pop("source_email_id", None)
         existing_priority = _string_from(existing.get("priority")) or "normal"
@@ -6486,24 +6543,26 @@ def upsert_issue_from_chat(
             tenant_id=tenant_id,
             project_id=project_id,
         )
-        _sync_external_objects(
-            account_id=_string_from(account.get("id")) if account else "",
-            contact_id=_string_from(contact.get("id")) if contact else "",
-            issue_id=existing["id"],
-            identity=identity,
-            identity_data=identity_data,
-            tenant_id=tenant_id,
-            project_id=project_id,
-        )
+        if intent_matched:
+            _sync_external_objects(
+                account_id=_string_from(account.get("id")) if account else "",
+                contact_id=_string_from(contact.get("id")) if contact else "",
+                issue_id=existing["id"],
+                identity=identity,
+                identity_data=identity_data,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
         _ensure_issue_sla_events(issue_id=existing["id"], tenant_id=tenant_id, project_id=project_id)
-        _sync_account_insights(
-            account_id=_string_from(account.get("id")) if account else None,
-            issue=issue,
-            messages=messages,
-            tenant_id=tenant_id,
-            project_id=project_id,
-        )
-        _sync_knowledge_gap(issue=issue, messages=messages, tenant_id=tenant_id, project_id=project_id)
+        if intent_matched:
+            _sync_account_insights(
+                account_id=_string_from(account.get("id")) if account else None,
+                issue=issue,
+                messages=messages,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            _sync_knowledge_gap(issue=issue, messages=messages, tenant_id=tenant_id, project_id=project_id)
         _upsert_ai_run_from_chat(
             issue_id=existing["id"],
             issue=issue,
@@ -6557,36 +6616,37 @@ def upsert_issue_from_chat(
             project_id=project_id,
             metadata={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
         )
-        automation_result = _run_message_update_automations(
-            issue=issue,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            actor_email="automation",
-            source=source,
-            message_id=email_id,
-            context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
-        )
-        if not _automation_prepared_agent_reply(automation_result):
-            prepared = _ensure_email_channel_autopilot_package(
+        if intent_matched:
+            automation_result = _run_message_update_automations(
                 issue=issue,
-                channel=channel,
                 tenant_id=tenant_id,
                 project_id=project_id,
+                actor_email="automation",
                 source=source,
                 message_id=email_id,
-                on_update=True,
-                automation_result=automation_result,
                 context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
             )
-            if not prepared:
-                _ensure_email_pipeline_reply_draft(
+            if not _automation_prepared_agent_reply(automation_result):
+                prepared = _ensure_email_channel_autopilot_package(
                     issue=issue,
-                    messages=messages,
-                    chat=chat,
+                    channel=channel,
                     tenant_id=tenant_id,
                     project_id=project_id,
                     source=source,
+                    message_id=email_id,
+                    on_update=True,
+                    automation_result=automation_result,
+                    context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
                 )
+                if not prepared:
+                    _ensure_email_pipeline_reply_draft(
+                        issue=issue,
+                        messages=messages,
+                        chat=chat,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        source=source,
+                    )
         return _normalize_issue(issue)
 
     new_issue_id = generate_id()
@@ -6652,23 +6712,24 @@ def upsert_issue_from_chat(
         tenant_id=tenant_id,
         project_id=project_id,
     )
-    _sync_external_objects(
-        account_id=_string_from(account.get("id")) if account else "",
-        contact_id=_string_from(contact.get("id")) if contact else "",
-        issue_id=rec["id"],
-        identity=identity,
-        identity_data=identity_data,
-        tenant_id=tenant_id,
-        project_id=project_id,
-    )
-    _sync_account_insights(
-        account_id=_string_from(account.get("id")) if account else None,
-        issue=rec,
-        messages=messages,
-        tenant_id=tenant_id,
-        project_id=project_id,
-    )
-    _sync_knowledge_gap(issue=rec, messages=messages, tenant_id=tenant_id, project_id=project_id)
+    if intent_matched:
+        _sync_external_objects(
+            account_id=_string_from(account.get("id")) if account else "",
+            contact_id=_string_from(contact.get("id")) if contact else "",
+            issue_id=rec["id"],
+            identity=identity,
+            identity_data=identity_data,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        _sync_account_insights(
+            account_id=_string_from(account.get("id")) if account else None,
+            issue=rec,
+            messages=messages,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        _sync_knowledge_gap(issue=rec, messages=messages, tenant_id=tenant_id, project_id=project_id)
     _upsert_ai_run_from_chat(
         issue_id=rec["id"],
         issue=rec,
@@ -6699,34 +6760,35 @@ def upsert_issue_from_chat(
             "messageCount": len(messages),
         },
     )
-    automation_result = _run_automation_rules_for_issue(
-        issue=rec,
-        trigger="issue_created",
-        tenant_id=tenant_id,
-        project_id=project_id,
-        actor_email="automation",
-        context={"source": source, "emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata},
-    )
-    if not _automation_prepared_agent_reply(automation_result):
-        prepared = _ensure_email_channel_autopilot_package(
+    if intent_matched:
+        automation_result = _run_automation_rules_for_issue(
             issue=rec,
-            channel=channel,
+            trigger="issue_created",
             tenant_id=tenant_id,
             project_id=project_id,
-            source=source,
-            message_id=email_id,
-            automation_result=automation_result,
+            actor_email="automation",
             context={"source": source, "emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata},
         )
-        if not prepared:
-            _ensure_email_pipeline_reply_draft(
+        if not _automation_prepared_agent_reply(automation_result):
+            prepared = _ensure_email_channel_autopilot_package(
                 issue=rec,
-                messages=messages,
-                chat=chat,
+                channel=channel,
                 tenant_id=tenant_id,
                 project_id=project_id,
                 source=source,
+                message_id=email_id,
+                automation_result=automation_result,
+                context={"source": source, "emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata},
             )
+            if not prepared:
+                _ensure_email_pipeline_reply_draft(
+                    issue=rec,
+                    messages=messages,
+                    chat=chat,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source=source,
+                )
     return _normalize_issue(rec)
 
 
@@ -9919,7 +9981,7 @@ def _create_issue_agent_answer(
         )
     answer = draft.answer
     confidence = draft.confidence
-    articles = fallback_articles
+    articles: list[dict[str, Any]] = [] if use_knowledge_agent else fallback_articles
     if use_knowledge_agent and draft.generation_mode == "knowledge_agent":
         corpus_by_id = {
             _string_from(article.get("id")): article
@@ -9992,7 +10054,9 @@ def _create_issue_agent_answer(
         )
     lineage = full_lineage[:100]
     reply = None
-    should_create_reply = create_draft or auto_send
+    should_create_reply = (create_draft or auto_send) and not (
+        use_knowledge_agent and bool(draft.error)
+    )
     citation_previews = [
         _agent_citation_preview(article, citation_evidence)
         for article in articles
@@ -10404,6 +10468,7 @@ def create_issue_agent_chat_message(
             "knowledgeAccessPolicy": _record_from(answer.get("knowledgeAccessPolicy")),
             "conversationContext": _record_from(answer.get("conversationContext")),
             "generationMode": _string_from(answer.get("generationMode")),
+            "generationError": _string_from(answer.get("generationError")),
             "autoSend": bool(answer.get("autoSend")),
             "autoSendRequested": bool(answer.get("autoSendRequested")),
             "autoSendPolicy": _string_from(answer.get("autoSendPolicy")),
@@ -12435,6 +12500,30 @@ def update_issue(
         )
         data["metadata"] = {**old_metadata, "customFields": next_custom_fields}
 
+    resolve_without_reply = updates.get("resolve_without_reply", updates.get("resolveWithoutReply"))
+    resolution_note = _string_from(updates.get("resolution_note") or updates.get("resolutionNote")).strip()
+    if resolve_without_reply is True:
+        if data.get("status") != "done":
+            raise ValueError("resolveWithoutReply may only be used while closing a ticket")
+        if not resolution_note:
+            raise ValueError("A resolution note is required when closing without a reply")
+        metadata = _parse(data.get("metadata"), dict) or dict(old_metadata)
+        metadata["responseResolution"] = {
+            "outcome": "no_response_required",
+            "reason": resolution_note,
+            "resolvedAt": _now_iso(),
+            "resolvedBy": _string_from(updates.get("assigned_by") or updates.get("actor_email")),
+        }
+        data["metadata"] = metadata
+    elif resolve_without_reply is False:
+        metadata = _parse(data.get("metadata"), dict) or dict(old_metadata)
+        metadata.pop("responseResolution", None)
+        data["metadata"] = metadata
+    elif data.get("status") in {"open", "ongoing"} and _has_no_response_resolution(old_metadata):
+        metadata = _parse(data.get("metadata"), dict) or dict(old_metadata)
+        metadata.pop("responseResolution", None)
+        data["metadata"] = metadata
+
     queue_changed = (
         ("queue_key" in data or "queue_name" in data)
         and (data.get("queue_key", old_queue_key) != old_queue_key or data.get("queue_name", old_queue_name) != old_queue_name)
@@ -12471,7 +12560,13 @@ def update_issue(
         assignee_email=effective_assignee,
     )
     if data.get("status") == "done" and old_status != "done":
-        blockers = _issue_done_blockers(issue_id, tenant_id=tenant_id, project_id=project_id)
+        effective_metadata = _parse(data.get("metadata"), dict) or old_metadata
+        blockers = _issue_done_blockers(
+            issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            allow_no_response_resolution=_has_no_response_resolution(effective_metadata),
+        )
         if blockers:
             raise ValueError(f"Cannot close ticket until {', '.join(blockers)} are resolved")
 

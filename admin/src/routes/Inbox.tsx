@@ -31,6 +31,8 @@ type InboxView = 'list' | 'board';
 type InboxStatusFilter = 'all' | 'needs-response' | 'approvals' | 'reply-approvals' | 'action-approvals' | 'unassigned' | 'failed-delivery' | 'low-csat' | 'due-soon-sla' | 'overdue-sla' | WorkflowLane;
 type IssuePatch = Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & {
     workflowSource?: string;
+    resolveWithoutReply?: boolean;
+    resolutionNote?: string;
 };
 type TranslateFn = (key: string, params?: Record<string, string | number>) => string;
 type SupportReplyReadiness = SupportIssueAnswerWorkspace['replyReadiness'];
@@ -584,11 +586,7 @@ function messageText(message: SupportIssueMessage): string {
         const body = textFrom(message.content.emailBody) || textFrom(message.content.email_body);
         if (body) return body;
     }
-    try {
-        return JSON.stringify(message.content ?? message, null, 2);
-    } catch {
-        return '';
-    }
+    return '';
 }
 
 function messageLabel(message: SupportIssueMessage) {
@@ -1593,7 +1591,7 @@ function issueHasPendingDelivery(issue: SupportIssue): boolean {
     return issue.hasPendingDelivery || (issue.outboundMessages ?? []).some(replyPendingDelivery);
 }
 
-function issueDoneBlockers(issue: SupportIssue): string[] {
+function issueOperationalDoneBlockers(issue: SupportIssue): string[] {
     const blockers: string[] = [];
     const replyDrafts = pendingReplyApprovalCount(issue);
     const actionProposals = pendingActionApprovalCount(issue);
@@ -1604,6 +1602,24 @@ function issueDoneBlockers(issue: SupportIssue): string[] {
     if (issueHasPendingDelivery(issue)) blockers.push('queued replies');
     if (issueHasFailedDelivery(issue)) blockers.push('failed deliveries');
     return blockers;
+}
+
+function issueResponseDoneBlockers(issue: SupportIssue): string[] {
+    const blockers: string[] = [];
+    if (issueNeedsResponse(issue)) blockers.push('customer response required');
+    if ((issue.outboundMessages ?? []).some(replyChangesRequested)) {
+        blockers.push('reply changes requested');
+    }
+    return blockers;
+}
+
+function issueDoneBlockers(issue: SupportIssue): string[] {
+    return [...issueOperationalDoneBlockers(issue), ...issueResponseDoneBlockers(issue)];
+}
+
+function issueCanResolveWithoutReply(issue: SupportIssue): boolean {
+    return issueOperationalDoneBlockers(issue).length === 0
+        && issueResponseDoneBlockers(issue).length > 0;
 }
 
 function issueDoneBlockerText(issue: SupportIssue): string {
@@ -3102,6 +3118,9 @@ export function Inbox({ projectId }: InboxProps) {
     const [mergeTargetIssueId, setMergeTargetIssueId] = useState('');
     const [mergeNote, setMergeNote] = useState('');
     const [mergingIssue, setMergingIssue] = useState(false);
+    const [closeWithoutReplyOpen, setCloseWithoutReplyOpen] = useState(false);
+    const [closeWithoutReplyNote, setCloseWithoutReplyNote] = useState('');
+    const [closingWithoutReply, setClosingWithoutReply] = useState(false);
     const [duplicateSuggestions, setDuplicateSuggestions] = useState<SupportIssueDuplicateSuggestion[]>([]);
     const [loadingDuplicateSuggestions, setLoadingDuplicateSuggestions] = useState(false);
     const [splitMessageOpen, setSplitMessageOpen] = useState(false);
@@ -3397,6 +3416,8 @@ export function Inbox({ projectId }: InboxProps) {
                 setEditingReplyBody('');
                 setChangeRequestReplyId('');
                 setChangeRequestNote('');
+                setCloseWithoutReplyOpen(false);
+                setCloseWithoutReplyNote('');
             }
             return true;
         } finally {
@@ -5003,6 +5024,42 @@ export function Inbox({ projectId }: InboxProps) {
         if (failed.length > 0) {
             toast.error(`${failed.length} ${t('knowledge scans failed')}`);
         }
+    };
+
+    const openCloseWithoutReplyDialog = () => {
+        if (!selectedIssue || !issueCanResolveWithoutReply(selectedIssue)) return;
+        setCloseWithoutReplyNote('');
+        setCloseWithoutReplyOpen(true);
+    };
+
+    const closeSelectedIssueWithoutReply = async () => {
+        if (!selectedIssue || closingWithoutReply) return;
+        if (!issueCanResolveWithoutReply(selectedIssue)) {
+            toast.error(t('Resolve pending approvals or delivery problems before closing.'));
+            return;
+        }
+        const resolutionNote = closeWithoutReplyNote.trim();
+        if (!resolutionNote) {
+            toast.error(t('Add a resolution note before closing without a reply.'));
+            return;
+        }
+        setClosingWithoutReply(true);
+        const res = await api.updateIssue(projectId, selectedIssue.id, {
+            status: 'done',
+            workflowSource: 'inbox_close_without_reply',
+            resolveWithoutReply: true,
+            resolutionNote,
+        });
+        setClosingWithoutReply(false);
+        if (res.error || !res.data) {
+            toast.error(res.error || t('Could not close ticket without a reply'));
+            return;
+        }
+        setSelectedIssue(prev => prev ? { ...prev, ...res.data } : res.data);
+        setIssues(prev => prev.map(issue => issue.id === res.data?.id ? { ...issue, ...res.data } : issue));
+        setCloseWithoutReplyOpen(false);
+        setCloseWithoutReplyNote('');
+        toast.success(t('Ticket closed without a reply'));
     };
 
     const patchSelectedIssue = async (data: IssuePatch) => {
@@ -7816,6 +7873,55 @@ export function Inbox({ projectId }: InboxProps) {
         </Dialog>
     ) : null;
 
+    const closeWithoutReplyDialog = closeWithoutReplyOpen && selectedIssue ? (
+        <Dialog
+            open={closeWithoutReplyOpen}
+            onOpenChange={(open) => {
+                if (!closingWithoutReply) setCloseWithoutReplyOpen(open);
+            }}
+        >
+            <DialogContent className="sm:max-w-lg" data-ticket-close-without-reply-dialog>
+                <DialogHeader>
+                    <DialogTitle>{t('Close without replying')}</DialogTitle>
+                    <DialogDescription>
+                        {t('Use this only when the customer does not need a reply. The reason is saved in the ticket history.')}
+                    </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-2">
+                    <Label htmlFor="close-without-reply-note">{t('Resolution note')}</Label>
+                    <Textarea
+                        id="close-without-reply-note"
+                        value={closeWithoutReplyNote}
+                        onChange={event => setCloseWithoutReplyNote(event.target.value)}
+                        rows={4}
+                        placeholder={t('Explain why no customer reply is required')}
+                        data-ticket-close-without-reply-note
+                    />
+                </div>
+                <DialogFooter>
+                    <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setCloseWithoutReplyOpen(false)}
+                        disabled={closingWithoutReply}
+                    >
+                        {t('Cancel')}
+                    </Button>
+                    <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={() => void closeSelectedIssueWithoutReply()}
+                        disabled={closingWithoutReply || !closeWithoutReplyNote.trim()}
+                        data-ticket-close-without-reply-confirm
+                    >
+                        {closingWithoutReply ? <Loader className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+                        {t('Close without reply')}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    ) : null;
+
     const mergeDialog = mergeOpen && selectedIssue ? (
         <Dialog open={mergeOpen} onOpenChange={(open) => {
             if (!mergingIssue) setMergeOpen(open);
@@ -9895,6 +10001,88 @@ export function Inbox({ projectId }: InboxProps) {
         </section>
     ) : null;
 
+    const duplicateSuggestionsPanel = selectedIssue ? (
+        <section className="rounded-md border p-3" data-ticket-duplicate-panel>
+            <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">{t('Suggested duplicates')}</div>
+                <div className="flex items-center gap-2">
+                    {loadingDuplicateSuggestions && <Loader className="size-3.5 animate-spin" />}
+                    <Badge variant="outline" className="font-normal">
+                        {duplicateSuggestions.length}
+                    </Badge>
+                </div>
+            </div>
+            <div className="space-y-2">
+                {duplicateSuggestions.slice(0, 5).map(suggestion => (
+                    <div
+                        key={suggestion.issue.id}
+                        className="rounded-md border bg-muted/20 p-2.5"
+                        data-ticket-duplicate-suggestion={suggestion.issue.id}
+                    >
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">
+                                    {suggestion.issue.subject || '(No subject)'}
+                                </div>
+                                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                                    {suggestion.issue.accountName || suggestion.issue.contactEmail || suggestion.issue.fromAddress || suggestion.issue.id}
+                                </div>
+                            </div>
+                            <Badge variant="secondary" className="shrink-0 font-normal">
+                                {t(duplicateScoreLabel(suggestion.score))} · {Math.round(suggestion.score)}%
+                            </Badge>
+                        </div>
+                        {suggestion.reasons.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {suggestion.reasons.slice(0, 4).map(reason => (
+                                    <Badge key={`${suggestion.issue.id}:${reason}`} variant="outline" className="font-normal">
+                                        {reason}
+                                    </Badge>
+                                ))}
+                            </div>
+                        )}
+                        <div className="mt-2 flex justify-end gap-2">
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                data-ticket-duplicate-open={suggestion.issue.id}
+                                onClick={() => navigateToIssue(suggestion.issue.id, { viewMode })}
+                            >
+                                <ExternalLink className="size-3.5" />
+                                {t('Open')}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                data-ticket-duplicate-merge={suggestion.issue.id}
+                                onClick={() => openMergeDialog(suggestion.issue.id)}
+                            >
+                                <Link className="size-3.5" />
+                                {t('Merge')}
+                            </Button>
+                        </div>
+                    </div>
+                ))}
+                {!loadingDuplicateSuggestions && duplicateSuggestions.length === 0 && (
+                    <div className="text-sm text-muted-foreground">{t('No duplicate suggestions')}</div>
+                )}
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-start"
+                    data-ticket-merge-duplicate-open
+                    onClick={() => openMergeDialog()}
+                    disabled={mergeTargetOptions.length === 0 || mergingIssue}
+                >
+                    <Link className="size-4" />
+                    {t('Merge another ticket')}
+                </Button>
+            </div>
+        </section>
+    ) : null;
+
     const boardDetailPanel = (
         <Drawer
             open={Boolean(issueId)}
@@ -9994,6 +10182,7 @@ export function Inbox({ projectId }: InboxProps) {
                         {channelWebhookEventsPanel}
                         {autopilotProofPanel}
                         {reviewPackagePanel}
+                        {duplicateSuggestionsPanel}
 
                         <section className="rounded-md border bg-muted/20 p-3">
                             <div className="mb-2 text-sm font-medium">{t('AI summary')}</div>
@@ -10161,6 +10350,19 @@ export function Inbox({ projectId }: InboxProps) {
                                     <AlertTriangle className="size-3.5 shrink-0" />
                                     <span>{t('Resolve before closing')}: {issueDoneBlockerText(selectedIssue)}</span>
                                 </div>
+                            )}
+                            {issueWorkflowStatus(selectedIssue) !== 'done' && issueCanResolveWithoutReply(selectedIssue) && (
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="mt-3"
+                                    onClick={openCloseWithoutReplyDialog}
+                                    data-ticket-close-without-reply-open
+                                >
+                                    <CheckCircle2 className="size-3.5" />
+                                    {t('Close without reply')}
+                                </Button>
                             )}
                             {!selectedIssue.assigneeEmail && (
                                 <div className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -10934,6 +11136,7 @@ export function Inbox({ projectId }: InboxProps) {
                 {newTicketDialog}
                 {saveViewDialog}
                 {saveMacroDialog}
+                {closeWithoutReplyDialog}
                 {mergeDialog}
                 {splitMessageDialog}
                 {bulkRejectActionsDialog}
@@ -11259,6 +11462,7 @@ export function Inbox({ projectId }: InboxProps) {
             {newTicketDialog}
             {saveViewDialog}
             {saveMacroDialog}
+            {closeWithoutReplyDialog}
             {mergeDialog}
             {splitMessageDialog}
             {bulkRejectActionsDialog}
@@ -12143,6 +12347,18 @@ export function Inbox({ projectId }: InboxProps) {
                                                     {t('Resolve before closing')}: {issueDoneBlockerText(selectedIssue)}
                                                 </div>
                                             )}
+                                            {issueWorkflowStatus(selectedIssue) !== 'done' && issueCanResolveWithoutReply(selectedIssue) && (
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={openCloseWithoutReplyDialog}
+                                                    data-ticket-close-without-reply-open
+                                                >
+                                                    <CheckCircle2 className="size-3.5" />
+                                                    {t('Close without reply')}
+                                                </Button>
+                                            )}
                                             {!selectedIssue.assigneeEmail && (
                                                 <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
                                                     <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -12319,52 +12535,8 @@ export function Inbox({ projectId }: InboxProps) {
                                                 </Button>
                                             </div>
                                         </div>
-                                        {(loadingDuplicateSuggestions || duplicateSuggestions.length > 0) && (
-                                            <div className="space-y-2 border-t pt-3">
-                                                <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
-                                                    <span>{t('Suggested duplicates')}</span>
-                                                    {loadingDuplicateSuggestions && <Loader className="size-3.5 animate-spin" />}
-                                                </div>
-                                                <div className="space-y-1.5">
-                                                    {duplicateSuggestions.slice(0, 3).map(suggestion => (
-                                                        <button
-                                                            key={suggestion.issue.id}
-                                                            type="button"
-                                                            className="w-full rounded-md border px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted/50"
-                                                            data-ticket-duplicate-suggestion={suggestion.issue.id}
-                                                            onClick={() => openMergeDialog(suggestion.issue.id)}
-                                                        >
-                                                            <div className="flex min-w-0 items-center justify-between gap-2">
-                                                                <span className="min-w-0 truncate font-medium">
-                                                                    {suggestion.issue.subject || '(No subject)'}
-                                                                </span>
-                                                                <Badge variant="secondary" className="shrink-0 font-normal">
-                                                                    {t(duplicateScoreLabel(suggestion.score))}
-                                                                </Badge>
-                                                            </div>
-                                                            <div className="mt-1 truncate text-xs text-muted-foreground">
-                                                                {(suggestion.reasons ?? []).join(', ') || suggestion.issue.contactEmail || '-'}
-                                                            </div>
-                                                        </button>
-                                                    ))}
-                                                    {!loadingDuplicateSuggestions && duplicateSuggestions.length === 0 && (
-                                                        <div className="text-xs text-muted-foreground">-</div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        )}
                                         <div className="border-t pt-3">
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                className="w-full justify-start"
-                                                data-ticket-merge-duplicate-open
-                                                onClick={() => openMergeDialog()}
-                                                disabled={mergeTargetOptions.length === 0 || mergingIssue}
-                                            >
-                                                <Link className="size-4" />
-                                                {t('Merge duplicate')}
-                                            </Button>
+                                            {duplicateSuggestionsPanel}
                                         </div>
                                     </div>
                                 </section>

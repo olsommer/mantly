@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from automail.core.observability import correlation_id, redact, redact_text, request_id
 
@@ -72,8 +72,9 @@ class RedactingTextFormatter(logging.Formatter):
     """Human-readable local format that still redacts common secrets/content."""
 
     def format(self, record: logging.LogRecord) -> str:
-        rendered = super().format(record)
-        return redact_text(rendered)
+        record.request_id = request_id() or "-"
+        record.correlation_id = correlation_id() or "-"
+        return redact_text(super().format(record))
 
 
 def _resolve_level(level: int | None) -> int:
@@ -109,7 +110,7 @@ def setup_logging(level: int | None = None) -> None:
     handler: logging.StreamHandler[Any] | None = None
     for existing in root.handlers:
         if getattr(existing, "_mantly_handler", False):
-            handler = existing  # type: ignore[assignment]
+            handler = cast(logging.StreamHandler[Any], existing)
             break
     if handler is None:
         handler = logging.StreamHandler(sys.stdout)
@@ -122,12 +123,3 @@ def setup_logging(level: int | None = None) -> None:
     # Third-party debug logs can contain payloads or create excessive volume.
     for logger_name in ("httpx", "httpcore", "urllib3", "multipart", "asyncio"):
         logging.getLogger(logger_name).setLevel(max(resolved_level, logging.WARNING))
-
-
-class RequestContextFilter(logging.Filter):
-    """Populate text-format request fields without changing application calls."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.request_id = request_id() or "-"
-        record.correlation_id = correlation_id() or "-"
-        return True

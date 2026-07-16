@@ -13,7 +13,7 @@ import uuid
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, MutableMapping, TypeVar
+from typing import Any, Callable, Mapping, TypeVar, cast
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from starlette.middleware.base import RequestResponseEndpoint
@@ -63,8 +63,7 @@ def reset_request_context(tokens: tuple[contextvars.Token[str], contextvars.Toke
 def sanitize_identifier(value: str | None, *, max_length: int = 128) -> str:
     if not value:
         return ""
-    cleaned = re.sub(r"[^A-Za-z0-9._:-]", "", value.strip())[:max_length]
-    return cleaned
+    return re.sub(r"[^A-Za-z0-9._:-]", "", value.strip())[:max_length]
 
 
 def redact_text(value: str, *, redact_emails: bool | None = None) -> str:
@@ -100,6 +99,12 @@ def redact(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, (list, tuple, set, frozenset)):
         return [redact(item, depth=depth + 1) for item in value]
     return redact_text(str(value))
+
+
+def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    return cast(dict[str, Any], redact(value))
 
 
 @dataclass
@@ -157,8 +162,10 @@ class RuntimeObservability:
             state.enabled = enabled
             state.status = "running" if enabled else "disabled"
             state.started_at = iso_now()
-            state.stale_after_seconds = stale_after_seconds
-            state.details = dict(redact(details or {}))
+            if stale_after_seconds is not None:
+                state.stale_after_seconds = stale_after_seconds
+            if details is not None:
+                state.details.update(_redacted_mapping(details))
             if not enabled:
                 state.last_error = None
                 state.consecutive_failures = 0
@@ -182,7 +189,6 @@ class RuntimeObservability:
             state.enabled = True
             state.status = status
             state.last_success_at = iso_now()
-            state.last_failure_at = state.last_failure_at
             state.last_duration_ms = (
                 int((time.monotonic() - started_monotonic) * 1000) if started_monotonic is not None else None
             )
@@ -190,7 +196,7 @@ class RuntimeObservability:
             state.total_runs += 1
             state.last_error = None
             if details is not None:
-                state.details = dict(redact(details))
+                state.details.update(_redacted_mapping(details))
 
     def mark_failure(
         self,
@@ -213,7 +219,7 @@ class RuntimeObservability:
             state.total_failures += 1
             state.last_error = redact_text(str(error))[:500]
             if details is not None:
-                state.details = dict(redact(details))
+                state.details.update(_redacted_mapping(details))
 
     def record_request(self, method: str, path: str, status_code: int, duration_ms: int, request_value: str) -> None:
         normalized_path = normalize_path(path)
@@ -269,7 +275,7 @@ class RuntimeObservability:
                 failures.append(name)
             stale_after = state.get("stale_after_seconds")
             last_success = state.get("last_success_at")
-            if stale_after and last_success:
+            if isinstance(stale_after, int) and stale_after > 0 and isinstance(last_success, str):
                 parsed = datetime.fromisoformat(last_success)
                 if (now - parsed).total_seconds() > stale_after:
                     stale.append(name)
@@ -292,7 +298,7 @@ runtime_observability = RuntimeObservability()
 def normalize_path(path: str) -> str:
     """Reduce high-cardinality identifiers while preserving route usefulness."""
 
-    segments = []
+    segments: list[str] = []
     for segment in path.split("/"):
         if not segment:
             continue

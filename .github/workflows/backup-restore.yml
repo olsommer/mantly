@@ -1,0 +1,134 @@
+name: Backup and restore
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-restore-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restore-drill:
+    name: Synthetic volume restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE_FILE: ${{ github.workspace }}/tests/fixtures/backup/docker-compose.yml
+      COMPOSE_PROJECT_NAME: mantly-backup-ci
+      ALLOW_UNENCRYPTED_BACKUP: "true"
+      SKIP_RESTORE_SERVICE_HEALTHCHECK: "true"
+      RESTORE_CONFIRM: ERASE_AND_RESTORE_MANTLY
+      BACKUP_REASON: ci-restore-drill
+      BACKUP_OPERATOR: github-actions
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate scripts
+        run: |
+          set -euo pipefail
+          bash -n scripts/backup.sh
+          bash -n scripts/restore.sh
+          python3 -m py_compile scripts/verify-restore.py
+
+      - name: Start isolated durable-volume fixture
+        run: docker compose up -d
+
+      - name: Seed representative PocketBase and application state
+        run: |
+          set -euo pipefail
+          docker compose run --rm pocketbase python - <<'PY'
+          import pathlib
+          import sqlite3
+
+          database = pathlib.Path('/pb/pb_data/data.db')
+          database.parent.mkdir(parents=True, exist_ok=True)
+          connection = sqlite3.connect(database)
+          try:
+              connection.execute('CREATE TABLE restore_fixture (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
+              connection.execute('INSERT INTO restore_fixture(value) VALUES (?)', ('before-backup',))
+              connection.commit()
+          finally:
+              connection.close()
+          pathlib.Path('/pb/pb_data/attachment.txt').write_text('attachment-before-backup\n', encoding='utf-8')
+          PY
+          docker compose run --rm app sh -ec \
+            "mkdir -p /app/data/nested; printf 'application-before-backup\n' > /app/data/nested/state.txt"
+
+      - name: Create consistent backup bundle
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mantly-backups"
+          bash scripts/backup.sh "$RUNNER_TEMP/mantly-backups"
+          bundle="$(find "$RUNNER_TEMP/mantly-backups" -maxdepth 1 -name 'mantly-backup-*.tar.gz' -type f | head -n 1)"
+          test -n "$bundle"
+          test -s "$bundle"
+          test -s "$bundle.sha256"
+          printf 'BACKUP_BUNDLE=%s\n' "$bundle" >> "$GITHUB_ENV"
+
+      - name: Mutate and delete durable state after backup
+        run: |
+          set -euo pipefail
+          docker compose run --rm pocketbase python - <<'PY'
+          import pathlib
+          import sqlite3
+
+          database = pathlib.Path('/pb/pb_data/data.db')
+          connection = sqlite3.connect(database)
+          try:
+              connection.execute('UPDATE restore_fixture SET value = ?', ('after-backup-corruption',))
+              connection.commit()
+          finally:
+              connection.close()
+          pathlib.Path('/pb/pb_data/attachment.txt').unlink()
+          pathlib.Path('/pb/pb_data/unwanted-after-backup.txt').write_text('must disappear\n', encoding='utf-8')
+          PY
+          docker compose run --rm app sh -ec \
+            "printf 'after-backup-corruption\n' > /app/data/nested/state.txt; printf 'must disappear\n' > /app/data/unwanted.txt"
+
+      - name: Restore and verify the backup
+        run: bash scripts/restore.sh "$BACKUP_BUNDLE"
+
+      - name: Prove restored database, attachment, and application state
+        run: |
+          set -euo pipefail
+          docker compose run --rm pocketbase python - <<'PY'
+          import pathlib
+          import sqlite3
+
+          database = pathlib.Path('/pb/pb_data/data.db')
+          connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+          try:
+              value = connection.execute('SELECT value FROM restore_fixture').fetchone()[0]
+              integrity = connection.execute('PRAGMA integrity_check').fetchone()[0]
+          finally:
+              connection.close()
+          assert value == 'before-backup', value
+          assert integrity == 'ok', integrity
+          assert pathlib.Path('/pb/pb_data/attachment.txt').read_text(encoding='utf-8') == 'attachment-before-backup\n'
+          assert not pathlib.Path('/pb/pb_data/unwanted-after-backup.txt').exists()
+          PY
+          docker compose run --rm app sh -ec \
+            "test \"$(cat /app/data/nested/state.txt)\" = 'application-before-backup'; test ! -e /app/data/unwanted.txt"
+
+      - name: Upload backup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-backup-restore-evidence
+          path: |
+            ${{ env.BACKUP_BUNDLE }}
+            ${{ env.BACKUP_BUNDLE }}.sha256
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Stop fixture
+        if: always()
+        run: docker compose down -v --remove-orphans

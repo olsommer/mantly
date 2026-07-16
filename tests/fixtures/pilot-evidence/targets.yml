@@ -1,0 +1,51 @@
+schema_version: "1.0"
+pilot_id: "synthetic-pilot-ci"
+customer_identifier: "synthetic-design-partner"
+operational_owner: "synthetic-operations-owner"
+economic_buyer: "synthetic-economic-buyer"
+pilot_window:
+  start: "2026-07-01"
+  end: "2026-07-15"
+mailbox_or_queue: "synthetic@example.test"
+workflow: "email-based order and delivery support"
+expected_eligible_ticket_count: 6
+minimum_eligible_ticket_count: 6
+observation_window_days: 7
+baseline:
+  start: "2026-06-01"
+  end: "2026-06-30"
+  labour_cost_per_hour: 60.0
+runbooks:
+  - id: "delivery-status"
+    version: "1.0.0"
+    autonomy: "automatic"
+  - id: "delivery-address-change"
+    version: "1.0.0"
+    autonomy: "semi-automatic"
+  - id: "cancellation-or-refund-eligibility"
+    version: "1.0.0"
+    autonomy: "semi-automatic"
+targets:
+  verified_full_automation_rate_min: 0.20
+  recurring_cost_reduction_min: 0.15
+  runbook_match_precision_min: 0.95
+  critical_outcomes_max: 0
+  unsafe_or_materially_incorrect_rate_max: 0.00
+  first_response_time_p90_seconds_max: 900
+  resolution_time_p90_seconds_max: 3600
+review_sampling:
+  first_eligible_tickets_full_review: 6
+  autonomous_sample_rate_after_initial: 1.0
+  assisted_sample_rate: 1.0
+pause_conditions:
+  - "critical unsafe or materially incorrect outcome"
+  - "suspected tenant-isolation incident"
+approved_exclusion_reasons:
+  - "spam_or_malware"
+  - "duplicate_ingestion"
+commercial_decision_date: "2026-07-15"
+approvals:
+  product_owner: "synthetic-product-owner"
+  engineering_owner: "synthetic-engineering-owner"
+  customer_operational_owner: "synthetic-operations-owner"
+  privacy_or_legal_owner: "synthetic-privacy-owner"

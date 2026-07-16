@@ -1269,7 +1269,6 @@ def assess_issue_automation_grounding(
         clean_unit_assessments: list[dict[str, Any]] = []
         for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]:
             unit_id = _string_from(assessment.unit_id)
-            unit_sha256 = _string_from(assessment.unit_sha256)
             expected_unit = expected_units.get(unit_id)
             evidence_ids = tuple(
                 dict.fromkeys(
@@ -1285,8 +1284,7 @@ def assess_issue_automation_grounding(
             if expected_unit is None:
                 protocol_errors.append(f"Evaluator returned unknown answer-unit ID: {unit_id}")
                 continue
-            if unit_sha256 != _string_from(expected_unit.get("sha256")):
-                protocol_errors.append(f"Evaluator answer-unit hash does not match: {unit_id}")
+            expected_unit_sha256 = _string_from(expected_unit.get("sha256"))
             unknown_ids = [evidence_id for evidence_id in evidence_ids if evidence_id not in allowed_ids]
             if unknown_ids:
                 protocol_errors.append(f"Answer unit uses unknown evidence IDs: {', '.join(unknown_ids[:5])}")
@@ -1297,7 +1295,7 @@ def assess_issue_automation_grounding(
             clean_unit_assessments.append(
                 {
                     "unitId": unit_id,
-                    "unitSha256": unit_sha256,
+                    "unitSha256": expected_unit_sha256,
                     "supported": bool(assessment.supported),
                     "evidenceIds": list(evidence_ids),
                 }

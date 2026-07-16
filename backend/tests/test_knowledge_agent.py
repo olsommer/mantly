@@ -971,10 +971,8 @@ def test_grounding_answer_units_cover_every_non_whitespace_character() -> None:
     assert all(character.isspace() or index in covered for index, character in enumerate(answer))
 
 
-@pytest.mark.parametrize("failure", ["missing_unit", "wrong_hash"])
 def test_grounding_gate_rejects_incomplete_unit_protocol(
     monkeypatch: pytest.MonkeyPatch,
-    failure: str,
 ) -> None:
     answer = "The parcel is delayed. It should arrive within seven business days."
     units = issue_agent._grounding_answer_units(answer)
@@ -987,10 +985,7 @@ def test_grounding_gate_rejects_incomplete_unit_protocol(
         )
         for unit in units
     ]
-    if failure == "missing_unit":
-        assessments.pop()
-    else:
-        assessments[0].unit_sha256 = "0" * 64
+    assessments.pop()
     output = AutomationGroundingOutput(
         verdict="grounded",
         answer_sha256=issue_agent.grounding_text_sha256(answer),
@@ -1030,17 +1025,18 @@ def test_grounding_gate_rejects_incomplete_unit_protocol(
 
 
 @pytest.mark.parametrize(
-    "checked_citation_ids",
+    ("checked_citation_ids", "model_unit_sha256"),
     [
-        [],
-        ["shipping-policy", "shipping-policy"],
-        ["messages", "ticket"],
-        ["unknown-redundant-echo"],
+        ([], ""),
+        (["shipping-policy", "shipping-policy"], ""),
+        (["messages", "ticket"], "one-character-short-model-echo"),
+        (["unknown-redundant-echo"], ""),
     ],
 )
 def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes(
     monkeypatch: pytest.MonkeyPatch,
     checked_citation_ids: list[str],
+    model_unit_sha256: str,
 ) -> None:
     answer = "The parcel is delayed."
     monkeypatch.setattr(config_module, "read_config", lambda: {})
@@ -1064,7 +1060,10 @@ def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes
                     unit_assessments=[
                         AutomationGroundingUnitAssessment(
                             unit_id="u001",
-                            unit_sha256=issue_agent.grounding_text_sha256(answer),
+                            unit_sha256=(
+                                model_unit_sha256
+                                or issue_agent.grounding_text_sha256(answer)
+                            ),
                             supported=True,
                             evidence_ids=["shipping-policy"],
                         )
@@ -1088,6 +1087,7 @@ def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes
     assert result.status == "passed"
     assert result.citation_ids == ("shipping-policy",)
     assert [snapshot["id"] for snapshot in result.evidence_snapshots] == ["shipping-policy"]
+    assert result.unit_assessments[0]["unitSha256"] == issue_agent.grounding_text_sha256(answer)
 
 
 def test_grounding_prompt_allows_unused_supplied_articles() -> None:

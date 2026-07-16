@@ -80,8 +80,19 @@ def _intent_needs_processing(
     intent_name: str,
     actions: list[IntentAction],
     intents_dir: Any = None,
+    *,
+    response_enabled: bool,
 ) -> bool:
-    return bool(actions) or bool(get_intent_tools(intent_name, intents_dir=intents_dir))
+    if actions:
+        return True
+    tools = get_intent_tools(intent_name, intents_dir=intents_dir)
+    if not tools:
+        return False
+    response_owns_tools = response_enabled and all(
+        isinstance(item, dict) and str(item.get("method") or "").upper() == "GET"
+        for item in tools
+    )
+    return not response_owns_tools
 
 
 def _merge_action_fills(actions: list[IntentAction], output: IntentProcessingOutput) -> int:
@@ -506,7 +517,12 @@ def _handle_matched_intent(
             project_id=project_id,
         )
 
-    if _intent_needs_processing(intent_name, intent_result.actions, intents_dir=intents_dir):
+    if _intent_needs_processing(
+        intent_name,
+        intent_result.actions,
+        intents_dir=intents_dir,
+        response_enabled=intent_result.response.enabled,
+    ):
         output = _run_processing_agent(
             intent_name,
             intent_result.actions,
@@ -538,7 +554,7 @@ def _handle_matched_intent(
             fills_count,
         )
     else:
-        logger.info("Passthrough intent '%s': no tools or business actions", intent_name)
+        logger.info("Intent '%s' requires no separate processing stage", intent_name)
 
     agent_response = _maybe_draft_response(
         intent_result,

@@ -841,7 +841,15 @@ class TestIntentAttachmentContext:
             "name": "open_claim",
             "label": "Open claim",
         }])
-        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_tools",
+            lambda *_args, **_kwargs: [{
+                "name": "lookup-claim",
+                "description": "Read-only claim lookup.",
+                "method": "GET",
+                "urlTemplate": "https://api.example.test/claims",
+            }],
+        )
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
         monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", lambda *_args, **_kwargs: IntentProcessingOutput())
 
@@ -892,7 +900,15 @@ class TestIntentAttachmentContext:
         monkeypatch.setattr("automail.pipeline.intent.agent.create_agent", lambda *args, **kwargs: FakeAgent())
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
-        monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_tools",
+            lambda *_args, **_kwargs: [{
+                "name": "lookup-claim",
+                "description": "Read-only claim lookup.",
+                "method": "GET",
+                "urlTemplate": "https://api.example.test/claims",
+            }],
+        )
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {"enabled": True})
         monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", fake_processing)
         monkeypatch.setattr("automail.pipeline.intent.agent._run_response_agent", fake_response)
@@ -906,6 +922,22 @@ class TestIntentAttachmentContext:
         assert agent_response is not None
         assert agent_response.response_text == "Draft"
         assert calls == {"processing": 0, "response": 1}
+
+    @pytest.mark.no_gemini
+    def test_non_response_or_mutating_tool_intents_keep_processing(self, monkeypatch):
+        from automail.pipeline.intent.agent import _intent_needs_processing
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_tools",
+            lambda *_args, **_kwargs: [{"method": "GET"}],
+        )
+        assert _intent_needs_processing("claim", [], response_enabled=False) is True
+
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.get_intent_tools",
+            lambda *_args, **_kwargs: [{"method": "POST"}],
+        )
+        assert _intent_needs_processing("claim", [], response_enabled=True) is True
 
     @pytest.mark.no_gemini
     def test_processing_prompt_includes_attachment_text(self):

@@ -6715,6 +6715,7 @@ def test_sms_http_smoke_posts_form_with_twilio_signature(monkeypatch):
     assert posted == payload
     assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
     assert captured["headers"]["X-Twilio-Signature"] == expected
+    assert captured["timeout"] == 60.0
     assert http_result["auth"] == {
         "mode": "twilio_signature",
         "env": "SUPPORT_TWILIO_AUTH_TOKEN",

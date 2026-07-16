@@ -8622,6 +8622,14 @@ def _smoke_twilio_signature(url: str, payload: dict[str, Any], auth_token: str) 
     ).decode("ascii")
 
 
+def _smoke_http_timeout() -> float:
+    try:
+        timeout = float(os.getenv("SUPPORT_SMOKE_TIMEOUT", "60"))
+    except (TypeError, ValueError):
+        timeout = 60.0
+    return max(1.0, min(timeout, 300.0))
+
+
 def _smoke_http_headers(provider: str, setup: dict[str, Any], secrets: dict[str, str] | None, raw_body: bytes) -> tuple[dict[str, str], dict[str, str]]:
     headers = {"Content-Type": "application/json"}
     if provider == "slack":
@@ -8712,7 +8720,7 @@ def _post_smoke_http(provider: str, setup: dict[str, Any], payload: dict[str, An
         raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         headers, auth = _smoke_http_headers(provider, setup, secrets, raw_body)
     try:
-        with httpx.Client(timeout=12) as client:
+        with httpx.Client(timeout=_smoke_http_timeout()) as client:
             response = client.post(url, content=raw_body, headers=headers)
     except Exception as exc:
         raise ValueError(str(exc)) from exc

@@ -5,10 +5,12 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
 _collector_var: ContextVar["LLMUsageCollector | None"] = ContextVar("llm_usage_collector", default=None)
 _stage_var: ContextVar[str] = ContextVar("llm_usage_stage", default="unknown")
 _stage_started_var: ContextVar[float | None] = ContextVar("llm_usage_stage_started", default=None)
+_stage_execution_id_var: ContextVar[str] = ContextVar("llm_usage_stage_execution_id", default="")
 
 
 class LLMUsageCollector:
@@ -36,9 +38,11 @@ def collect_llm_usage() -> Any:
 def llm_stage(stage: str) -> Any:
     stage_token = _stage_var.set(stage)
     started_token = _stage_started_var.set(time.perf_counter())
+    execution_id_token = _stage_execution_id_var.set(uuid4().hex)
     try:
         yield
     finally:
+        _stage_execution_id_var.reset(execution_id_token)
         _stage_started_var.reset(started_token)
         _stage_var.reset(stage_token)
 
@@ -55,6 +59,7 @@ def aggregate_usage_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
         "cachedInputTokens": _sum_known(normalized_calls, "cachedInputTokens"),
         "totalTokens": _sum_known(normalized_calls, "totalTokens"),
         "calls": normalized_calls,
+        "stageExecutions": _aggregate_stage_executions(normalized_calls),
         "metadataAvailable": any(call.get("metadataAvailable") for call in normalized_calls),
     }
 
@@ -68,12 +73,15 @@ def record_usage_from_result(result: Any, usage_context: dict[str, Any] | None =
     context = usage_context or {}
     raw_payloads = _extract_usage_payloads(result)
     stage_started = _stage_started_var.get()
+    stage_execution_id = _stage_execution_id_var.get()
+    usage_record_id = uuid4().hex
     duration_ms = (
         max(0, round((time.perf_counter() - stage_started) * 1_000))
         if stage_started is not None and raw_payloads
         else None
     )
-    for raw_usage in raw_payloads:
+    payload_count = len(raw_payloads)
+    for payload_index, raw_usage in enumerate(raw_payloads, start=1):
         normalized = normalize_usage(raw_usage)
         event = {
             "stage": _stage_var.get(),
@@ -81,9 +89,19 @@ def record_usage_from_result(result: Any, usage_context: dict[str, Any] | None =
             "model": _extract_model(raw_usage) or context.get("model") or "",
             **normalized,
             "rawUsage": raw_usage,
+            "usageRecordId": usage_record_id,
+            "usagePayloadIndex": payload_index,
+            "usagePayloadCount": payload_count,
         }
+        if stage_execution_id:
+            event["stageExecutionId"] = stage_execution_id
         if duration_ms is not None:
             event["durationMs"] = duration_ms
+            # This is the wall time from entering llm_stage() until the
+            # enclosing result is recorded. It is intentionally shared by all
+            # provider-usage payloads extracted from that result and must not
+            # be summed as if it were a per-provider-call duration.
+            event["durationScope"] = "stage_wall_time"
         try:
             from automail.llm.billing import annotate_usage_event
             event = annotate_usage_event(event, billing_mode=str(context.get("billing_mode") or "byok"))
@@ -237,6 +255,35 @@ def _sum_known(calls: list[dict[str, Any]], key: str) -> int | None:
     if not values:
         return None
     return int(sum(values))
+
+
+def _aggregate_stage_executions(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize stage wall time once per execution instead of per usage row."""
+    groups: dict[str, dict[str, Any]] = {}
+    record_ids: dict[str, set[str]] = {}
+    for call in calls:
+        execution_id = str(call.get("stageExecutionId") or "")
+        if not execution_id:
+            continue
+        group = groups.setdefault(execution_id, {
+            "id": execution_id,
+            "stage": call.get("stage") or "unknown",
+            "durationMs": None,
+            "durationScope": call.get("durationScope") or "stage_wall_time",
+            "usageRecordCount": 0,
+            "usageEventCount": 0,
+        })
+        group["usageEventCount"] += 1
+        duration = call.get("durationMs")
+        if isinstance(duration, (int, float)):
+            current = group.get("durationMs")
+            group["durationMs"] = int(duration) if current is None else max(int(current), int(duration))
+        usage_record_id = str(call.get("usageRecordId") or "")
+        if usage_record_id:
+            ids = record_ids.setdefault(execution_id, set())
+            ids.add(usage_record_id)
+            group["usageRecordCount"] = len(ids)
+    return list(groups.values())
 
 
 def _to_plain(value: Any) -> Any:

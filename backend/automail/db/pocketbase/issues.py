@@ -11057,6 +11057,40 @@ def _create_issue_agent_answer(
             for article in articles
         ]
 
+    needs_fresh_grounding_state = bool(
+        should_create_reply
+        and not use_knowledge_agent
+        and (
+            requested_auto_send
+            or _string_from(clean_automation_context.get("source")) == "channel_autopilot"
+        )
+    )
+    if needs_fresh_grounding_state:
+        refreshed_issue = get_issue(
+            issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            actor_email=author_email,
+            actor_role=knowledge_actor_role,
+        )
+        if refreshed_issue:
+            issue = refreshed_issue
+            messages = (
+                issue.get("messages")
+                if isinstance(issue.get("messages"), list)
+                else []
+            )
+            conversation_context = _agent_conversation_context(issue)
+            clean_approval_required = bool(
+                clean_approval_required
+                or _config_bool(
+                    issue,
+                    "requiresHuman",
+                    "requires_human",
+                    default=False,
+                )
+            )
+
     automatic_draft_requires_grounding = bool(
         should_create_reply
         and not use_knowledge_agent

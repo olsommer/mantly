@@ -39,6 +39,9 @@ def test_pending_action_guard_blocks_live_progressive_claims(answer: str) -> Non
     "answer",
     [
         "We have opened a delivery investigation.",
+        "We have immediately escalated this case to our operations team.",
+        "We immediately opened a warehouse ticket.",
+        "A delivery-exception investigation is being initiated.",
         "We escalated the safety incident.",
         "Your refund has been issued.",
         "The investigation is now in progress.",
@@ -69,6 +72,8 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
         "We could escalate this after approval.",
         "The escalation is pending approval.",
         "We have not escalated this incident.",
+        "We have not immediately escalated this case.",
+        "We are unable to promise a replacement or refund before this verification is complete.",
         "We are waiting for approval before escalating.",
         "We are ready to check this after approval.",
         "We will follow up once our team has reviewed your address change request.",
@@ -118,6 +123,18 @@ def test_pending_action_guard_reports_each_unsafe_answer_unit_once() -> None:
 
 def test_future_condition_does_not_hide_separate_completed_claim() -> None:
     answer = "We have opened a ticket and will reply once the request has been reviewed."
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+def test_negative_refusal_does_not_hide_separate_completed_action() -> None:
+    answer = (
+        "We are unable to promise a replacement, but we have immediately "
+        "escalated your case."
+    )
 
     result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
 

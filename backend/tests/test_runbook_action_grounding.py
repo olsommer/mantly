@@ -378,14 +378,131 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert reply_calls == []
 
 
-def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch):
+def test_channel_grounding_reloads_pending_actions_created_during_composition(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    stale_issue = {
+        "id": "issue1",
+        "subject": "Urgent fulfillment escalation",
+        "messages": [
+            {
+                "id": "message1",
+                "direction": "customer",
+                "body": "Please escalate this fulfillment issue immediately.",
+            }
+        ],
+        "aiRuns": [],
+        "actionExecutions": [],
+    }
+    fresh_issue = {
+        **stale_issue,
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"sourceMessageId": "message1"},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "urgent-fulfillment",
+                            "matched": True,
+                            "intentName": "urgent-fulfillment",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "runbook_webhook",
+                "status": "pending",
+                "label": "Open ticket",
+                "metadata": {
+                    "source": "runbook",
+                    "approvalRequired": True,
+                    "sourceMessageId": "message1",
+                    "concernId": "urgent-fulfillment",
+                    "concernIds": ["urgent-fulfillment"],
+                    "runbook": "urgent-fulfillment",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "open_ticket",
+                        "label": "Open ticket",
+                        "concernId": "urgent-fulfillment",
+                        "concernIds": ["urgent-fulfillment"],
+                    }
+                },
+            }
+        ],
+    }
+    issue_reads: list[dict] = []
+
+    def fake_get_issue(*_args, **_kwargs):
+        issue = stale_issue if not issue_reads else fresh_issue
+        issue_reads.append(issue)
+        return issue
+
+    monkeypatch.setattr(issues, "get_issue", fake_get_issue)
+    monkeypatch.setattr(
+        issues,
+        "draft_issue_automation_answer",
+        lambda **_kwargs: IssueAgentDraft(
+            answer="We have immediately escalated this case to our operations team.",
+            confidence="high",
+            generation_mode="llm",
+        ),
+    )
+
+    def assess_with_real_preflight(**kwargs):
+        grounding_calls.append(kwargs)
+        return issue_agent.assess_issue_automation_grounding(**kwargs)
+
+    grounding_calls.clear()
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", assess_with_real_preflight)
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert len(issue_reads) == 2
+    assert grounding_calls[0]["issue"] is fresh_issue
+    assert result is not None
+    assert result["draftBlockedReason"] == "pending_action_claim"
+    assert result["groundingGate"]["pendingActions"] == ["Open ticket"]
+    assert result["reply"] is None
+    assert reply_calls == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We are initiating the steps to open this investigation.",
+        "We have immediately escalated this case to our operations team.",
+        "A delivery-exception investigation is being initiated.",
+    ],
+)
+def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch, answer):
     issue = {
         "id": "issue1",
         "subject": "Missing parcel",
         "aiRuns": [
             {
                 "source": "channel:email-main",
-                "metadata": {"emailId": "message1"},
+                "metadata": {"sourceMessageId": "message1"},
                 "intentResult": {
                     "concerns": [
                         {
@@ -407,12 +524,15 @@ def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch
                     "approvalRequired": True,
                     "sourceMessageId": "message1",
                     "concernId": "delivery",
+                    "concernIds": ["delivery"],
                     "runbook": "delivery-investigation",
                 },
                 "result": {
                     "proposedAction": {
                         "name": "open_ticket",
                         "label": "Open delivery investigation",
+                        "concernId": "delivery",
+                        "concernIds": ["delivery"],
                     }
                 },
             }
@@ -427,7 +547,7 @@ def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch
     result = issue_agent.assess_issue_automation_grounding(
         issue=issue,
         messages=[],
-        answer="We are initiating the steps to open this investigation.",
+        answer=answer,
         articles=[],
         tenant_id="tenant1",
         project_id="project1",
@@ -435,9 +555,7 @@ def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch
 
     assert result.verified is False
     assert result.reason_code == "pending_action_claim"
-    assert result.pending_action_claims == (
-        "We are initiating the steps to open this investigation.",
-    )
+    assert result.pending_action_claims == (answer,)
     assert result.pending_actions == ("Open delivery investigation",)
 
 

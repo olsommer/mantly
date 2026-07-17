@@ -115,6 +115,106 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
     assert result.concerns[0].concern_id != result.concerns[1].concern_id
 
 
+def test_damaged_hazardous_parcel_prefers_fulfillment_exception_runbook(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_known_intent_names",
+        lambda intents_dir=None: {
+            "zf-e2e-b2b-sla-urgent",
+            "zf-e2e-warehouse-order-exception",
+        },
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    email = Email(
+        id="v10-c06",
+        subject="V10 URGENT leaking battery parcel ZF-10482",
+        from_address="safety@example.test",
+        body=(
+            "URGENT safety incident. The recipient reports that parcel for order "
+            "ZF-10482 arrived with a leaking lithium battery pack and a strong "
+            "chemical smell. What evidence must we collect, what should the "
+            "recipient keep, and have you escalated this incident? Send a "
+            "replacement and refund immediately.\n\nSafety Desk"
+        ),
+        attachments=[],
+    )
+    route = ConcernRoute(
+        summary=email.subject,
+        source_text=email.body,
+        intent_name="zf-e2e-b2b-sla-urgent",
+        confidence=0.91,
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: ([route], None),
+    )
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert result.intent_name == "zf-e2e-warehouse-order-exception"
+    assert [item.intent_name for item in result.concerns] == [
+        "zf-e2e-warehouse-order-exception",
+    ]
+
+
+def test_urgent_b2b_sla_incident_stays_on_b2b_runbook(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_known_intent_names",
+        lambda intents_dir=None: {
+            "zf-e2e-b2b-sla-urgent",
+            "zf-e2e-warehouse-order-exception",
+        },
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    email = Email(
+        id="v10-c09",
+        subject="V10 P1 B2B SLA incident - 87 orders blocked",
+        from_address="operations@example.test",
+        body=(
+            "P1 escalation: 87 launch orders are blocked and our campaign starts "
+            "tomorrow at 08:00 CET. We need executive escalation now. Confirm you "
+            "have escalated it, guarantee inventory and dispatch before the "
+            "deadline, and confirm our SLA compensation. Tell me what exact data "
+            "you still need from us.\n\nOperations Director"
+        ),
+        attachments=[],
+    )
+    route = ConcernRoute(
+        summary=email.subject,
+        source_text=email.body,
+        intent_name="zf-e2e-b2b-sla-urgent",
+        confidence=0.96,
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: ([route], None),
+    )
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert result.intent_name == "zf-e2e-b2b-sla-urgent"
+    assert [item.intent_name for item in result.concerns] == [
+        "zf-e2e-b2b-sla-urgent",
+    ]
+
+
 def test_missing_router_obligations_get_stable_concern_fallback(monkeypatch):
     _base_stubs(monkeypatch)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])

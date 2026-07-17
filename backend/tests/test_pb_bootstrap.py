@@ -357,6 +357,22 @@ class TestEnsureAppCollectionsSchema:
             field["name"] == "duration_ms" and field["type"] == "number"
             for field in llm_usage["fields"]
         )
+        assert any(
+            field["name"] == "stage_execution_id" and field["type"] == "text"
+            for field in llm_usage["fields"]
+        )
+        assert any(
+            field["name"] == "usage_record_id" and field["type"] == "text"
+            for field in llm_usage["fields"]
+        )
+        assert any(
+            field["name"] == "duration_scope" and field["type"] == "text"
+            for field in llm_usage["fields"]
+        )
+        assert any(
+            field["name"] == "usage_payload_count" and field["type"] == "number"
+            for field in llm_usage["fields"]
+        )
         assert any(field["name"] == "metadata" and field["type"] == "json" for field in support_issues["fields"])
         support_issues_final = collections["support_issues"]
         assert any(field["name"] == "merged_into_issue" and field["collectionId"] == "support_issues-id" for field in support_issues_final["fields"])

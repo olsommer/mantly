@@ -68,6 +68,71 @@ _PROCESSING_SECURITY_BOUNDARY = (
     _PROMPTS_DIR / "processing_security_boundary.md"
 ).read_text(encoding="utf-8").strip()
 
+_FULFILLMENT_CONTEXT_PATTERN = re.compile(
+    r"\b(?:delivery|item|order|package|parcel|product|shipment)\w*\b",
+    re.IGNORECASE,
+)
+_HAZARDOUS_GOODS_PATTERN = re.compile(
+    r"\b(?:batter(?:y|ies)|chemical|corrosive|dangerous\s+goods|flammable|"
+    r"hazardous|hazmat|lithium)\b",
+    re.IGNORECASE,
+)
+_DAMAGE_SAFETY_PATTERN = re.compile(
+    r"\b(?:broken|burn(?:ing|t)?|chemical\s+smell|crush(?:ed)?|damage(?:d)?|"
+    r"fire|fumes?|hot|leak(?:ed|ing|s)?|overheat(?:ed|ing)?|puncture(?:d)?|"
+    r"rupture(?:d)?|smok(?:e|ing)|spill(?:ed|ing|s)?|swollen)\b",
+    re.IGNORECASE,
+)
+_SAFETY_INTENT_WEIGHTS = {
+    "hazard": 12,
+    "hazardous": 12,
+    "hazmat": 12,
+    "safety": 12,
+    "dangerous": 10,
+    "damage": 10,
+    "damaged": 10,
+    "defect": 9,
+    "defective": 9,
+    "leak": 9,
+    "leaking": 9,
+    "spill": 9,
+    "exception": 7,
+    "warehouse": 6,
+    "incident": 5,
+    "parcel": 4,
+    "package": 4,
+    "shipment": 4,
+    "delivery": 3,
+    "fulfillment": 3,
+    "order": 2,
+    "product": 2,
+}
+_DIRECT_SAFETY_INTENT_TERMS = {
+    "damage",
+    "damaged",
+    "dangerous",
+    "defect",
+    "defective",
+    "hazard",
+    "hazardous",
+    "hazmat",
+    "incident",
+    "leak",
+    "leaking",
+    "safety",
+    "spill",
+}
+_FULFILLMENT_INTENT_TERMS = {
+    "delivery",
+    "fulfillment",
+    "order",
+    "package",
+    "parcel",
+    "product",
+    "shipment",
+    "warehouse",
+}
+
 
 def _action_is_enabled(raw: dict[str, Any]) -> bool:
     value = raw.get("enabled")
@@ -169,6 +234,74 @@ def _classification_user_prompt(
     if attachment_context:
         prompt += f"\n\n## Attachments\n{attachment_context}"
     return prompt
+
+
+def _has_damaged_hazardous_shipment_evidence(route: ConcernRoute) -> bool:
+    """Return whether a routed concern states a concrete fulfillment hazard."""
+    text = f"{route.summary}\n{route.source_text}"
+    return bool(
+        _FULFILLMENT_CONTEXT_PATTERN.search(text)
+        and _HAZARDOUS_GOODS_PATTERN.search(text)
+        and _DAMAGE_SAFETY_PATTERN.search(text)
+    )
+
+
+def _safety_intent_score(intent_name: str) -> int:
+    """Rank semantically named runbooks suitable for damaged-goods hazards."""
+    terms = set(re.findall(r"[a-z0-9]+", intent_name.casefold()))
+    has_fulfillment_scope = bool(terms & _FULFILLMENT_INTENT_TERMS)
+    has_safety_scope = bool(terms & _DIRECT_SAFETY_INTENT_TERMS)
+    is_fulfillment_exception = "exception" in terms and has_fulfillment_scope
+    if not has_fulfillment_scope or not (has_safety_scope or is_fulfillment_exception):
+        return 0
+    return sum(_SAFETY_INTENT_WEIGHTS.get(term, 0) for term in terms)
+
+
+def _apply_safety_intent_precedence(
+    routes: list[ConcernRoute],
+    known_intents: set[str],
+) -> list[ConcernRoute]:
+    """Prefer a configured safety/fulfillment runbook for explicit hazards.
+
+    The language-model router remains authoritative for ordinary urgency. This
+    guard only acts when the routed source contains fulfillment context plus
+    both hazardous-goods and damage evidence, and a semantically specialized
+    configured intent scores above the selected intent.
+    """
+    ranked = sorted(
+        (
+            (_safety_intent_score(intent_name), intent_name)
+            for intent_name in known_intents
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    if not ranked or ranked[0][0] <= 0:
+        return routes
+
+    preferred_score, preferred_intent = ranked[0]
+    corrected: list[ConcernRoute] = []
+    for route in routes:
+        current_intent = str(route.intent_name or "").strip()
+        current_score = _safety_intent_score(current_intent)
+        if (
+            preferred_intent != current_intent
+            and preferred_score > current_score
+            and _has_damaged_hazardous_shipment_evidence(route)
+        ):
+            logger.warning(
+                "Safety routing precedence changed intent '%s' to '%s'",
+                current_intent or "unmatched",
+                preferred_intent,
+            )
+            route = route.model_copy(update={
+                "intent_name": preferred_intent,
+                "reason": (
+                    "Deterministic safety precedence: the concern contains "
+                    "fulfillment, hazardous-goods, and damage evidence."
+                ),
+            })
+        corrected.append(route)
+    return corrected
 
 
 def _concern_processing_email(
@@ -889,6 +1022,7 @@ def run_intent_agent(
         project_id,
     )
     del creator
+    routes = _apply_safety_intent_precedence(routes, known_intents)
     routes = _dedupe_concern_routes(routes)
     if not routes:
         reason = router_error or "No configured intent matches this email."

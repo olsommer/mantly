@@ -26,6 +26,7 @@ from automail.support.pending_action_claims import (
     PENDING_ACTION_CLAIM_REASON_CODE,
     check_pending_action_claims,
 )
+from automail.support.reply_signoff import clean_reply_signoff
 
 logger = logging.getLogger(__name__)
 _KNOWLEDGE_AGENT_SLOTS = threading.BoundedSemaphore(4)
@@ -1230,13 +1231,22 @@ def _automatic_conversation_context(
     }
 
 
-def _clean_answer(value: str) -> str:
+def _clean_answer(
+    value: str,
+    *,
+    messages: list[dict[str, Any]] | None = None,
+    signer_name: str = "",
+) -> str:
     clean = value.strip()
     if clean.startswith("```"):
         clean = clean.strip("`").strip()
         if clean.lower().startswith("text"):
             clean = clean[4:].strip()
-    return clean[:6000]
+    return clean_reply_signoff(
+        clean[:6000],
+        messages=messages,
+        signer_name=signer_name,
+    )
 
 
 def grounding_text_sha256(value: str) -> str:
@@ -1579,7 +1589,10 @@ def draft_issue_agent_answer(
             raise ValueError("Knowledge agent returned no structured response")
         if not workspace.read_paths:
             raise ValueError("Knowledge agent did not inspect the workspace")
-        answer = _clean_answer(structured.answer)
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+        )
         if not answer:
             raise ValueError("Issue agent returned an empty answer")
         citation_ids = workspace.validated_citation_ids(
@@ -1819,7 +1832,10 @@ def draft_issue_automation_answer(
         structured = response.get("structured_response") if isinstance(response, dict) else None
         if not isinstance(structured, AutomationAnswerOutput):
             raise ValueError("Issue automation returned no structured response")
-        answer = _clean_answer(structured.answer)
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+        )
         if not answer:
             raise ValueError("Issue automation returned an empty answer")
         if _detected_supported_language(answer) != reply_language:

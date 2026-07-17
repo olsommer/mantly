@@ -122,6 +122,39 @@ def test_message_context_includes_bounded_extracted_attachment_text() -> None:
     assert len(context[0]["body"]) < 4_200
 
 
+def _shipment_tool_issue() -> dict[str, Any]:
+    return {
+        "id": "issue-1",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "shipment-status",
+                            "matched": True,
+                            "intentName": "shipment-status",
+                            "outcome": {
+                                "toolEvidence": [
+                                    {
+                                        "name": "lookup-zf-e2e-shipment",
+                                        "method": "GET",
+                                        "status": "success",
+                                        "responseFacts": {
+                                            "trackingNumber": "UPS1Z999AA10123456784",
+                                            "status": "in_transit",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
@@ -1162,36 +1195,7 @@ def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
 ) -> None:
     answer = "Shipment UPS1Z999AA10123456784 is in transit."
     prompts: list[str] = []
-    issue = {
-        "id": "issue-1",
-        "aiRuns": [
-            {
-                "source": "channel:email-main",
-                "intentResult": {
-                    "concerns": [
-                        {
-                            "concernId": "shipment-status",
-                            "matched": True,
-                            "intentName": "shipment-status",
-                            "outcome": {
-                                "toolEvidence": [
-                                    {
-                                        "name": "lookup-zf-e2e-shipment",
-                                        "method": "GET",
-                                        "status": "success",
-                                        "responseFacts": {
-                                            "trackingNumber": "UPS1Z999AA10123456784",
-                                            "status": "in_transit",
-                                        },
-                                    }
-                                ]
-                            },
-                        }
-                    ]
-                },
-            }
-        ],
-    }
+    issue = _shipment_tool_issue()
     monkeypatch.setattr(config_module, "read_config", lambda: {})
     monkeypatch.setattr(
         llm_module,

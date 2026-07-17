@@ -108,7 +108,7 @@ _ACTION_STATE_SUBJECTS = (
     r"request",
     r"case",
     r"ticket",
-    r"investigation",
+    r"(?:[a-z][a-z-]*\s+){0,2}investigation",
     r"escalation",
     r"claim",
     r"refund",
@@ -296,16 +296,20 @@ _ITALIAN_ACTION_SUBJECTS = (
 
 _PROGRESSIVE_ACTION_PATTERN = re.compile(
     rf"\b(?:we\s+are|we['’]re|i\s+am|i['’]m)\s+"
-    rf"(?:(?:already|currently|now|actively)\s+)*(?:{'|'.join(_PROGRESSIVE_ACTIONS)})\b",
+    rf"(?:(?:already|currently|now|actively|immediately|promptly)\s+)*"
+    rf"(?:{'|'.join(_PROGRESSIVE_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _PERFECT_ACTION_PATTERN = re.compile(
     rf"\b(?:we\s+have|we['’]ve|i\s+have|i['’]ve)\s+"
-    rf"(?:(?:already|successfully|now)\s+)*(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
+    rf"(?:(?:already|successfully|now|immediately|promptly|just)\s+)*"
+    rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _PAST_ACTION_PATTERN = re.compile(
-    rf"\b(?:we|i)\s+(?:(?:already|successfully)\s+)*(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
+    rf"\b(?:we|i)\s+"
+    rf"(?:(?:already|successfully|immediately|promptly|just)\s+)*"
+    rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _PASSIVE_ACTION_PATTERN = re.compile(
@@ -553,6 +557,12 @@ _UNRELATED_CLAUSE_PATTERN = re.compile(
     r"[,;:]|\b(?:and|but|then|while|whereas|und|aber|dann|et|mais|puis|y|pero|entonces|e|ma|poi)\b",
     re.IGNORECASE,
 )
+_NEGATIVE_PROMISE_PREFIX_PATTERN = re.compile(
+    r"\b(?:we|i)\s+(?:(?:are|am)\s+(?:unable|not\s+able)\s+to\s+|"
+    r"cannot\s+|can['’]t\s+|will\s+not\s+|won['’]t\s+)"
+    r"(?:promise|guarantee|confirm)\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -605,6 +615,11 @@ def _has_unsafe_claim(unit: str) -> bool:
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(unit):
             if _FUTURE_CONDITION_PREFIX_PATTERN.search(unit[:match.start()]):
+                continue
+            if (
+                pattern is _ACTION_COMPLETION_STATE_PATTERN
+                and _NEGATIVE_PROMISE_PREFIX_PATTERN.search(unit[:match.start()])
+            ):
                 continue
             return True
     for pattern in _FUTURE_CLAIM_PATTERNS:

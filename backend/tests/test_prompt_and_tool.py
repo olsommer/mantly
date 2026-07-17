@@ -476,6 +476,7 @@ class TestEmailPrompt:
         assert "response_text" in props
         assert "response_attachments" in props
         assert "covered_concern_ids" in props
+        assert "covered_obligation_ids" in props
         assert "requires_human" in props
         assert "requires_human_reason" in props
         assert "conflicting_requirements" in props
@@ -901,6 +902,10 @@ class TestIntentAttachmentContext:
                         "args": {"concerns": [{
                             "summary": "Open a claim",
                             "source_text": "Please open a claim.",
+                            "answer_obligations": [
+                                "Confirm whether a claim can be opened.",
+                                "State what information is still required.",
+                            ],
                             "intent_name": "claim",
                             "confidence": 0.99,
                             "reason": "",
@@ -934,6 +939,10 @@ class TestIntentAttachmentContext:
         )
 
         assert [concern.intent_name for concern in concerns] == ["claim"]
+        assert concerns[0].answer_obligations == [
+            "Confirm whether a claim can be opened.",
+            "State what information is still required.",
+        ]
         assert reason is None
         assert len(model_calls) == 1
 

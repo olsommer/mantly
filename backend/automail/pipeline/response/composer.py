@@ -21,6 +21,11 @@ from automail.pipeline.response.prompt_factory import (
     create_response_system_prompt,
     create_response_user_prompt,
 )
+from automail.support.pending_action_claims import (
+    PENDING_ACTION_CLAIM_REASON_CODE,
+    PendingActionClaimCheck,
+    check_pending_action_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,22 @@ def _draft_review_requirements(
         if len(covered_ids) != len(expected_ids) or set(covered_ids) != set(expected_ids):
             requires_human = True
             reasons.append("Reply composer did not confirm exact coverage of every concern.")
+    expected_obligation_ids = [
+        obligation.obligation_id
+        for concern in intent_result.concerns
+        for obligation in concern.answer_obligations
+        if obligation.obligation_id
+    ]
+    if expected_obligation_ids:
+        covered_obligation_ids = [
+            item.strip() for item in draft.covered_obligation_ids if item.strip()
+        ]
+        if (
+            len(covered_obligation_ids) != len(expected_obligation_ids)
+            or set(covered_obligation_ids) != set(expected_obligation_ids)
+        ):
+            requires_human = True
+            reasons.append("Reply composer did not confirm exact coverage of every answer obligation.")
     if draft.requires_human:
         requires_human = True
         reasons.append(draft.requires_human_reason or "Reply composer requested human review.")
@@ -104,6 +125,26 @@ def _draft_review_requirements(
         )
     clean_reasons = list(dict.fromkeys(reason.strip() for reason in reasons if reason.strip()))
     return requires_human, " ".join(clean_reasons)[:1_000]
+
+
+def _pending_action_claim_check(
+    intent_result: IntentResult,
+    answer: str,
+) -> PendingActionClaimCheck:
+    pending_actions = [
+        {
+            "name": action.name,
+            "label": action.label,
+            "status": "pending_approval",
+        }
+        for concern in intent_result.concerns
+        for action in concern.action_outcomes
+        if action.status in {"proposed", "pending_input"}
+    ]
+    return check_pending_action_claims(
+        answer=answer,
+        runbook_actions=pending_actions,
+    )
 
 
 def compose_pipeline_reply(
@@ -186,6 +227,9 @@ def compose_pipeline_reply(
     draft = result.get("structured_response") if isinstance(result, dict) else None
     if not isinstance(draft, ResponseDraft):
         raise ValueError("Ticket reply composer returned no structured response.")
+    pending_action_check = _pending_action_claim_check(intent_result, draft.response_text)
+    if pending_action_check.blocked:
+        raise ValueError(PENDING_ACTION_CLAIM_REASON_CODE)
 
     requires_human, requires_human_reason = _draft_review_requirements(intent_result, draft)
     response = AgentResponse(

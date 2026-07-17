@@ -99,9 +99,18 @@ class ConcernRoute(BaseModel):
 
     summary: str = ""
     source_text: str = ""
+    answer_obligations: list[str] = Field(default_factory=list, max_length=10)
     intent_name: Optional[str] = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
+
+
+class AnswerObligation(CamelCaseModel):
+    """One explicit customer question the final reply must address."""
+
+    obligation_id: str
+    question: str
+    source_text: str = ""
 
 
 class VerifiedFact(CamelCaseModel):
@@ -152,6 +161,7 @@ class RunbookOutcome(CamelCaseModel):
     intent_name: Optional[str] = None
     status: Literal["ready", "requires_human", "unmatched", "failed"] = "unmatched"
     summary: str = ""
+    answer_obligations: list[AnswerObligation] = Field(default_factory=list)
     actions: list[IntentAction] = Field(default_factory=list)
     action_outcomes: list[RunbookActionOutcome] = Field(default_factory=list)
     verified_facts: list[VerifiedFact] = Field(default_factory=list)
@@ -207,6 +217,7 @@ class TokenUsageCall(CamelCaseModel):
     stage: str = "unknown"
     provider: str = ""
     model: str = ""
+    duration_ms: Optional[int] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cached_input_tokens: Optional[int] = None
@@ -298,6 +309,7 @@ class ResponseDraft(BaseModel):
     response_cc: Optional[List[str]] = None
     response_bcc: Optional[List[str]] = None
     covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
     requires_human: bool = False
     requires_human_reason: Optional[str] = None
     conflicting_requirements: list[str] = Field(default_factory=list)

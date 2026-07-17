@@ -28,6 +28,10 @@ Never say that an investigation, claim, escalation, shipment change, refund, or 
 Multi-concern boundary:
 Address every `<concern>` exactly once in one coherent email. A concern may be answered, described as pending, or paired with the smallest missing question. Never omit unmatched, failed, or review-required concerns. Never concatenate separate runbook replies. Use one greeting and one sign-off.
 Return every addressed concern ID exactly once in `covered_concern_ids`. If requirements conflict or safe coverage is impossible, set `requires_human` and explain why. List each conflict in `conflicting_requirements`; avoid the disputed claim in the draft.
+Address every `<answer_obligation>` explicitly. Answer it from supplied evidence,
+state the smallest missing detail, or safely describe it as pending. Never silently
+omit an obligation. Return every addressed obligation ID exactly once in
+`covered_obligation_ids`.
 
 Evidence boundary:
 Only `<verified_fact>` values and facts inside a successful `<tool_result>` may support tool-derived business facts. Tool success without an explicit fact does not prove that fact.

@@ -11026,6 +11026,11 @@ def _create_issue_agent_answer(
                 "answerSha256": grounding_text_sha256(answer),
                 "answerUnits": [],
                 "unitAssessments": [],
+                "answerObligations": [],
+                "obligationAssessments": [],
+                "uncoveredObligations": [],
+                "pendingActionClaims": [],
+                "pendingActions": [],
                 "citationIds": [_string_from(article.get("id")) for article in articles],
                 "evidenceSnapshots": [],
                 "contextSnapshots": [],
@@ -11042,6 +11047,8 @@ def _create_issue_agent_answer(
             for value in [
                 *_parse(grounding_gate.get("unsupportedClaims"), list),
                 *_parse(grounding_gate.get("contradictions"), list),
+                *_parse(grounding_gate.get("uncoveredObligations"), list),
+                *_parse(grounding_gate.get("pendingActionClaims"), list),
             ]
             if _string_from(value)
         )
@@ -11068,6 +11075,8 @@ def _create_issue_agent_answer(
                 "ungrounded_answer",
                 "grounding_check_failed",
                 "grounding_evidence_incomplete",
+                "incomplete_answer",
+                "pending_action_claim",
             }
             else "confidence_guard"
         )
@@ -11107,6 +11116,7 @@ def _create_issue_agent_answer(
             "responseAttachments": list(selected_response_attachments),
             "unresolvedResponseAttachments": list(unresolved_response_attachments),
             "coveredConcernIds": list(draft.covered_concern_ids),
+            "coveredObligationIds": list(draft.covered_obligation_ids),
             "composerRequiresHuman": draft.requires_human,
             "composerRequiresHumanReason": draft.requires_human_reason,
         }
@@ -11269,6 +11279,7 @@ def _create_issue_agent_answer(
         "responseAttachments": list(selected_response_attachments),
         "unresolvedResponseAttachments": list(unresolved_response_attachments),
         "coveredConcernIds": list(draft.covered_concern_ids),
+        "coveredObligationIds": list(draft.covered_obligation_ids),
         "composerRequiresHuman": draft.requires_human,
         "composerRequiresHumanReason": draft.requires_human_reason,
     }
@@ -11330,6 +11341,7 @@ def _create_issue_agent_answer(
         "responseAttachments": list(selected_response_attachments),
         "unresolvedResponseAttachments": list(unresolved_response_attachments),
         "coveredConcernIds": list(draft.covered_concern_ids),
+        "coveredObligationIds": list(draft.covered_obligation_ids),
         "composerRequiresHuman": draft.requires_human,
         "composerRequiresHumanReason": draft.requires_human_reason,
     }

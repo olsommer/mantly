@@ -1,12 +1,14 @@
 """Provider-metadata-only LLM token usage collection."""
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
 _collector_var: ContextVar["LLMUsageCollector | None"] = ContextVar("llm_usage_collector", default=None)
 _stage_var: ContextVar[str] = ContextVar("llm_usage_stage", default="unknown")
+_stage_started_var: ContextVar[float | None] = ContextVar("llm_usage_stage_started", default=None)
 
 
 class LLMUsageCollector:
@@ -32,11 +34,13 @@ def collect_llm_usage() -> Any:
 
 @contextmanager
 def llm_stage(stage: str) -> Any:
-    token = _stage_var.set(stage)
+    stage_token = _stage_var.set(stage)
+    started_token = _stage_started_var.set(time.perf_counter())
     try:
         yield
     finally:
-        _stage_var.reset(token)
+        _stage_started_var.reset(started_token)
+        _stage_var.reset(stage_token)
 
 
 def current_collector() -> LLMUsageCollector | None:
@@ -62,7 +66,14 @@ def record_usage_from_result(result: Any, usage_context: dict[str, Any] | None =
         return
 
     context = usage_context or {}
-    for raw_usage in _extract_usage_payloads(result):
+    raw_payloads = _extract_usage_payloads(result)
+    stage_started = _stage_started_var.get()
+    duration_ms = (
+        max(0, round((time.perf_counter() - stage_started) * 1_000))
+        if stage_started is not None and raw_payloads
+        else None
+    )
+    for raw_usage in raw_payloads:
         normalized = normalize_usage(raw_usage)
         event = {
             "stage": _stage_var.get(),
@@ -71,6 +82,8 @@ def record_usage_from_result(result: Any, usage_context: dict[str, Any] | None =
             **normalized,
             "rawUsage": raw_usage,
         }
+        if duration_ms is not None:
+            event["durationMs"] = duration_ms
         try:
             from automail.llm.billing import annotate_usage_event
             event = annotate_usage_event(event, billing_mode=str(context.get("billing_mode") or "byok"))

@@ -1582,6 +1582,7 @@ def ensure_app_collections_schema(
             _text_field("provider"),
             _text_field("model"),
             _text_field("billing_mode"),
+            _number_field("duration_ms"),
             _number_field("input_tokens"),
             _number_field("output_tokens"),
             _number_field("cached_input_tokens"),
@@ -1603,6 +1604,7 @@ def ensure_app_collections_schema(
             created.append("llm_usage_events")
         for field_def in (
             _text_field("billing_mode"),
+            _number_field("duration_ms"),
             _number_field("raw_cost_usd_micros"),
             _number_field("billed_cost_usd_micros"),
             _number_field("cost_markup"),

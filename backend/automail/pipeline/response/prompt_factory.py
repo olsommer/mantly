@@ -175,6 +175,11 @@ def create_response_user_prompt(
             intent_text += f"    <source_text>{_xml_text(getattr(concern, 'source_text', ''))}</source_text>\n"
             intent_text += f"    <runbook>{_xml_text(intent_name)}</runbook>\n"
             intent_text += f"    <confidence>{_xml_text(getattr(concern, 'confidence', 0))}</confidence>\n"
+            for obligation in list(getattr(concern, "answer_obligations", None) or [])[:10]:
+                intent_text += (
+                    f"    <answer_obligation id={_xml_attr(getattr(obligation, 'obligation_id', ''))}>"
+                    f"{_xml_text(getattr(obligation, 'question', ''))}</answer_obligation>\n"
+                )
             reason = getattr(concern, "requires_human_reason", None) or getattr(concern, "error", None)
             if reason:
                 intent_text += f"    <reason>{_xml_text(reason)}</reason>\n"

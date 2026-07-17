@@ -247,6 +247,7 @@ def store_llm_usage_events(
             "raw_usage": call.get("rawUsage") or {},
         }
         numeric_fields = {
+            "duration_ms": call.get("durationMs"),
             "input_tokens": call.get("inputTokens"),
             "output_tokens": call.get("outputTokens"),
             "cached_input_tokens": call.get("cachedInputTokens"),

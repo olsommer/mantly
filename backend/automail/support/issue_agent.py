@@ -22,6 +22,10 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from automail.support.knowledge_workspace import KnowledgeWorkspace
+from automail.support.pending_action_claims import (
+    PENDING_ACTION_CLAIM_REASON_CODE,
+    check_pending_action_claims,
+)
 
 logger = logging.getLogger(__name__)
 _KNOWLEDGE_AGENT_SLOTS = threading.BoundedSemaphore(4)
@@ -32,11 +36,11 @@ KNOWLEDGE_AGENT_TOOL_CALL_LIMIT = 8
 _AUTOMATION_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _AUTOMATION_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="automation-agent")
 AUTOMATION_AGENT_DEADLINE_SECONDS = 55
-_GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(4)
-_GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="grounding-agent")
+_GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
+_GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v3"
+GROUNDING_GATE_VERSION = "automation-grounding-v4"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
@@ -109,6 +113,7 @@ class IssueAgentDraft:
     missing_information: tuple[str, ...] = field(default_factory=tuple)
     response_attachments: tuple[str, ...] = field(default_factory=tuple)
     covered_concern_ids: tuple[str, ...] = field(default_factory=tuple)
+    covered_obligation_ids: tuple[str, ...] = field(default_factory=tuple)
     requires_human: bool = False
     requires_human_reason: str = ""
     tool_calls: tuple[dict[str, Any], ...] = field(default_factory=tuple)
@@ -128,6 +133,11 @@ class AutomationGroundingAssessment:
     answer_sha256: str = ""
     answer_units: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     unit_assessments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    answer_obligations: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    obligation_assessments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    uncovered_obligations: tuple[str, ...] = field(default_factory=tuple)
+    pending_action_claims: tuple[str, ...] = field(default_factory=tuple)
+    pending_actions: tuple[str, ...] = field(default_factory=tuple)
     claim_count: int = 0
     unsupported_claims: tuple[str, ...] = field(default_factory=tuple)
     contradictions: tuple[str, ...] = field(default_factory=tuple)
@@ -148,6 +158,11 @@ class AutomationGroundingAssessment:
             "answerSha256": self.answer_sha256,
             "answerUnits": [dict(unit) for unit in self.answer_units],
             "unitAssessments": [dict(assessment) for assessment in self.unit_assessments],
+            "answerObligations": [dict(obligation) for obligation in self.answer_obligations],
+            "obligationAssessments": [dict(assessment) for assessment in self.obligation_assessments],
+            "uncoveredObligations": list(self.uncovered_obligations),
+            "pendingActionClaims": list(self.pending_action_claims),
+            "pendingActions": list(self.pending_actions),
             "citationIds": list(self.citation_ids),
             "evidenceSnapshots": [dict(snapshot) for snapshot in self.evidence_snapshots],
             "contextSnapshots": [dict(snapshot) for snapshot in self.context_snapshots],
@@ -171,6 +186,7 @@ class KnowledgeAgentOutput(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
     response_attachments: list[str] = Field(default_factory=list)
     covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
     requires_human: bool = False
     requires_human_reason: str = ""
 
@@ -184,6 +200,7 @@ class AutomationAnswerOutput(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
     response_attachments: list[str] = Field(default_factory=list)
     covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
     requires_human: bool = False
     requires_human_reason: str = ""
 
@@ -197,6 +214,14 @@ class AutomationGroundingUnitAssessment(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class AutomationGroundingObligationAssessment(BaseModel):
+    """Coverage assessment for one explicit customer answer obligation."""
+
+    obligation_id: str
+    covered: bool
+    answer_unit_ids: list[str] = Field(default_factory=list)
+
+
 class AutomationGroundingOutput(BaseModel):
     """Independent exhaustive answer-unit support decision."""
 
@@ -204,6 +229,7 @@ class AutomationGroundingOutput(BaseModel):
     answer_sha256: str
     checked_citation_ids: list[str] = Field(default_factory=list)
     unit_assessments: list[AutomationGroundingUnitAssessment] = Field(default_factory=list)
+    obligation_assessments: list[AutomationGroundingObligationAssessment] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
 
 
@@ -526,6 +552,83 @@ def _validated_concern_coverage(
     return covered_ids, requires_human, " ".join(dict.fromkeys(reasons))[:1_000]
 
 
+def _answer_obligations_from_issue(issue: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    obligations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for concern in _ticket_context(issue).get("concerns", []):
+        if not isinstance(concern, dict):
+            continue
+        concern_id = _string_from(concern.get("id"))
+        raw_obligations = concern.get("answerObligations")
+        if not isinstance(raw_obligations, list):
+            continue
+        for raw in raw_obligations[:10]:
+            obligation = _record_from(raw)
+            obligation_id = _string_from(obligation.get("id"))
+            question = _string_from(obligation.get("question"))
+            if not obligation_id or not question or obligation_id in seen:
+                continue
+            seen.add(obligation_id)
+            obligations.append(
+                {
+                    "id": obligation_id,
+                    "concernId": concern_id,
+                    "question": question,
+                }
+            )
+    return tuple(obligations)
+
+
+def _validated_obligation_coverage(
+    issue: dict[str, Any],
+    covered_obligation_ids: list[str],
+) -> tuple[tuple[str, ...], bool, str]:
+    expected_ids = [item["id"] for item in _answer_obligations_from_issue(issue)]
+    covered_ids = tuple(
+        dict.fromkeys(
+            _string_from(item)
+            for item in covered_obligation_ids[:100]
+            if _string_from(item)
+        )
+    )
+    if expected_ids and (
+        len(covered_ids) != len(expected_ids)
+        or set(covered_ids) != set(expected_ids)
+    ):
+        return (
+            covered_ids,
+            True,
+            "Reply composer did not confirm exact coverage of every answer obligation.",
+        )
+    return covered_ids, False, ""
+
+
+def _validated_draft_coverage(
+    issue: dict[str, Any],
+    covered_concern_ids: list[str],
+    covered_obligation_ids: list[str],
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], bool, str]:
+    concern_ids, requires_human, concern_reason = _validated_concern_coverage(
+        issue,
+        covered_concern_ids,
+        model_requires_human=model_requires_human,
+        model_reason=model_reason,
+    )
+    obligation_ids, obligation_requires_human, obligation_reason = (
+        _validated_obligation_coverage(issue, covered_obligation_ids)
+    )
+    reasons = [reason for reason in (concern_reason, obligation_reason) if reason]
+    return (
+        concern_ids,
+        obligation_ids,
+        requires_human or obligation_requires_human,
+        " ".join(dict.fromkeys(reasons))[:1_000],
+    )
+
+
 def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) -> list[str]:
     if isinstance(value, str):
         values = [value]
@@ -635,6 +738,41 @@ def _automatic_runbook_concern_context(
             )
             if reason:
                 concern["reason"] = reason[:500]
+            raw_obligations = (
+                outcome.get("answerObligations")
+                or outcome.get("answer_obligations")
+                or raw.get("answerObligations")
+                or raw.get("answer_obligations")
+                or []
+            )
+            obligations: list[dict[str, str]] = []
+            if isinstance(raw_obligations, list):
+                for obligation_index, raw_obligation in enumerate(raw_obligations[:10], start=1):
+                    obligation = _record_from(raw_obligation)
+                    question = _string_from(
+                        obligation.get("question")
+                        or obligation.get("text")
+                        or (raw_obligation if isinstance(raw_obligation, str) else "")
+                    )
+                    obligation_id = _string_from(
+                        obligation.get("obligationId")
+                        or obligation.get("obligation_id")
+                        or obligation.get("id")
+                    ) or f"{concern['id']}:obligation-{obligation_index}"
+                    if not question:
+                        continue
+                    obligations.append(
+                        {
+                            "id": obligation_id[:240],
+                            "question": question[:500],
+                            "sourceText": _string_from(
+                                obligation.get("sourceText")
+                                or obligation.get("source_text")
+                            )[:1_000],
+                        }
+                    )
+            if obligations:
+                concern["answerObligations"] = obligations
             missing = _bounded_string_list(
                 outcome.get("missingInformation")
                 or outcome.get("missing_information")
@@ -1140,9 +1278,15 @@ def draft_issue_agent_answer(
             missing_information.append(
                 "Full source content requires human review: " + ", ".join(truncated_citation_ids)
             )
-        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
             issue,
             structured.covered_concern_ids,
+            structured.covered_obligation_ids,
             model_requires_human=structured.requires_human,
             model_reason=structured.requires_human_reason,
         )
@@ -1158,14 +1302,21 @@ def draft_issue_agent_answer(
                 structured.response_attachments,
             ),
             covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
             requires_human=requires_human,
             requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue agent answer: %s", exc)
-        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
             issue,
+            [],
             [],
             model_requires_human=True,
             model_reason="Knowledge answer generation failed.",
@@ -1176,6 +1327,7 @@ def draft_issue_agent_answer(
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
             covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
             requires_human=requires_human,
             requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls if workspace else (),
@@ -1299,9 +1451,15 @@ def draft_issue_automation_answer(
         missing_information = tuple(
             dict.fromkeys(item.strip()[:500] for item in structured.missing_information[:10] if item.strip())
         )
-        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
             issue,
             structured.covered_concern_ids,
+            structured.covered_obligation_ids,
             model_requires_human=structured.requires_human,
             model_reason=structured.requires_human_reason,
         )
@@ -1316,13 +1474,20 @@ def draft_issue_automation_answer(
                 structured.response_attachments,
             ),
             covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
             requires_human=requires_human,
             requires_human_reason=requires_human_reason,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue automation answer: %s", exc)
-        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
             issue,
+            [],
             [],
             model_requires_human=True,
             model_reason="Automatic answer generation failed.",
@@ -1333,6 +1498,7 @@ def draft_issue_automation_answer(
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
             covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
             requires_human=requires_human,
             requires_human_reason=requires_human_reason,
         )
@@ -1454,11 +1620,31 @@ def assess_issue_automation_grounding(
         }
         for unit in answer_units
     )
+    answer_obligations = _answer_obligations_from_issue(issue)
     citation_ids = tuple(
         dict.fromkeys(
             article_id for article_id in (_string_from(article.get("id")) for article in articles) if article_id
         )
     )
+    ticket_evidence = _automatic_ticket_context(issue)
+    pending_action_check = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=ticket_evidence.get("runbookActions", []),
+    )
+    if pending_action_check.blocked:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=PENDING_ACTION_CLAIM_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            pending_action_claims=pending_action_check.claims,
+            pending_actions=pending_action_check.pending_actions,
+        )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
         return AutomationGroundingAssessment(
             verified=False,
@@ -1469,6 +1655,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error="Candidate answer could not be exhaustively segmented for grounding",
         )
     evidence, snapshots, incomplete_ids = _grounding_evidence(articles)
@@ -1483,6 +1670,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error=("Incomplete cited evidence: " + ", ".join(incomplete_ids or citation_ids))[:1_000],
         )
     slot_semaphore = _GROUNDING_AGENT_SLOTS
@@ -1500,6 +1688,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error="Grounding evaluator capacity is temporarily exhausted",
         )
 
@@ -1523,7 +1712,6 @@ def assess_issue_automation_grounding(
         if isinstance(usage_context, dict):
             provider = _string_from(usage_context.get("provider")) or provider
             model = _string_from(usage_context.get("model")) or model
-        ticket_evidence = _automatic_ticket_context(issue)
         message_evidence = _automatic_message_context(messages)
         account_evidence = _record_from(account_context)
         conversation_evidence = _automatic_conversation_context(conversation_context)
@@ -1538,6 +1726,7 @@ def assess_issue_automation_grounding(
         prompt = _GROUNDING_USER_TEMPLATE.format(
             answer_sha256=answer_sha256,
             answer_units=_json(answer_units),
+            answer_obligations=_json(answer_obligations),
             allowed_evidence_ids=_json(allowed_evidence_ids),
             ticket=_json(ticket_evidence),
             account_intelligence=_json(account_evidence),
@@ -1645,6 +1834,78 @@ def assess_issue_automation_grounding(
             )
         if seen_unit_ids != set(expected_units):
             protocol_errors.append("Evaluator did not assess every answer unit exactly once")
+
+        expected_obligations = {
+            _string_from(obligation.get("id")): obligation
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        }
+        seen_obligation_ids: set[str] = set()
+        clean_obligation_assessments: list[dict[str, Any]] = []
+        uncovered_obligations: list[str] = []
+        if len(structured.obligation_assessments) > 100:
+            protocol_errors.append("Evaluator returned too many obligation assessments")
+        for assessment in structured.obligation_assessments[:100]:
+            obligation_id = _string_from(assessment.obligation_id)
+            obligation = expected_obligations.get(obligation_id)
+            answer_unit_ids = tuple(
+                dict.fromkeys(
+                    unit_id
+                    for unit_id in (
+                        _string_from(value) for value in assessment.answer_unit_ids
+                    )
+                    if unit_id
+                )
+            )
+            if not obligation_id or obligation_id in seen_obligation_ids:
+                protocol_errors.append(
+                    "Evaluator returned a missing or duplicate answer-obligation ID"
+                )
+                continue
+            seen_obligation_ids.add(obligation_id)
+            if obligation is None:
+                protocol_errors.append(
+                    f"Evaluator returned unknown answer-obligation ID: {obligation_id}"
+                )
+                continue
+            unknown_unit_ids = [
+                unit_id for unit_id in answer_unit_ids if unit_id not in expected_units
+            ]
+            if unknown_unit_ids:
+                protocol_errors.append(
+                    "Answer obligation uses unknown answer-unit IDs: "
+                    + ", ".join(unknown_unit_ids[:5])
+                )
+            supported_units = {
+                _string_from(item.get("unitId"))
+                for item in clean_unit_assessments
+                if item.get("supported") and item.get("evidenceIds")
+            }
+            covered = bool(
+                assessment.covered
+                and answer_unit_ids
+                and not unknown_unit_ids
+                and set(answer_unit_ids).issubset(supported_units)
+            )
+            if assessment.covered and not answer_unit_ids:
+                protocol_errors.append(
+                    f"Covered obligation has no answer-unit IDs: {obligation_id}"
+                )
+            if not covered:
+                uncovered_obligations.append(
+                    _string_from(obligation.get("question"))[:500]
+                )
+            clean_obligation_assessments.append(
+                {
+                    "obligationId": obligation_id,
+                    "covered": covered,
+                    "answerUnitIds": list(answer_unit_ids),
+                }
+            )
+        if seen_obligation_ids != set(expected_obligations):
+            protocol_errors.append(
+                "Evaluator did not assess every answer obligation exactly once"
+            )
         used_citation_ids = tuple(
             citation_id for citation_id in citation_ids if citation_id in used_supported_evidence_ids
         )
@@ -1663,6 +1924,7 @@ def assess_issue_automation_grounding(
             )
         )
         clean_unsupported = tuple(dict.fromkeys(unsupported_claims))
+        clean_uncovered_obligations = tuple(dict.fromkeys(uncovered_obligations))
         if protocol_errors:
             return AutomationGroundingAssessment(
                 verified=False,
@@ -1675,6 +1937,9 @@ def assess_issue_automation_grounding(
                 answer_sha256=answer_sha256,
                 answer_units=audit_answer_units,
                 unit_assessments=tuple(clean_unit_assessments),
+                answer_obligations=answer_obligations,
+                obligation_assessments=tuple(clean_obligation_assessments),
+                uncovered_obligations=clean_uncovered_obligations,
                 claim_count=min(len(structured.unit_assessments), _GROUNDING_MAX_UNITS),
                 unsupported_claims=clean_unsupported,
                 contradictions=contradictions,
@@ -1682,11 +1947,20 @@ def assess_issue_automation_grounding(
                 model=model,
                 error="; ".join(dict.fromkeys(protocol_errors))[:1_000],
             )
-        if structured.verdict != "grounded" or clean_unsupported or contradictions:
+        if (
+            structured.verdict != "grounded"
+            or clean_unsupported
+            or contradictions
+            or clean_uncovered_obligations
+        ):
             return AutomationGroundingAssessment(
                 verified=False,
                 status="failed",
-                reason_code="ungrounded_answer",
+                reason_code=(
+                    "incomplete_answer"
+                    if clean_uncovered_obligations
+                    else "ungrounded_answer"
+                ),
                 checked_at=checked_at,
                 citation_ids=citation_ids,
                 evidence_snapshots=snapshots,
@@ -1694,6 +1968,9 @@ def assess_issue_automation_grounding(
                 answer_sha256=answer_sha256,
                 answer_units=audit_answer_units,
                 unit_assessments=tuple(clean_unit_assessments),
+                answer_obligations=answer_obligations,
+                obligation_assessments=tuple(clean_obligation_assessments),
+                uncovered_obligations=clean_uncovered_obligations,
                 claim_count=len(structured.unit_assessments),
                 unsupported_claims=clean_unsupported,
                 contradictions=contradictions,
@@ -1711,6 +1988,8 @@ def assess_issue_automation_grounding(
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
             unit_assessments=tuple(clean_unit_assessments),
+            answer_obligations=answer_obligations,
+            obligation_assessments=tuple(clean_obligation_assessments),
             claim_count=len(structured.unit_assessments),
             provider=provider,
             model=model,
@@ -1727,6 +2006,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             provider=provider,
             model=model,
             error=str(exc)[:1_000],

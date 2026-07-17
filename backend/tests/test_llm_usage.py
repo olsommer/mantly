@@ -50,3 +50,60 @@ def test_record_usage_from_agent_result_metadata():
     assert usage["totalTokens"] == 14
     assert usage["metadataAvailable"] is True
     assert usage["calls"][0]["stage"] == "response"
+
+
+def test_record_usage_includes_enclosing_stage_duration(monkeypatch):
+    from automail.llm import usage as usage_module
+
+    result = {
+        "messages": [
+            AIMessage(
+                content="ok",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "total_tokens": 14,
+                },
+                response_metadata={"model_name": "gemini-3-flash-preview"},
+            )
+        ]
+    }
+    clock = iter([100.0, 100.125])
+    monkeypatch.setattr(usage_module.time, "perf_counter", lambda: next(clock))
+
+    with usage_module.collect_llm_usage() as collector:
+        with usage_module.llm_stage("issue_automation_grounding"):
+            usage_module.record_usage_from_result(result)
+
+    assert collector.events[0]["stage"] == "issue_automation_grounding"
+    assert collector.events[0]["durationMs"] == 125
+
+
+def test_store_llm_usage_events_persists_stage_duration(monkeypatch):
+    from automail.db.pocketbase import chats
+
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(chats, "generate_id", lambda: "usage-event-1")
+    monkeypatch.setattr(
+        chats,
+        "_post",
+        lambda path, data: posted.append((path, data)) or data,
+    )
+
+    chats.store_llm_usage_events(
+        [
+            {
+                "stage": "response",
+                "provider": "gemini",
+                "model": "gemini-3-flash-preview",
+                "durationMs": 812,
+                "totalTokens": 14,
+            }
+        ],
+        project_id="project-1",
+        run_id="run-1",
+        background=False,
+    )
+
+    assert posted[0][0] == "/api/collections/llm_usage_events/records"
+    assert posted[0][1]["duration_ms"] == 812

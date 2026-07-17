@@ -32,6 +32,10 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         ConcernRoute(
             summary="Cancel contract C-1",
             source_text="Cancel contract C-1.",
+            answer_obligations=[
+                "Confirm whether contract C-1 can be cancelled.",
+                "Explain when cancellation becomes effective.",
+            ],
             intent_name="cancel-contract",
             confidence=0.98,
         ),
@@ -84,7 +88,84 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         "Explain cancel-contract state.",
         "Cover cancel-contract.",
     ]
+    assert [
+        obligation.question for obligation in result.concerns[0].answer_obligations
+    ] == [
+        "Confirm whether contract C-1 can be cancelled.",
+        "Explain when cancellation becomes effective.",
+    ]
+    assert [
+        obligation.obligation_id for obligation in result.concerns[0].answer_obligations
+    ] == [
+        f"{result.concerns[0].concern_id}:obligation-1",
+        f"{result.concerns[0].concern_id}:obligation-2",
+    ]
     assert result.concerns[0].concern_id != result.concerns[1].concern_id
+
+
+def test_missing_router_obligations_get_stable_concern_fallback(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Explain legal fees",
+        source_text="What is the fee?",
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "concern-stable",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.model_dump(by_alias=True) for item in outcome.answer_obligations] == [
+        {
+            "obligationId": "concern-stable:obligation-1",
+            "question": "What is the fee?",
+            "sourceText": "What is the fee?",
+        }
+    ]
+
+
+def test_explicit_questions_fill_router_obligation_omissions(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Billing questions",
+        source_text=(
+            "What is the consultation fee? Is a retainer required? "
+            "When is the invoice due? Can the retainer be waived?"
+        ),
+        answer_obligations=["Explain the consultation fee."],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "billing",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "What is the consultation fee?",
+        "Is a retainer required?",
+        "When is the invoice due?",
+        "Can the retainer be waived?",
+    ]
 
 
 def test_duplicate_routes_execute_runbook_only_once(monkeypatch):

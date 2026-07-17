@@ -85,6 +85,7 @@ export interface TokenUsageCall {
     stage: string;
     provider: string;
     model: string;
+    durationMs?: number | null;
     inputTokens: number | null;
     outputTokens: number | null;
     cachedInputTokens: number | null;

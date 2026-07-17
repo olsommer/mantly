@@ -832,6 +832,27 @@ export interface SupportTriagePreparation {
     issue?: SupportIssue | null;
 }
 
+export interface SupportRunbookConcern extends Record<string, unknown> {
+    concernId?: string;
+    concernSummary?: string;
+    sourceText?: string;
+    confidence?: number;
+    matched?: boolean;
+    intentName?: string;
+    status?: string;
+    summary?: string;
+    requiresHuman?: boolean;
+    requiresHumanReason?: string | null;
+    error?: string | null;
+}
+
+export interface SupportIntentResult extends Record<string, unknown> {
+    matched?: boolean;
+    intentName?: string;
+    concerns?: SupportRunbookConcern[];
+    error?: string | null;
+}
+
 export interface SupportAiRun {
     id: string;
     issueId: string;
@@ -842,7 +863,7 @@ export interface SupportAiRun {
     requiresHuman: boolean;
     summary: string;
     identityResult: Record<string, unknown>;
-    intentResult: Record<string, unknown>;
+    intentResult: SupportIntentResult;
     securityResult: Record<string, unknown>;
     tokenUsage: Record<string, unknown>;
     toolCalls: Array<Record<string, unknown>>;

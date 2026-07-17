@@ -4,7 +4,7 @@ import { AlertCircle, AlertTriangle, Bell, BookOpen, Building2, CheckCircle2, Cl
 import { toast } from 'sonner';
 
 import { api } from '@/api/endpoints';
-import type { KnowledgeArticle, KnowledgeGap, ProjectMember, SupportAccount, SupportAccountInsight, SupportAccountInsightSummary, SupportActionExecution, SupportAgentAnswer, SupportAgentMessage, SupportAiRun, SupportAnalytics, SupportChannelActivationBacklog, SupportChannelWebhookEvent, SupportCustomFieldDefinition, SupportCustomFieldType, SupportExternalObject, SupportExternalSyncRun, SupportFieldPreparation, SupportInboxView, SupportIssue, SupportIssueActivityEvent, SupportIssueAnswerWorkspace, SupportIssueBoard, SupportIssueBoardAction, SupportIssueDuplicateSuggestion, SupportIssueListFilters, SupportIssueMessage, SupportIssuePriority, SupportIssueStatus, SupportNotification, SupportOutboundMessage, SupportQueue, SupportQueueOwnerWorkload, SupportReplyMacro, SupportSlaEvent, SupportTriagePreparation, SupportWatcher } from '@/api/endpoints';
+import type { KnowledgeArticle, KnowledgeGap, ProjectMember, SupportAccount, SupportAccountInsight, SupportAccountInsightSummary, SupportActionExecution, SupportAgentAnswer, SupportAgentMessage, SupportAiRun, SupportAnalytics, SupportChannelActivationBacklog, SupportChannelWebhookEvent, SupportCustomFieldDefinition, SupportCustomFieldType, SupportExternalObject, SupportExternalSyncRun, SupportFieldPreparation, SupportInboxView, SupportIssue, SupportIssueActivityEvent, SupportIssueAnswerWorkspace, SupportIssueBoard, SupportIssueBoardAction, SupportIssueDuplicateSuggestion, SupportIssueListFilters, SupportIssueMessage, SupportIssuePriority, SupportIssueStatus, SupportNotification, SupportOutboundMessage, SupportQueue, SupportQueueOwnerWorkload, SupportReplyMacro, SupportRunbookConcern, SupportSlaEvent, SupportTriagePreparation, SupportWatcher } from '@/api/endpoints';
 import { InboxAgentPanel } from './InboxAgentPanel';
 import type { AgentArticleSource } from './InboxAgentPanel';
 import { InboxAttachments } from './InboxAttachments';
@@ -1155,6 +1155,83 @@ function tokenTotal(value: Record<string, unknown>): number {
 
 function isAgentChatRun(run: SupportAiRun): boolean {
     return run.source === 'agent_answer' || run.metadata.kind === 'agent_answer';
+}
+
+function latestRunbookConcerns(runs: SupportAiRun[]): SupportRunbookConcern[] {
+    for (const run of runs) {
+        const concerns = run.intentResult.concerns;
+        if (!Array.isArray(concerns)) continue;
+        const validConcerns = concerns.filter(isRecord) as SupportRunbookConcern[];
+        if (validConcerns.length > 0) return validConcerns;
+    }
+    return [];
+}
+
+function runbookConcernStatus(concern: SupportRunbookConcern): string {
+    const status = textFrom(concern.status).toLowerCase();
+    if (status) return status;
+    if (concern.requiresHuman === true) return 'requires_human';
+    if (concern.matched === true) return 'ready';
+    return 'unmatched';
+}
+
+function runbookConcernStatusLabel(status: string): string {
+    if (status === 'ready') return 'Ready';
+    if (status === 'requires_human') return 'Human review';
+    if (status === 'failed') return 'Failed';
+    return 'No match';
+}
+
+function RunbookAudit({
+    primaryIntent,
+    concerns,
+    t,
+}: {
+    primaryIntent: string;
+    concerns: SupportRunbookConcern[];
+    t: TranslateFn;
+}) {
+    return (
+        <div className="space-y-2" data-ticket-runbook-audit data-ticket-runbook-concern-count={concerns.length}>
+            <div>
+                <div className="text-xs font-medium uppercase text-muted-foreground">{t('Runbook')}</div>
+                <div className="mt-1 text-sm" data-ticket-runbook-primary>{primaryIntent || t('No match')}</div>
+            </div>
+            {concerns.length > 0 && (
+                <div className="space-y-2" data-ticket-runbook-concerns>
+                    <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
+                        <span>{t('Concerns')}</span>
+                        <Badge variant="outline" className="font-normal">{concerns.length}</Badge>
+                    </div>
+                    {concerns.map((concern, index) => {
+                        const concernId = textFrom(concern.concernId) || `concern-${index + 1}`;
+                        const intentName = textFrom(concern.intentName);
+                        const summary = textFrom(concern.concernSummary)
+                            || textFrom(concern.summary)
+                            || `${t('Concern')} ${index + 1}`;
+                        const status = runbookConcernStatus(concern);
+                        return (
+                            <div
+                                key={`${concernId}-${index}`}
+                                className="rounded-md border bg-muted/20 p-2 text-sm"
+                                data-ticket-runbook-concern={concernId}
+                                data-ticket-runbook-concern-intent={intentName}
+                                data-ticket-runbook-concern-status={status}
+                            >
+                                <div className="flex items-start justify-between gap-2">
+                                    <span className="min-w-0 text-xs text-muted-foreground">{summary}</span>
+                                    <Badge variant={intentName ? 'secondary' : 'outline'} className="max-w-[55%] shrink-0 truncate font-normal">
+                                        {intentName || t('No match')}
+                                    </Badge>
+                                </div>
+                                <div className="mt-1 text-xs text-muted-foreground">{t(runbookConcernStatusLabel(status))}</div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
 }
 
 function agentRunQuestion(run: SupportAiRun): string {
@@ -3848,6 +3925,10 @@ export function Inbox({ projectId }: InboxProps) {
     const auditAiRuns = useMemo(
         () => (selectedIssue?.aiRuns ?? []).filter(run => !isAgentChatRun(run)),
         [selectedIssue?.aiRuns],
+    );
+    const auditRunbookConcerns = useMemo(
+        () => latestRunbookConcerns(auditAiRuns),
+        [auditAiRuns],
     );
     const searchedKnowledgeArticles = useMemo(() => {
         const needle = knowledgeQuery.trim().toLowerCase();
@@ -10760,10 +10841,11 @@ export function Inbox({ projectId }: InboxProps) {
                                 </Badge>
                             </div>
                             <div className="space-y-3">
-                                <div>
-                                    <div className="text-xs font-medium uppercase text-muted-foreground">{t('Runbook')}</div>
-                                    <div className="mt-1 text-sm">{selectedIssue.activatedIntent || t('No match')}</div>
-                                </div>
+                                <RunbookAudit
+                                    primaryIntent={selectedIssue.activatedIntent}
+                                    concerns={auditRunbookConcerns}
+                                    t={t}
+                                />
                                 <Separator />
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
@@ -12831,8 +12913,11 @@ export function Inbox({ projectId }: InboxProps) {
                                 </section>
 
                                 <section className="rounded-md border p-4">
-                                    <div className="mb-3 text-sm font-medium">{t('Runbook')}</div>
-                                    <div className="text-sm">{selectedIssue.activatedIntent || t('No match')}</div>
+                                    <RunbookAudit
+                                        primaryIntent={selectedIssue.activatedIntent}
+                                        concerns={auditRunbookConcerns}
+                                        t={t}
+                                    />
                                     <Separator className="my-3" />
                                     <div className="space-y-2">
                                         <div className="text-xs font-medium uppercase text-muted-foreground">{t('Actions')}</div>

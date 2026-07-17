@@ -21,6 +21,7 @@ from automail.support import issue_agent
 from automail.support import knowledge_workspace as knowledge_workspace_module
 from automail.support.issue_agent import (
     AutomationAnswerOutput,
+    AutomationGroundingObligationAssessment,
     AutomationGroundingOutput,
     AutomationGroundingUnitAssessment,
     KnowledgeAgentOutput,
@@ -969,6 +970,97 @@ def test_grounding_answer_units_cover_every_non_whitespace_character() -> None:
     assert all(unit["sha256"] == issue_agent.grounding_text_sha256(unit["text"]) for unit in units)
     covered = {index for unit in units for index in range(unit["start"], unit["end"])}
     assert all(character.isspace() or index in covered for index, character in enumerate(answer))
+
+
+def test_grounding_gate_rejects_supported_answer_that_omits_one_customer_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = "The delayed parcel should arrive within seven business days."
+    answer_hash = issue_agent.grounding_text_sha256(answer)
+    issue = {
+        "id": "issue-1",
+        "subject": "Delivery and address change",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "delivery",
+                            "matched": True,
+                            "intentName": "delivery-status",
+                            "answerObligations": [
+                                {
+                                    "obligationId": "delivery:arrival",
+                                    "question": "When will the delayed parcel arrive?",
+                                },
+                                {
+                                    "obligationId": "delivery:address",
+                                    "question": "Can the delivery address be changed?",
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=answer_hash,
+        checked_citation_ids=["shipping-policy"],
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id="u001",
+                unit_sha256=answer_hash,
+                supported=True,
+                evidence_ids=["shipping-policy"],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id="delivery:arrival",
+                covered=True,
+                answer_unit_ids=["u001"],
+            ),
+            AutomationGroundingObligationAssessment(
+                obligation_id="delivery:address",
+                covered=False,
+                answer_unit_ids=[],
+            ),
+        ],
+        contradictions=[],
+    )
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeGroundingAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            return {"structured_response": output}
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeGroundingAgent())
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[_articles()[0]],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == ("Can the delivery address be changed?",)
 
 
 def test_grounding_gate_rejects_incomplete_unit_protocol(

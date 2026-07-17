@@ -7,6 +7,9 @@
 ## Immutable Answer Units
 {answer_units}
 
+## Answer Obligations
+{answer_obligations}
+
 ## Ticket
 {ticket}
 
@@ -25,4 +28,4 @@
 ## Candidate Answer
 {answer}
 
-Assess every immutable answer unit exactly once. Fail closed on uncertainty.
+Assess every immutable answer unit and every answer obligation exactly once. Fail closed on uncertainty.

@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from automail.integrations.http_tool import current_generated_attachments, curre
 from automail.llm.usage import llm_stage
 from automail.models import (
     AgentResponse,
+    AnswerObligation,
     ConcernRoute,
     Email,
     IdentityResult,
@@ -242,6 +244,7 @@ def _run_intent_router_agent(
             normalized.append(ConcernRoute(
                 summary=concern.summary.strip(),
                 source_text=concern.source_text.strip(),
+                answer_obligations=_dedupe_strings(concern.answer_obligations)[:10],
                 intent_name=canonical_name,
                 confidence=concern.confidence,
                 reason=reason or ("" if canonical_name else "No configured intent matches this concern."),
@@ -395,6 +398,32 @@ def _dedupe_strings(*groups: list[str]) -> list[str]:
     return result
 
 
+def _answer_obligations(
+    concern_id: str,
+    route: ConcernRoute,
+) -> list[AnswerObligation]:
+    """Bind router-extracted questions to stable runtime IDs."""
+    questions = _dedupe_strings(route.answer_obligations)
+    explicit_questions = _dedupe_strings([
+        segment.strip()
+        for segment in re.split(r"(?<=\?)", route.source_text)
+        if "?" in segment and segment.strip()
+    ])
+    if len(explicit_questions) > len(questions):
+        questions = explicit_questions
+    if not questions:
+        fallback = route.summary.strip() or route.source_text.strip()
+        questions = [fallback] if fallback else []
+    return [
+        AnswerObligation(
+            obligation_id=f"{concern_id}:obligation-{index}",
+            question=question[:500],
+            source_text=route.source_text[:1_000],
+        )
+        for index, question in enumerate(questions[:10], start=1)
+    ]
+
+
 def _new_tool_evidence(start_index: int) -> list[RunbookToolEvidence]:
     """Convert this concern's safe HTTP audit facts into composer evidence."""
     evidence: list[RunbookToolEvidence] = []
@@ -501,6 +530,7 @@ def _execute_routed_concern(
             concern_id=concern_id,
             concern_summary=route.summary,
             source_text=route.source_text,
+            answer_obligations=_answer_obligations(concern_id, route),
             confidence=route.confidence,
             matched=False,
             status="unmatched",
@@ -567,6 +597,7 @@ def _execute_routed_concern(
         concern_id=concern_id,
         concern_summary=route.summary,
         source_text=route.source_text,
+        answer_obligations=_answer_obligations(concern_id, route),
         confidence=route.confidence,
         matched=True,
         intent_name=intent_name,
@@ -598,6 +629,7 @@ def _failed_outcome(
         concern_id=concern_id,
         concern_summary=route.summary,
         source_text=route.source_text,
+        answer_obligations=_answer_obligations(concern_id, route),
         confidence=route.confidence,
         matched=bool(route.intent_name),
         intent_name=route.intent_name,

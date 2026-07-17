@@ -442,3 +442,59 @@ def test_inbox_composer_requires_exact_concern_coverage():
     assert exact == (("buy", "cancel"), False, "")
     assert missing[1] is True
     assert "exact coverage" in missing[2]
+
+
+def test_inbox_composer_requires_every_question_obligation():
+    issue = {
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "billing",
+                            "matched": True,
+                            "intentName": "billing",
+                            "answerObligations": [
+                                {
+                                    "obligationId": "billing:fee",
+                                    "question": "What is the consultation fee?",
+                                },
+                                {
+                                    "obligationId": "billing:retainer",
+                                    "question": "Is a retainer required?",
+                                },
+                                {
+                                    "obligationId": "billing:due-date",
+                                    "question": "When is the invoice due?",
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    ticket = issue_agent._ticket_context(issue)
+    exact = issue_agent._validated_obligation_coverage(
+        issue,
+        ["billing:retainer", "billing:due-date", "billing:fee"],
+    )
+    missing = issue_agent._validated_obligation_coverage(
+        issue,
+        ["billing:fee", "billing:retainer"],
+    )
+
+    assert [item["id"] for item in ticket["concerns"][0]["answerObligations"]] == [
+        "billing:fee",
+        "billing:retainer",
+        "billing:due-date",
+    ]
+    assert exact == (
+        ("billing:retainer", "billing:due-date", "billing:fee"),
+        False,
+        "",
+    )
+    assert missing[1] is True
+    assert "every answer obligation" in missing[2]

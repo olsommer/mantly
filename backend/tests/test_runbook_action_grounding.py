@@ -378,6 +378,69 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert reply_calls == []
 
 
+def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch):
+    issue = {
+        "id": "issue1",
+        "subject": "Missing parcel",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": "message1"},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "delivery",
+                            "matched": True,
+                            "intentName": "delivery-investigation",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "runbook_webhook",
+                "status": "pending",
+                "label": "Open delivery investigation",
+                "metadata": {
+                    "source": "runbook",
+                    "approvalRequired": True,
+                    "sourceMessageId": "message1",
+                    "concernId": "delivery",
+                    "runbook": "delivery-investigation",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "open_ticket",
+                        "label": "Open delivery investigation",
+                    }
+                },
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer="We are initiating the steps to open this investigation.",
+        articles=[],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "pending_action_claim"
+    assert result.pending_action_claims == (
+        "We are initiating the steps to open this investigation.",
+    )
+    assert result.pending_actions == ("Open delivery investigation",)
+
+
 def test_channel_autopilot_auto_send_uses_grounder_derived_citation(monkeypatch):
     reply_calls, grounding_calls = _stub_channel_agent_answer(monkeypatch, verified=True)
 

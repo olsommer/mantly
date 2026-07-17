@@ -20,6 +20,10 @@ Call `route_concerns` exactly once with between one and three concerns.
   why in `reason`.
 - Include a short `summary`, the smallest useful verbatim `source_text` excerpt,
   and a confidence from 0 to 1 for every concern.
+- Include one short `answer_obligations` entry for every explicit customer
+  question, request, or decision that the final reply must address. Keep
+  separate obligations for separate subquestions even when they use the same
+  runbook, such as fee, retainer, invoice due date, and waiver questions.
 - The same intent may appear more than once when the email contains distinct
   instances, such as requests about two different orders.
 - If more than three concerns exist, combine only closely related concerns and

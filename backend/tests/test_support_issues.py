@@ -12709,7 +12709,11 @@ def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_cita
     assert updates == [{"assigned_by": "automation", "assignee_email": "automation", "status": "ongoing"}]
 
 
-def test_create_issue_agent_answer_blocks_ungrounded_auto_send_and_persists_gate(monkeypatch):
+@pytest.mark.parametrize("reason_code", ["ungrounded_answer", "identifier_mismatch"])
+def test_create_issue_agent_answer_blocks_grounding_failure_and_persists_gate(
+    monkeypatch,
+    reason_code,
+):
     posted: list[tuple[str, dict]] = []
     reply_calls: list[dict] = []
     ids = iter(["aiRun123", "event123"])
@@ -12757,7 +12761,7 @@ def test_create_issue_agent_answer_blocks_ungrounded_auto_send_and_persists_gate
         lambda **_kwargs: AutomationGroundingAssessment(
             verified=False,
             status="failed",
-            reason_code="ungrounded_answer",
+            reason_code=reason_code,
             checked_at="2026-07-15T08:05:00Z",
             citation_ids=("article1",),
             evidence_snapshots=({"id": "article1", "bodySha256": "abc123"},),
@@ -12790,11 +12794,11 @@ def test_create_issue_agent_answer_blocks_ungrounded_auto_send_and_persists_gate
     assert result["approvalRequired"] is True
     assert result["autoSend"] is False
     assert result["autoSendPolicy"] == "grounding_guard"
-    assert result["autoSendBlockedReason"] == "ungrounded_answer"
+    assert result["autoSendBlockedReason"] == reason_code
     assert result["groundingGate"]["status"] == "failed"
     assert result["groundingIssues"] == ["We already fixed this automatically."]
     assert reply_calls[0]["status"] == "draft"
-    assert reply_calls[0]["metadata"]["groundingGate"]["reasonCode"] == "ungrounded_answer"
+    assert reply_calls[0]["metadata"]["groundingGate"]["reasonCode"] == reason_code
     ai_run = next(data for path, data in posted if path == "/api/collections/support_ai_runs/records")
     assert ai_run["metadata"]["groundingGate"]["unsupportedClaims"] == [
         "We already fixed this automatically."

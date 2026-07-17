@@ -36,6 +36,7 @@ KNOWLEDGE_AGENT_TOOL_CALL_LIMIT = 8
 _AUTOMATION_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _AUTOMATION_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="automation-agent")
 AUTOMATION_AGENT_DEADLINE_SECONDS = 55
+AUTOMATION_AGENT_SLOT_WAIT_SECONDS = 40
 _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
@@ -46,6 +47,7 @@ GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
 _AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
 LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
+BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
@@ -878,6 +880,7 @@ def _automatic_tool_evidence_context(value: Any, *, limit: int = 20) -> list[dic
             # to detach the prompt context from mutable persisted metadata.
             try:
                 record["responseFacts"] = json.loads(json.dumps(facts, ensure_ascii=False))
+                record["evidenceId"] = f"tool:{record['name']}"
             except (TypeError, ValueError):
                 pass
         if record["name"]:
@@ -1241,6 +1244,119 @@ def grounding_text_sha256(value: str) -> str:
     return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
 
 
+_BUSINESS_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{6,62}[A-Za-z0-9](?![A-Za-z0-9@])"
+)
+_BUSINESS_IDENTIFIER_DURATION_WORDS = {
+    "day",
+    "days",
+    "hour",
+    "hours",
+    "minute",
+    "minutes",
+    "month",
+    "months",
+    "week",
+    "weeks",
+    "year",
+    "years",
+}
+
+
+def _business_identifiers(value: Any) -> tuple[str, ...]:
+    """Extract bounded business-like IDs without treating dates or prose as IDs."""
+    found: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+            return
+        if not isinstance(item, str):
+            return
+        for match in _BUSINESS_IDENTIFIER_RE.finditer(item):
+            candidate = match.group(0)
+            if sum(char.isdigit() for char in candidate) < 2:
+                continue
+            if sum(char.isalpha() for char in candidate) < 2:
+                continue
+            parts = [part.casefold() for part in re.split(r"[-_]", candidate) if part]
+            if (
+                len(parts) == 2
+                and any(part.isdigit() for part in parts)
+                and any(part in _BUSINESS_IDENTIFIER_DURATION_WORDS for part in parts)
+            ):
+                continue
+            found.append(candidate)
+
+    collect(value)
+    return tuple(dict.fromkeys(found))
+
+
+def _allowed_business_identifiers(
+    *,
+    messages: list[dict[str, Any]],
+    ticket: dict[str, Any],
+    articles: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return exact IDs present in bounded customer or trusted support evidence."""
+    identifiers: list[str] = []
+    for source in (
+        _automatic_message_context(messages),
+        ticket,
+        _article_context(articles),
+    ):
+        identifiers.extend(_business_identifiers(source))
+    return tuple(dict.fromkeys(identifiers))
+
+
+def _unsupported_business_identifiers(
+    answer: str,
+    *,
+    allowed_identifiers: tuple[str, ...],
+) -> tuple[str, ...]:
+    allowed = {identifier.casefold() for identifier in allowed_identifiers}
+    return tuple(
+        identifier
+        for identifier in _business_identifiers(answer)
+        if identifier.casefold() not in allowed
+    )
+
+
+def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
+    """Return only exact, successful tool evidence IDs surfaced in ticket context."""
+    records: list[Any] = []
+    raw_ticket_evidence = ticket.get("toolEvidence")
+    if isinstance(raw_ticket_evidence, list):
+        records.extend(raw_ticket_evidence)
+    concerns = ticket.get("concerns")
+    if isinstance(concerns, list):
+        for raw_concern in concerns:
+            concern = _record_from(raw_concern)
+            raw_concern_evidence = concern.get("toolEvidence")
+            if isinstance(raw_concern_evidence, list):
+                records.extend(raw_concern_evidence)
+
+    evidence_ids: list[str] = []
+    for raw_record in records:
+        record = _record_from(raw_record)
+        name = _string_from(record.get("name"))
+        evidence_id = _string_from(record.get("evidenceId"))
+        if (
+            name
+            and evidence_id == f"tool:{name}"
+            and _string_from(record.get("status")) == "success"
+            and isinstance(record.get("responseFacts"), (dict, list))
+            and record.get("responseFacts")
+        ):
+            evidence_ids.append(evidence_id)
+    return tuple(dict.fromkeys(evidence_ids))
+
+
 def grounding_context_snapshots(
     *,
     issue: dict[str, Any],
@@ -1570,7 +1686,10 @@ def draft_issue_automation_answer(
 ) -> IssueAgentDraft:
     """Preserve the bounded one-shot generator for automatic/shared retrieval paths."""
     slot_semaphore = _AUTOMATION_AGENT_SLOTS
-    if not slot_semaphore.acquire(blocking=False):
+    if not slot_semaphore.acquire(
+        blocking=True,
+        timeout=AUTOMATION_AGENT_SLOT_WAIT_SECONDS,
+    ):
         return IssueAgentDraft(
             answer=fallback_answer,
             confidence=fallback_confidence,
@@ -1593,6 +1712,11 @@ def draft_issue_automation_answer(
         reply_language = _latest_customer_language(messages)
         reply_language_name = _LANGUAGE_NAMES[reply_language]
         ticket_context = _automatic_ticket_context(issue)
+        allowed_business_identifiers = _allowed_business_identifiers(
+            messages=messages,
+            ticket=ticket_context,
+            articles=articles,
+        )
         user_prompt = _AUTOMATION_USER_TEMPLATE.format(
             ticket=_json(ticket_context),
             account_intelligence=_json(_record_from(account_context)),
@@ -1646,6 +1770,19 @@ def draft_issue_automation_answer(
                         "Remove every statement that says or promises a pending business action "
                         "has started, completed, or will definitely occur. Describe it only as "
                         "pending approval or conditional on review."
+                    )
+                unsupported_identifiers = _unsupported_business_identifiers(
+                    first_answer,
+                    allowed_identifiers=allowed_business_identifiers,
+                )
+                if unsupported_identifiers:
+                    allowed_summary = ", ".join(allowed_business_identifiers[:20]) or "none"
+                    correction_reasons.append(
+                        "Remove or correct unsupported business identifiers: "
+                        + ", ".join(unsupported_identifiers[:20])
+                        + ". Use only exact identifiers present in trusted evidence: "
+                        + allowed_summary
+                        + "."
                     )
                 if correction_reasons:
                     correction_prompt = (
@@ -1915,6 +2052,32 @@ def assess_issue_automation_grounding(
             pending_action_claims=pending_action_check.claims,
             pending_actions=pending_action_check.pending_actions,
         )
+    allowed_business_identifiers = _allowed_business_identifiers(
+        messages=messages,
+        ticket=ticket_evidence,
+        articles=articles,
+    )
+    unsupported_identifiers = _unsupported_business_identifiers(
+        answer,
+        allowed_identifiers=allowed_business_identifiers,
+    )
+    if unsupported_identifiers:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            unsupported_claims=unsupported_identifiers,
+            error=(
+                "Candidate answer contains unsupported business identifiers: "
+                + ", ".join(unsupported_identifiers[:20])
+            )[:1_000],
+        )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
         return AutomationGroundingAssessment(
             verified=False,
@@ -1986,6 +2149,7 @@ def assess_issue_automation_grounding(
         account_evidence = _record_from(account_context)
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]
+        allowed_evidence_ids.extend(_automatic_tool_evidence_ids(ticket_evidence))
         if message_evidence:
             allowed_evidence_ids.append("messages")
         if account_evidence:

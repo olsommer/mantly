@@ -171,6 +171,7 @@ def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
             "name": "product_lookup",
             "method": "GET",
             "status": "success",
+            "evidenceId": "tool:product_lookup",
             "responseFacts": [
                 {"path": "product", "value": "XYZ Pro"},
                 {"path": "available", "value": True},

@@ -939,6 +939,93 @@ def test_automation_draft_retries_once_for_pending_action_claim(
     ).blocked is False
 
 
+def test_automation_draft_retries_once_for_mutated_business_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    expected_tracking = "UPS1Z999AA10123456784"
+    mutated_tracking = "UPS1Z999AA10123456785"
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(llm_module, "resolve_effective_config", lambda config, _tenant, _project: config)
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            tracking = mutated_tracking if len(prompts) == 1 else expected_tracking
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer=f"Tracking {tracking} is in transit.",
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-1", "subject": "Shipment status"},
+        messages=[
+            {
+                "direction": "customer",
+                "body": f"Where is shipment {expected_tracking}?",
+            }
+        ],
+        question="Prepare the best support answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert len(prompts) == 2
+    assert "unsupported business identifiers" in prompts[1]
+    assert mutated_tracking in prompts[1]
+    assert expected_tracking in prompts[1]
+    assert result.answer == f"Tracking {expected_tracking} is in transit."
+    assert result.generation_mode == "llm"
+
+
+def test_business_identifier_sources_are_exact_and_exclude_dates_and_plain_numbers() -> None:
+    identifiers = issue_agent._allowed_business_identifiers(
+        messages=[
+            {
+                "direction": "customer",
+                "body": "On 2026-07-17, check UPS1Z999AA10123456784 and number 1234567890.",
+            }
+        ],
+        ticket={
+            "toolEvidence": [
+                {
+                    "name": "lookup-zf-e2e-shipment",
+                    "status": "success",
+                    "evidenceId": "tool:lookup-zf-e2e-shipment",
+                    "responseFacts": {"order": "ZF-20991"},
+                }
+            ]
+        },
+        articles=[
+            {
+                "id": "shipping-policy",
+                "body": "Carrier reference DHL00340434292135100123 is authoritative for this test.",
+            }
+        ],
+    )
+
+    assert identifiers == (
+        "UPS1Z999AA10123456784",
+        "ZF-20991",
+        "DHL00340434292135100123",
+    )
+    assert issue_agent._business_identifiers(
+        "2026-07-17 1234567890 ordinary words 24-hours"
+    ) == ()
+
+
 def test_automatic_context_omits_current_workflow_state_but_binds_related_tickets() -> None:
     conversation = {
         "key": "email:thread-1",
@@ -1059,6 +1146,136 @@ def test_automation_draft_requires_independent_grounding_for_auto_send(
     assert result.answer_units[0]["id"] == "u001"
     assert result.evidence_snapshots[0]["bodySha256"]
     assert result.evidence_snapshots[0]["evidenceSha256"]
+
+
+@pytest.mark.parametrize(
+    ("model_evidence_id", "expected_verified"),
+    [
+        ("tool:lookup-zf-e2e-shipment", True),
+        ("tool:lookup-zf-e2e-shipmen", False),
+    ],
+)
+def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    model_evidence_id: str,
+    expected_verified: bool,
+) -> None:
+    answer = "Shipment UPS1Z999AA10123456784 is in transit."
+    prompts: list[str] = []
+    issue = {
+        "id": "issue-1",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "shipment-status",
+                            "matched": True,
+                            "intentName": "shipment-status",
+                            "outcome": {
+                                "toolEvidence": [
+                                    {
+                                        "name": "lookup-zf-e2e-shipment",
+                                        "method": "GET",
+                                        "status": "success",
+                                        "responseFacts": {
+                                            "trackingNumber": "UPS1Z999AA10123456784",
+                                            "status": "in_transit",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeGroundingAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            prompts.append(inputs["messages"][0]["content"])
+            return {
+                "structured_response": AutomationGroundingOutput(
+                    verdict="grounded",
+                    answer_sha256=issue_agent.grounding_text_sha256(answer),
+                    unit_assessments=[
+                        AutomationGroundingUnitAssessment(
+                            unit_id="u001",
+                            unit_sha256=issue_agent.grounding_text_sha256(answer),
+                            supported=True,
+                            evidence_ids=[model_evidence_id],
+                        )
+                    ],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeGroundingAgent())
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Where is UPS1Z999AA10123456784?",
+            }
+        ],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert '"tool:lookup-zf-e2e-shipment"' in prompts[0]
+    assert result.verified is expected_verified
+    if expected_verified:
+        assert result.status == "passed"
+    else:
+        assert result.status == "error"
+        assert "unknown evidence IDs" in result.error
+
+
+def test_grounding_preflight_rejects_mutated_business_identifier_without_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_tracking = "UPS1Z999AA10123456784"
+    mutated_tracking = "UPS1Z999AA10123456785"
+
+    def fail_create_agent(**_kwargs: Any) -> Any:
+        raise AssertionError("grounding model must not run")
+
+    monkeypatch.setattr(issue_agent, "create_agent", fail_create_agent)
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue={"id": "issue-1", "subject": "Shipment status"},
+        messages=[
+            {
+                "direction": "customer",
+                "body": f"Where is shipment {expected_tracking}?",
+            }
+        ],
+        answer=f"Shipment {mutated_tracking} is in transit.",
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == issue_agent.BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE
+    assert result.unsupported_claims == (mutated_tracking,)
+    assert mutated_tracking in result.error
 
 
 @pytest.mark.parametrize(
@@ -1670,8 +1887,9 @@ def test_knowledge_agent_deadline_returns_fallback_and_holds_slot_until_worker_f
 
 def test_automation_generator_capacity_exhaustion_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     class NoCapacity:
-        def acquire(self, *, blocking: bool) -> bool:
-            assert blocking is False
+        def acquire(self, *, blocking: bool, timeout: float) -> bool:
+            assert blocking is True
+            assert timeout == issue_agent.AUTOMATION_AGENT_SLOT_WAIT_SECONDS
             return False
 
     monkeypatch.setattr(issue_agent, "_AUTOMATION_AGENT_SLOTS", NoCapacity())
@@ -1692,6 +1910,54 @@ def test_automation_generator_capacity_exhaustion_fails_closed(monkeypatch: pyte
     assert result.error == "Automatic answer capacity is temporarily exhausted"
 
 
+def test_automation_generator_waits_for_capacity_within_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = threading.BoundedSemaphore(1)
+    assert slot.acquire(blocking=False)
+    release_timer = threading.Timer(0.02, slot.release)
+    release_timer.start()
+    monkeypatch.setattr(issue_agent, "_AUTOMATION_AGENT_SLOTS", slot)
+    monkeypatch.setattr(issue_agent, "AUTOMATION_AGENT_SLOT_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer="We can help with your shipment.",
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-1"},
+        messages=[{"direction": "customer", "body": "Please help with my shipment."}],
+        question="Answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+    release_timer.join(timeout=1)
+
+    assert result.generation_mode == "llm"
+    assert result.answer == "We can help with your shipment."
+
+
 def test_automation_generator_deadline_holds_slot_and_records_late_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1702,8 +1968,9 @@ def test_automation_generator_deadline_holds_slot_and_records_late_usage(
     late_calls: list[dict[str, Any]] = []
 
     class TrackingSlot:
-        def acquire(self, *, blocking: bool) -> bool:
-            assert blocking is False
+        def acquire(self, *, blocking: bool, timeout: float) -> bool:
+            assert blocking is True
+            assert timeout == issue_agent.AUTOMATION_AGENT_SLOT_WAIT_SECONDS
             return True
 
         def release(self) -> None:

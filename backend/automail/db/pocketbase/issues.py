@@ -11173,6 +11173,7 @@ def _create_issue_agent_answer(
                 "incomplete_answer",
                 "pending_action_claim",
                 "language_mismatch",
+                "identifier_mismatch",
             }
             else "confidence_guard"
         )

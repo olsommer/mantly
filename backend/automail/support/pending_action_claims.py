@@ -108,7 +108,7 @@ _ACTION_STATE_SUBJECTS = (
     r"request",
     r"case",
     r"ticket",
-    r"(?:[a-z][a-z-]*\s+){0,2}investigation",
+    r"investigation",
     r"escalation",
     r"claim",
     r"refund",
@@ -130,6 +130,9 @@ _ACTION_STATE_SUBJECTS = (
     r"subscription\s+change",
     r"carrier\s+redirect",
     r"warehouse\s+ticket",
+)
+_ACTION_STATE_SUBJECT_PATTERN = (
+    rf"(?:[a-z][a-z-]*\s+){{0,3}}(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
 )
 _LIFECYCLE_STATE_SUBJECTS = (
     r"order",
@@ -313,7 +316,7 @@ _PAST_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PASSIVE_ACTION_PATTERN = re.compile(
-    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
     rf"[^.!?\n]{{0,100}}?\b"
     rf"(?:has|have|is|are|was|were)\s+(?:(?:already|successfully|now|currently)\s+)*"
     rf"(?:been\s+|being\s+)?(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
@@ -332,7 +335,7 @@ _ACTIVE_STATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ACTION_COMPLETION_STATE_PATTERN = re.compile(
-    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
     r"[^.!?\n]{0,80}?\b(?:is|are|was|were)\s+"
     r"(?:(?:already|successfully|now)\s+)*(?:complete|completed|done)\b",
     re.IGNORECASE,
@@ -343,7 +346,7 @@ _FUTURE_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _FUTURE_PASSIVE_ACTION_PATTERN = re.compile(
-    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
     rf"[^.!?\n]{{0,100}}?\b(?:will|shall)\s+"
     rf"(?:(?:soon|shortly|now|immediately)\s+)*be\s+"
     rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",

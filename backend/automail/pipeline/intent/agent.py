@@ -171,6 +171,41 @@ def _classification_user_prompt(
     return prompt
 
 
+def _concern_processing_email(
+    email: Email,
+    route: ConcernRoute,
+) -> tuple[Email, Email]:
+    """Return focused fallback input plus processing input with shared context.
+
+    Routers intentionally extract only the text that belongs to each concern.
+    Shared identifiers such as order, contract, or tracking numbers can sit
+    elsewhere in the original message, though. Runbook processing therefore
+    receives both the routed concern and the full original message while
+    deterministic action fallbacks stay scoped to the concern alone.
+    """
+    focused = email.model_copy(
+        update={
+            "subject": route.summary or email.subject,
+            "body": route.source_text or email.body,
+        }
+    )
+    if focused.subject == email.subject and focused.body == email.body:
+        return focused, focused
+
+    processing = focused.model_copy(
+        update={
+            "body": (
+                "## Routed concern to process\n"
+                f"{focused.body}\n\n"
+                "## Full original customer message context\n"
+                f"Subject: {email.subject}\n\n"
+                f"{email.body}"
+            )
+        }
+    )
+    return focused, processing
+
+
 def _run_intent_router_agent(
     email: Email,
     known_intents: set[str],
@@ -314,6 +349,10 @@ def _run_processing_agent(
     )
     intent_body = (
         f"{_PROCESSING_SECURITY_BOUNDARY}\n\n"
+        "When the user message contains a routed concern and full original "
+        "message context, process only the routed concern. Use identifiers and "
+        "shared facts from the original context when they apply, but do not "
+        "perform work for unrelated concerns.\n\n"
         "## Configured runbook\n\n"
         f"{intent_body}"
     )
@@ -542,12 +581,7 @@ def _execute_routed_concern(
 
     intent_result = _build_intent_result(intent_name, intents_dir=intents_dir)
     requires_review = get_intent_require_review(intent_name, intents_dir=intents_dir)
-    concern_email = email.model_copy(
-        update={
-            "subject": route.summary or email.subject,
-            "body": route.source_text or email.body,
-        }
-    )
+    focused_email, processing_email = _concern_processing_email(email, route)
     generated_start_index = len(current_generated_attachments())
     tool_start_index = len(current_tool_calls())
     output: IntentProcessingOutput | IntentReviewOutput = IntentReviewOutput()
@@ -562,7 +596,7 @@ def _execute_routed_concern(
         output = _run_processing_agent(
             intent_name,
             intent_result.actions,
-            concern_email,
+            processing_email,
             identity_result,
             intents_dir,
             config_path,
@@ -572,7 +606,7 @@ def _execute_routed_concern(
         )
         if intent_result.actions and isinstance(output, IntentProcessingOutput):
             fills_count = _merge_action_fills(intent_result.actions, output)
-            fills_count += _ensure_open_ticket_action_task(intent_result.actions, concern_email)
+            fills_count += _ensure_open_ticket_action_task(intent_result.actions, focused_email)
     else:
         logger.info("Intent '%s' requires no tool or action processing", intent_name)
 

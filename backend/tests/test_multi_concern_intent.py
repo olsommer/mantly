@@ -76,8 +76,20 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
     result, response = run_intent_agent(_email())
 
     assert calls == [
-        ("cancel-contract", "Cancel contract C-1", "Cancel contract C-1."),
-        ("buy-product", "Buy three XYZ units", "I also want to buy three XYZ units."),
+        (
+            "cancel-contract",
+            "Cancel contract C-1",
+            "## Routed concern to process\nCancel contract C-1.\n\n"
+            "## Full original customer message context\nSubject: Cancel and buy\n\n"
+            "Cancel contract C-1. I also want to buy three XYZ units.",
+        ),
+        (
+            "buy-product",
+            "Buy three XYZ units",
+            "## Routed concern to process\nI also want to buy three XYZ units.\n\n"
+            "## Full original customer message context\nSubject: Cancel and buy\n\n"
+            "Cancel contract C-1. I also want to buy three XYZ units.",
+        ),
     ]
     assert response is None
     assert result.matched is True
@@ -249,10 +261,75 @@ def test_same_runbook_executes_distinct_source_excerpts_independently(monkeypatc
 
     result, response = run_intent_agent(_email())
 
-    assert calls == ["Cancel contract C-1.", "Cancel contract C-2."]
+    assert calls == [
+        "## Routed concern to process\nCancel contract C-1.\n\n"
+        "## Full original customer message context\nSubject: Cancel and buy\n\n"
+        "Cancel contract C-1. I also want to buy three XYZ units.",
+        "## Routed concern to process\nCancel contract C-2.\n\n"
+        "## Full original customer message context\nSubject: Cancel and buy\n\n"
+        "Cancel contract C-1. I also want to buy three XYZ units.",
+    ]
     assert response is None
     assert len(result.concerns) == 2
     assert result.concerns[0].concern_id != result.concerns[1].concern_id
+
+
+def test_each_concern_processing_input_keeps_shared_identifier_from_original_message(monkeypatch):
+    _base_stubs(monkeypatch)
+    email = Email(
+        id="message-shared-order",
+        subject="Status and address change for ZF-20991",
+        from_address="merchant@example.test",
+        body=(
+            "For order ZF-20991, tell me the current shipment status and ETA. "
+            "Also change the delivery address to 24 New Street."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Shipment status and ETA",
+            source_text="Tell me the current shipment status and ETA.",
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Address change",
+            source_text="Change the delivery address to 24 New Street.",
+            intent_name="buy-product",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    processing_bodies: list[str] = []
+
+    def process(_intent_name, _actions, concern_email, *_args, **_kwargs):
+        processing_bodies.append(concern_email.body)
+        return IntentReviewOutput(summary="Processed")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert len(result.concerns) == 2
+    assert all("ZF-20991" in body for body in processing_bodies)
+    assert processing_bodies[0].startswith(
+        "## Routed concern to process\nTell me the current shipment status and ETA."
+    )
+    assert processing_bodies[1].startswith(
+        "## Routed concern to process\nChange the delivery address to 24 New Street."
+    )
 
 
 def test_unmatched_concern_preserves_matched_work_and_requires_human(monkeypatch):

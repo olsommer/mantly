@@ -62,6 +62,8 @@ _COMPLETED_ACTIONS = (
     r"reshipped",
     r"replaced",
     r"created",
+    r"flagged",
+    r"marked",
     r"started",
     r"begun",
     r"activated",

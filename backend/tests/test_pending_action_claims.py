@@ -42,6 +42,8 @@ def test_pending_action_guard_blocks_live_progressive_claims(answer: str) -> Non
         "We escalated the safety incident.",
         "Your refund has been issued.",
         "The investigation is now in progress.",
+        "The incident has been flagged for urgent human operations review.",
+        "This request has been marked for escalation.",
     ],
 )
 def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: str) -> None:

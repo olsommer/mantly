@@ -374,10 +374,15 @@ class TestEnsureAppCollectionsSchema:
             for field in support_outbound["fields"]
         )
         assert {field["name"] for field in support_outbound["fields"]} >= {
+            "idempotency_key",
             "delivery_attempt_key",
             "delivery_claimed_at",
             "delivery_claim_expires_at",
         }
+        assert (
+            "CREATE UNIQUE INDEX idx_support_outbound_issue_idempotency ON "
+            "support_outbound_messages (issue, idempotency_key) WHERE idempotency_key <> ''"
+        ) in support_outbound["indexes"]
         delivery_runs = next(payload for payload in posted_payloads if payload["name"] == "support_delivery_runs")
         assert any(field["name"] == "sent" and field["type"] == "number" for field in delivery_runs["fields"])
         assert any(field["name"] == "result" and field["type"] == "json" for field in delivery_runs["fields"])

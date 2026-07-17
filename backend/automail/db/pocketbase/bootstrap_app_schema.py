@@ -914,6 +914,7 @@ def ensure_app_collections_schema(
                 _text_field("provider_message_id"),
                 _editor_field("error"),
                 _text_field("created_by"),
+                _text_field("idempotency_key"),
                 _date_field("sent_at"),
                 {**_text_field("delivery_claim_token"), "hidden": True},
                 _text_field("delivery_attempt_key"),
@@ -927,12 +928,14 @@ def ensure_app_collections_schema(
                 "CREATE INDEX idx_support_outbound_issue_created ON support_outbound_messages (issue, created)",
                 "CREATE INDEX idx_support_outbound_project_status ON support_outbound_messages (project, status, updated)",
                 "CREATE INDEX idx_support_outbound_delivery_claim ON support_outbound_messages (status, delivery_claim_expires_at)",
+                "CREATE UNIQUE INDEX idx_support_outbound_issue_idempotency ON support_outbound_messages (issue, idempotency_key) WHERE idempotency_key <> ''",
             ],
         )
         support_outbound, was_created = _ensure_collection(http_client, resolved_pb_url, token, support_outbound_payload)
         if was_created:
             created.append("support_outbound_messages")
         for field_def in (
+            _text_field("idempotency_key"),
             {**_text_field("delivery_claim_token"), "hidden": True},
             _text_field("delivery_attempt_key"),
             _date_field("delivery_claimed_at"),

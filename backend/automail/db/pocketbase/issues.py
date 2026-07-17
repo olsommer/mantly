@@ -79,6 +79,7 @@ OPERATIONAL_ISSUE_FILTERS = {
 }
 ISSUE_PRIORITIES = {"low", "normal", "high", "urgent"}
 OUTBOUND_STATUSES = {"draft", "queued", "sent", "failed"}
+AUTOMATIC_REPLY_SOURCES = {"agent_answer", "automation", "email_pipeline"}
 DELIVERY_CLAIM_LEASE_SECONDS = 900
 AUTOMATIC_REPLY_TERMINAL_ERROR = "Automatic reply requires an active unmerged ticket"
 ACTION_EXECUTION_STATUSES = {"pending", "running", "success", "failed", "skipped"}
@@ -119,6 +120,7 @@ MERGE_SOURCE_ISSUE_COLLECTIONS = (
 )
 MERGE_CHILD_UNIQUE_FIELDS = {
     "support_messages": ("source_message_id",),
+    "support_outbound_messages": ("idempotency_key",),
     "support_ai_runs": ("run_key",),
     "support_sla_events": ("event_type",),
     "support_issue_watchers": ("watcher_email",),
@@ -257,6 +259,12 @@ SUPPORT_SCHEMA_REQUIRED_FIELDS = {
         },
         "area": "ticket spine",
     },
+    "support_outbound_messages": {
+        "fields": {
+            "idempotency_key": "59_support_outbound_idempotency.js",
+        },
+        "area": "outbound",
+    },
 }
 SUPPORT_SCHEMA_EXPECTED_MIGRATIONS = tuple(
     dict.fromkeys(
@@ -266,6 +274,7 @@ SUPPORT_SCHEMA_EXPECTED_MIGRATIONS = tuple(
             "51_chat_email_thread_metadata.js",
             "52_support_issue_merge_fields.js",
             "54_support_issue_metadata.js",
+            "59_support_outbound_idempotency.js",
         ],
     ),
 )
@@ -777,6 +786,11 @@ def _string_from(value: Any) -> str:
 def _key_from(value: str) -> str:
     cleaned = " ".join((value or "").strip().lower().split())
     return cleaned[:300]
+
+
+def _stable_record_id(*parts: str) -> str:
+    logical_key = "\x1f".join(_string_from(part) for part in parts)
+    return hashlib.sha256(logical_key.encode("utf-8")).hexdigest()[:15]
 
 
 def _queue_key_from(value: Any) -> str:
@@ -2319,6 +2333,7 @@ def _upsert_messages(
     project_id: str,
     email_metadata: dict[str, Any] | None = None,
 ) -> None:
+    """Store immutable normalized messages without rewriting prior timestamps."""
     occurred_at = _now_iso()
     extra_metadata = dict(email_metadata or {})
     inbound_attachments = _parse(extra_metadata.pop("attachments", []), list)
@@ -2356,13 +2371,19 @@ def _upsert_messages(
             "occurred_at": occurred_at,
         }
         if existing:
-            _patch(f"/api/collections/support_messages/records/{existing['id']}", data)
             continue
         create_data = {"id": generate_id(), **data}
         if tenant_id:
             create_data["tenant"] = tenant_id
         create_data["project"] = project_id
-        _post("/api/collections/support_messages/records", create_data)
+        try:
+            _post("/api/collections/support_messages/records", create_data)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in {400, 409} or not _first(
+                "support_messages",
+                filter_str,
+            ):
+                raise
 
 
 def _list_issue_messages(
@@ -4600,9 +4621,21 @@ def _record_assignment(
     assigned_by: str,
     tenant_id: str | None,
     project_id: str,
+    operation_key: str = "",
 ) -> None:
+    assignment_id = (
+        _stable_record_id(
+            "support_issue_assignment",
+            project_id,
+            issue_id,
+            operation_key,
+            assignee_email,
+        )
+        if operation_key
+        else generate_id()
+    )
     data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": assignment_id,
         "issue": issue_id,
         "assignee_email": assignee_email,
         "assigned_by": assigned_by,
@@ -4611,7 +4644,22 @@ def _record_assignment(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    assignment = _post("/api/collections/support_issue_assignments/records", data)
+    try:
+        assignment = _post("/api/collections/support_issue_assignments/records", data)
+    except httpx.HTTPStatusError as exc:
+        if not operation_key or exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_issue_assignments",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(assignment_id)}'",
+            ),
+        )
+        if not winner:
+            raise
+        assignment = winner
     _notify_issue_assigned(
         issue_id=issue_id,
         assignee_email=assignee_email,
@@ -4619,6 +4667,7 @@ def _record_assignment(
         assignment_id=_string_from(assignment.get("id")),
         tenant_id=tenant_id,
         project_id=project_id,
+        dedupe=bool(operation_key),
     )
 
 
@@ -4636,7 +4685,8 @@ def _record_issue_event(
     from_priority: str = "",
     to_priority: str = "",
     metadata: dict[str, Any] | None = None,
-) -> None:
+    record_id: str = "",
+) -> dict[str, Any] | None:
     if not issue_id:
         return
     data: dict[str, Any] = {
@@ -4652,10 +4702,27 @@ def _record_issue_event(
         "metadata": metadata or {},
         "occurred_at": _now_iso(),
     }
+    if record_id:
+        data["id"] = record_id
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    _post("/api/collections/support_issue_events/records", data)
+    try:
+        return _post("/api/collections/support_issue_events/records", data)
+    except httpx.HTTPStatusError as exc:
+        if not record_id or exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_issue_events",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(record_id)}'",
+            ),
+        )
+        if not winner:
+            raise
+        return winner
 
 
 def _create_issue_notification(
@@ -4669,6 +4736,7 @@ def _create_issue_notification(
     project_id: str,
     actor_email: str = "",
     metadata: dict[str, Any] | None = None,
+    dedupe_metadata_key: str = "",
 ) -> dict[str, Any] | None:
     recipient = _string_from(recipient_email).lower()
     if not issue_id or not recipient:
@@ -4676,8 +4744,39 @@ def _create_issue_notification(
     actor = _string_from(actor_email).lower()
     if actor and actor == recipient:
         return None
+    notification_metadata = metadata or {}
+    dedupe_value = _string_from(notification_metadata.get(dedupe_metadata_key))
+    deterministic_id = ""
+    if dedupe_metadata_key and dedupe_value:
+        existing_records = _list_all(
+            "support_notifications",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"recipient_email='{_escape_pb(recipient)}' && "
+                    f"type='{_escape_pb(notification_type)}'"
+                ),
+            ),
+            sort="-created",
+            per_page=200,
+        )
+        for existing in existing_records:
+            existing_metadata = _parse(existing.get("metadata"), dict)
+            if _string_from(existing_metadata.get(dedupe_metadata_key)) == dedupe_value:
+                return _normalize_notification(existing)
+        deterministic_id = _stable_record_id(
+            "support_notification",
+            project_id,
+            issue_id,
+            notification_type,
+            recipient,
+            dedupe_metadata_key,
+            dedupe_value,
+        )
     data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": deterministic_id or generate_id(),
         "project": project_id,
         "issue": issue_id,
         "recipient_email": recipient,
@@ -4685,11 +4784,27 @@ def _create_issue_notification(
         "title": title,
         "body": body,
         "status": "unread",
-        "metadata": metadata or {},
+        "metadata": notification_metadata,
     }
     if tenant_id:
         data["tenant"] = tenant_id
-    return _normalize_notification(_post("/api/collections/support_notifications/records", data))
+    try:
+        created = _post("/api/collections/support_notifications/records", data)
+    except httpx.HTTPStatusError as exc:
+        if not deterministic_id or exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_notifications",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(deterministic_id)}'",
+            ),
+        )
+        if not winner:
+            raise
+        created = winner
+    return _normalize_notification(created)
 
 
 def _notification_issue_summary(
@@ -4724,6 +4839,7 @@ def _notify_issue_assigned(
     assignment_id: str,
     tenant_id: str | None,
     project_id: str,
+    dedupe: bool = False,
 ) -> None:
     assignee = _string_from(assignee_email)
     if not assignee:
@@ -4751,6 +4867,7 @@ def _notify_issue_assigned(
             "account": summary["account"],
             "priority": summary["priority"],
         },
+        dedupe_metadata_key="assignmentId" if dedupe else "",
     )
 
 
@@ -4850,6 +4967,7 @@ def _notify_reply_approval_required(
     actor_email: str,
     tenant_id: str | None,
     project_id: str,
+    dedupe: bool = False,
 ) -> None:
     issue_id = _string_from(issue.get("id"))
     reply_id = _string_from(reply.get("id"))
@@ -4895,6 +5013,7 @@ def _notify_reply_approval_required(
             tenant_id=tenant_id,
             project_id=project_id,
             metadata=metadata,
+            dedupe_metadata_key="replyId" if dedupe else "",
         )
         if notification:
             notified.add(assignee)
@@ -4911,6 +5030,7 @@ def _notify_reply_approval_required(
         project_id=project_id,
         exclude_emails=notified,
         metadata=metadata,
+        dedupe_metadata_key="replyId" if dedupe else "",
     )
 
 
@@ -5070,6 +5190,7 @@ def _notify_issue_watchers(
     project_id: str,
     exclude_emails: set[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    dedupe_metadata_key: str = "",
 ) -> None:
     excluded = {email.lower() for email in (exclude_emails or set())}
     for watcher in _list_issue_watchers(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id):
@@ -5090,6 +5211,7 @@ def _notify_issue_watchers(
                 "watcherId": watcher.get("id", ""),
                 "watcherSource": watcher.get("source", ""),
             },
+            dedupe_metadata_key=dedupe_metadata_key,
         )
 
 
@@ -6291,6 +6413,52 @@ def _tool_calls_from_chat(
     return collected
 
 
+def _email_pipeline_run_key(*, source: str, email_id: str) -> str:
+    return _key_from(f"{source}:{email_id}:pipeline")
+
+
+def _completed_email_pipeline_run(
+    *,
+    issue_id: str,
+    email_id: str,
+    source: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> dict[str, Any] | None:
+    run_key = _email_pipeline_run_key(source=source, email_id=email_id)
+    existing = _first(
+        "support_ai_runs",
+        _issue_filter(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            extra=f"issue='{_escape_pb(issue_id)}' && run_key='{_escape_pb(run_key)}'",
+        ),
+    )
+    if not existing:
+        return None
+    metadata = _parse(existing.get("metadata"), dict)
+    completion = _record_from(metadata.get("issueSync"))
+    return (
+        existing
+        if completion.get("version") == 1 and bool(_string_from(completion.get("completedAt")))
+        else None
+    )
+
+
+def _mark_email_pipeline_run_completed(run: dict[str, Any] | None) -> None:
+    run_id = _string_from((run or {}).get("id"))
+    if not run_id:
+        return
+    metadata = {
+        **_parse((run or {}).get("metadata"), dict),
+        "issueSync": {"version": 1, "completedAt": _now_iso()},
+    }
+    _patch(
+        f"/api/collections/support_ai_runs/records/{run_id}",
+        {"metadata": metadata},
+    )
+
+
 def _upsert_ai_run_from_chat(
     *,
     issue_id: str,
@@ -6303,11 +6471,11 @@ def _upsert_ai_run_from_chat(
     tenant_id: str | None,
     project_id: str,
     source: str,
-) -> None:
+) -> dict[str, Any] | None:
     email_id = _string_from(chat.get("email_id") or chat.get("id") or issue.get("source_email_id"))
     if not email_id:
         return
-    run_key = _key_from(f"{source}:{email_id}:pipeline")
+    run_key = _email_pipeline_run_key(source=source, email_id=email_id)
     existing = _first(
         "support_ai_runs",
         _issue_filter(
@@ -6335,6 +6503,7 @@ def _upsert_ai_run_from_chat(
         "token_usage": _record_from(chat.get("token_usage")),
         "tool_calls": _tool_calls_from_chat(identity_result=identity_result, chat=chat),
         "metadata": {
+            **_parse((existing or {}).get("metadata"), dict),
             "chatRecordId": _string_from(chat.get("record_id")),
             "emailId": email_id,
             "messageCount": int(issue.get("message_count") or 0),
@@ -6342,13 +6511,14 @@ def _upsert_ai_run_from_chat(
         "completed_at": now,
     }
     if existing:
-        _patch(f"/api/collections/support_ai_runs/records/{existing['id']}", data)
-        return
+        patched = _patch(f"/api/collections/support_ai_runs/records/{existing['id']}", data)
+        return {**existing, **data, **patched}
     create_data = {"id": generate_id(), **data, "started_at": now}
     if tenant_id:
         create_data["tenant"] = tenant_id
     create_data["project"] = project_id
-    _post("/api/collections/support_ai_runs/records", create_data)
+    created = _post("/api/collections/support_ai_runs/records", create_data)
+    return {**create_data, **created}
 
 
 def _email_metadata_from_chat(chat: dict[str, Any]) -> dict[str, Any]:
@@ -6533,19 +6703,6 @@ def upsert_issue_from_chat(
         from_address=from_address,
     )
     identity_data = _record_from(identity_result.get("data"))
-    account = _upsert_account(
-        identity=identity,
-        identity_data=identity_data,
-        tenant_id=tenant_id,
-        project_id=project_id,
-    )
-    contact = _upsert_contact(
-        identity=identity,
-        identity_data=identity_data,
-        account_id=_string_from(account.get("id")) if account else "",
-        tenant_id=tenant_id,
-        project_id=project_id,
-    ) if account else None
     priority = _priority(
         # A router no-match is a normal inbox item, not automatically a high-risk
         # support incident. Security monitoring can still independently make it urgent.
@@ -6570,6 +6727,32 @@ def upsert_issue_from_chat(
         _first("support_issues", filter_str),
         tenant_id=tenant_id,
         project_id=project_id,
+    )
+    if existing and _completed_email_pipeline_run(
+        issue_id=_string_from(existing.get("id")),
+        email_id=email_id,
+        source=source,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    ):
+        return _normalize_issue(existing)
+
+    account = _upsert_account(
+        identity=identity,
+        identity_data=identity_data,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    contact = (
+        _upsert_contact(
+            identity=identity,
+            identity_data=identity_data,
+            account_id=_string_from(account.get("id")),
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        if account
+        else None
     )
 
     base_data: dict[str, Any] = {
@@ -6605,6 +6788,17 @@ def upsert_issue_from_chat(
             message_created=True,
         )
         resolver_metadata = _email_resolver_metadata(issue_resolver)
+        _upsert_messages(
+            issue_id=existing["id"],
+            email_id=email_id,
+            chat_record_id=chat_record_id,
+            creator=_string_from(chat.get("creator")),
+            from_address=from_address,
+            messages=messages,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            email_metadata={**message_metadata, **resolver_metadata},
+        )
         update = dict(base_data)
         existing_metadata = _parse(existing.get("metadata"), dict)
         # A new customer message invalidates any earlier explicit resolution that
@@ -6625,17 +6819,6 @@ def upsert_issue_from_chat(
             _apply_default_queue(update, tenant_id=tenant_id, project_id=project_id, channel=channel)
         _patch(f"/api/collections/support_issues/records/{existing['id']}", update)
         issue = {**existing, **update}
-        _upsert_messages(
-            issue_id=existing["id"],
-            email_id=email_id,
-            chat_record_id=chat_record_id,
-            creator=_string_from(chat.get("creator")),
-            from_address=from_address,
-            messages=messages,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            email_metadata={**message_metadata, **resolver_metadata},
-        )
         _refresh_account_contact_counts(
             account_id=_string_from(account.get("id")) if account else None,
             contact_id=_string_from(contact.get("id")) if contact else None,
@@ -6662,7 +6845,7 @@ def upsert_issue_from_chat(
                 project_id=project_id,
             )
             _sync_knowledge_gap(issue=issue, messages=messages, tenant_id=tenant_id, project_id=project_id)
-        _upsert_ai_run_from_chat(
+        pipeline_run = _upsert_ai_run_from_chat(
             issue_id=existing["id"],
             issue=issue,
             chat=chat,
@@ -6753,6 +6936,7 @@ def upsert_issue_from_chat(
                         project_id=project_id,
                         source=source,
                     )
+        _mark_email_pipeline_run_completed(pipeline_run)
         return _normalize_issue(issue)
 
     new_issue_id = generate_id()
@@ -6836,7 +7020,7 @@ def upsert_issue_from_chat(
             project_id=project_id,
         )
         _sync_knowledge_gap(issue=rec, messages=messages, tenant_id=tenant_id, project_id=project_id)
-    _upsert_ai_run_from_chat(
+    pipeline_run = _upsert_ai_run_from_chat(
         issue_id=rec["id"],
         issue=rec,
         chat=chat,
@@ -6902,6 +7086,7 @@ def upsert_issue_from_chat(
                     project_id=project_id,
                     source=source,
                 )
+    _mark_email_pipeline_run_completed(pipeline_run)
     return _normalize_issue(rec)
 
 
@@ -11600,13 +11785,66 @@ def _channel_auto_prepare_agent_reply(
         return None
 
 
-def _existing_pipeline_reply_draft(
+def _automatic_reply_source_message_id(metadata: dict[str, Any]) -> str:
+    source = _string_from(metadata.get("source"))
+    if source not in AUTOMATIC_REPLY_SOURCES:
+        return ""
+    if metadata.get("revisionContext") or metadata.get("revisionOfReplyId"):
+        return ""
+    automation_context = _parse(metadata.get("automationContext"), dict)
+    automation_action_key = _string_from(automation_context.get("actionIdempotencyKey"))
+    if source == "automation" and not automation_action_key:
+        return ""
+    if (
+        source == "agent_answer"
+        and automation_context.get("source") != "channel_autopilot"
+        and not automation_action_key
+    ):
+        return ""
+    for container in (automation_context, metadata):
+        for key in (
+            "actionIdempotencyKey",
+            "sourceMessageId",
+            "sourceEmailId",
+            "emailId",
+            "externalMessageKey",
+            "messageId",
+        ):
+            if value := _string_from(container.get(key)):
+                return value
+    return ""
+
+
+def _automatic_reply_idempotency_key(metadata: dict[str, Any]) -> str:
+    source_message_id = _automatic_reply_source_message_id(metadata)
+    if not source_message_id:
+        return ""
+    digest = hashlib.sha256(source_message_id.encode("utf-8")).hexdigest()
+    return f"automatic-inbound-reply:{digest}"
+
+
+def _existing_automatic_reply(
     *,
     issue_id: str,
-    email_id: str,
+    source_message_id: str,
+    idempotency_key: str,
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, Any] | None:
+    if idempotency_key:
+        existing = _first(
+            "support_outbound_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"idempotency_key='{_escape_pb(idempotency_key)}'"
+                ),
+            ),
+        )
+        if existing:
+            return existing
     records = _list_all(
         "support_outbound_messages",
         _issue_filter(
@@ -11614,17 +11852,280 @@ def _existing_pipeline_reply_draft(
             project_id=project_id,
             extra=f"issue='{_escape_pb(issue_id)}'",
         ),
-        sort="-created",
-        per_page=50,
+        sort="created",
+        per_page=200,
     )
     for rec in records:
         metadata = _parse(rec.get("metadata"), dict)
-        status = _string_from(rec.get("status"))
-        if status in {"sent", "failed"}:
-            continue
-        if metadata.get("source") == "email_pipeline" and metadata.get("sourceEmailId") == email_id:
+        if _automatic_reply_source_message_id(metadata) == source_message_id:
             return rec
     return None
+
+
+def _existing_pipeline_reply_draft(
+    *,
+    issue_id: str,
+    email_id: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> dict[str, Any] | None:
+    metadata = {"source": "email_pipeline", "sourceEmailId": email_id}
+    return _existing_automatic_reply(
+        issue_id=issue_id,
+        source_message_id=email_id,
+        idempotency_key=_automatic_reply_idempotency_key(metadata),
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+
+
+def _post_outbound_message_once(
+    data: dict[str, Any],
+    *,
+    tenant_id: str | None,
+    project_id: str,
+) -> tuple[dict[str, Any], bool]:
+    metadata = _parse(data.get("metadata"), dict)
+    source_message_id = _automatic_reply_source_message_id(metadata)
+    idempotency_key = _automatic_reply_idempotency_key(metadata)
+    if not source_message_id or not idempotency_key:
+        return _post("/api/collections/support_outbound_messages/records", data), True
+
+    data["idempotency_key"] = idempotency_key
+    data["metadata"] = {
+        **metadata,
+        "automaticReplySourceMessageId": source_message_id,
+        "idempotencyKey": idempotency_key,
+    }
+    issue_id = _string_from(data.get("issue"))
+    existing = _existing_automatic_reply(
+        issue_id=issue_id,
+        source_message_id=source_message_id,
+        idempotency_key=idempotency_key,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    if existing:
+        return existing, False
+    try:
+        return _post("/api/collections/support_outbound_messages/records", data), True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_outbound_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"idempotency_key='{_escape_pb(idempotency_key)}'"
+                ),
+            ),
+        )
+        if not winner:
+            raise
+        return winner, False
+
+
+def _automatic_reply_side_effects_completed(reply: dict[str, Any]) -> bool:
+    metadata = _parse(reply.get("metadata"), dict)
+    completion = _record_from(metadata.get("automaticReplyCompletion"))
+    return completion.get("version") == 1 and bool(_string_from(completion.get("completedAt")))
+
+
+def _ensure_reply_lifecycle_event(
+    *,
+    issue_id: str,
+    reply_id: str,
+    event_type: str,
+    actor_email: str,
+    body: str,
+    source: str,
+    status: str,
+    created: bool,
+    tenant_id: str | None,
+    project_id: str,
+) -> None:
+    if not issue_id or not reply_id:
+        return
+    if not created:
+        records = _list_all(
+            "support_issue_events",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"event_type='{_escape_pb(event_type)}'"
+                ),
+            ),
+            sort="-occurred_at",
+            per_page=200,
+        )
+        if any(
+            _string_from(_parse(record.get("metadata"), dict).get("replyId")) == reply_id
+            for record in records
+        ):
+            return
+    event_id = _stable_record_id(
+        "support_issue_event",
+        project_id,
+        issue_id,
+        reply_id,
+        event_type,
+    )
+    try:
+        _record_issue_event(
+            issue_id=issue_id,
+            event_type=event_type,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            actor_email=actor_email,
+            title="Reply queued" if status == "queued" else "Reply drafted",
+            body=_clip(body, 240),
+            metadata={"replyId": reply_id, "status": status, "source": source},
+            record_id=event_id,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in {400, 409} or not _first(
+            "support_issue_events",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(event_id)}'",
+            ),
+        ):
+            raise
+
+
+def _complete_automatic_reply_side_effects(
+    *,
+    issue: dict[str, Any],
+    outbound: dict[str, Any],
+    created: bool,
+    tenant_id: str | None,
+    project_id: str,
+    manage_issue_state: bool,
+    notify_approval: bool,
+) -> dict[str, Any]:
+    """Finish resumable side effects before marking an automatic reply complete."""
+    if _automatic_reply_side_effects_completed(outbound):
+        return outbound
+
+    issue_id = _string_from(outbound.get("issue") or issue.get("id"))
+    reply_id = _string_from(outbound.get("id"))
+    metadata = _parse(outbound.get("metadata"), dict)
+    clean_status = _string_from(outbound.get("status")) or "draft"
+    actor_email = _string_from(outbound.get("created_by") or outbound.get("from_address"))
+    source = _string_from(metadata.get("source"))
+    owner_email = ""
+
+    if manage_issue_state:
+        current_assignee = _string_from(issue.get("assigneeEmail") or issue.get("assignee_email"))
+        current_status = _canonical_status(_string_from(issue.get("status")) or "open")
+        computed_owner_email = _reply_action_owner_email(
+            actor_email,
+            issue,
+            metadata,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        issue_operation = _record_from(metadata.get("automaticReplyIssueOperation"))
+        has_issue_operation = issue_operation.get("version") == 1
+        claim_owner_email = _string_from(issue_operation.get("claimOwnerEmail"))
+        move_ongoing_from_status_raw = _string_from(
+            issue_operation.get("moveOngoingFromStatus")
+        )
+        move_ongoing_from_status = (
+            _canonical_status(move_ongoing_from_status_raw)
+            if move_ongoing_from_status_raw
+            else ""
+        )
+        owner_email = claim_owner_email or computed_owner_email
+        if has_issue_operation:
+            should_repair_assignment = bool(
+                claim_owner_email
+                and (
+                    not current_assignee
+                    or current_assignee.lower() == claim_owner_email.lower()
+                )
+            )
+            should_repair_status = bool(
+                move_ongoing_from_status
+                and current_status in {move_ongoing_from_status, "ongoing"}
+            )
+        else:
+            should_repair_assignment = bool(owner_email and not current_assignee)
+            should_repair_status = clean_status == "queued" and current_status != "ongoing"
+        if actor_email and owner_email and (should_repair_assignment or should_repair_status):
+            issue_updates: dict[str, Any] = {
+                "assigned_by": actor_email,
+                "workflow_source": "automatic_reply",
+                "operation_key": f"automatic_reply:{reply_id}",
+                "reply_id": reply_id,
+            }
+            if should_repair_assignment:
+                issue_updates["assignee_email"] = owner_email
+                if has_issue_operation:
+                    issue_updates["operation_from_assignee"] = ""
+            if should_repair_status:
+                issue_updates["status"] = "ongoing"
+                if has_issue_operation:
+                    issue_updates["operation_from_status"] = move_ongoing_from_status
+            update_issue(
+                issue_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                updates=issue_updates,
+                require_active=(
+                    clean_status == "queued"
+                    and source == "agent_answer"
+                    and metadata.get("autoSend") is True
+                    and metadata.get("humanApproved") is not True
+                ),
+            )
+
+    event_type = "reply_queued" if clean_status == "queued" else "reply_drafted"
+    _ensure_reply_lifecycle_event(
+        issue_id=issue_id,
+        reply_id=reply_id,
+        event_type=event_type,
+        actor_email=actor_email,
+        body=_string_from(outbound.get("body")),
+        source=source,
+        status=clean_status,
+        created=created,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+
+    if notify_approval and metadata.get("approvalRequired") is True and metadata.get("approved") is not True:
+        notification_issue = issue
+        if owner_email and not _string_from(issue.get("assigneeEmail") or issue.get("assignee_email")):
+            notification_issue = {
+                **issue,
+                "assigneeEmail": owner_email,
+                "assignee_email": owner_email,
+            }
+        _notify_reply_approval_required(
+            issue=notification_issue,
+            reply=outbound,
+            actor_email=actor_email,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            dedupe=True,
+        )
+
+    completed_metadata = {
+        **metadata,
+        "automaticReplyCompletion": {"version": 1, "completedAt": _now_iso()},
+    }
+    patched = _patch(
+        f"/api/collections/support_outbound_messages/records/{reply_id}",
+        {"metadata": completed_metadata},
+    )
+    return {**outbound, **patched, "metadata": completed_metadata}
 
 
 def _ensure_email_pipeline_reply_draft(
@@ -11637,7 +12138,7 @@ def _ensure_email_pipeline_reply_draft(
     source: str,
 ) -> dict[str, Any] | None:
     issue_id = _string_from(issue.get("id"))
-    email_id = _string_from(issue.get("source_email_id") or issue.get("sourceEmailId") or chat.get("email_id"))
+    email_id = _string_from(chat.get("email_id") or issue.get("source_email_id") or issue.get("sourceEmailId"))
     draft_body = _draft_reply(messages)
     if not issue_id or not email_id or not draft_body:
         return None
@@ -11648,7 +12149,17 @@ def _ensure_email_pipeline_reply_draft(
         project_id=project_id,
     )
     if existing:
-        return _normalize_outbound_message(existing)
+        existing_source = _string_from(_parse(existing.get("metadata"), dict).get("source"))
+        completed = _complete_automatic_reply_side_effects(
+            issue=issue,
+            outbound=existing,
+            created=False,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            manage_issue_state=existing_source == "agent_answer",
+            notify_approval=existing_source == "agent_answer",
+        )
+        return _normalize_outbound_message(completed)
     author_email = _string_from(chat.get("creator")) or "automation"
     to_address = _string_from(issue.get("contact_email") or issue.get("contactEmail") or issue.get("from_address"))
     if not to_address:
@@ -11680,18 +12191,21 @@ def _ensure_email_pipeline_reply_draft(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    outbound = _post("/api/collections/support_outbound_messages/records", data)
-    _record_issue_event(
-        issue_id=issue_id,
-        event_type="reply_drafted",
+    outbound, created = _post_outbound_message_once(
+        data,
         tenant_id=tenant_id,
         project_id=project_id,
-        actor_email=author_email,
-        title="Reply drafted",
-        body=_clip(draft_body, 240),
-        metadata={"replyId": outbound.get("id", ""), "status": "draft", "source": "email_pipeline"},
     )
-    return _normalize_outbound_message(outbound)
+    completed = _complete_automatic_reply_side_effects(
+        issue=issue,
+        outbound=outbound,
+        created=created,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        manage_issue_state=False,
+        notify_approval=False,
+    )
+    return _normalize_outbound_message(completed)
 
 
 def _ensure_email_channel_autopilot_package(
@@ -12795,6 +13309,18 @@ def update_issue(
     old_tags = _tags_from(rec.get("tags"))
     old_metadata = _parse(rec.get("metadata"), dict)
     old_custom_fields = _parse(old_metadata.get("customFields") or old_metadata.get("custom_fields"), dict)
+    operation_key = _string_from(updates.get("operation_key"))
+    operation_reply_id = _string_from(updates.get("reply_id"))
+    operation_from_status = (
+        _canonical_status(_string_from(updates.get("operation_from_status")))
+        if operation_key and _string_from(updates.get("operation_from_status"))
+        else old_status
+    )
+    operation_from_assignee = (
+        _string_from(updates.get("operation_from_assignee"))
+        if operation_key and "operation_from_assignee" in updates
+        else old_assignee
+    )
     if "assignee_email" in updates:
         data["assignee_email"] = _string_from(updates.get("assignee_email"))
     if "queue_key" in updates or "queue_name" in updates:
@@ -12909,16 +13435,20 @@ def update_issue(
 
     _patch(f"/api/collections/support_issues/records/{rec['id']}", data)
     actor_email = _string_from(updates.get("assigned_by") or updates.get("actor_email"))
-    if "status" in data and data["status"] != old_status:
+    if "status" in data and (data["status"] != old_status or operation_key):
         workflow_metadata: dict[str, Any] = {
             "workflowTransition": True,
-            "workflowFrom": old_status,
+            "workflowFrom": operation_from_status,
             "workflowTo": data["status"],
             "assigneeEmail": _string_from(effective_assignee),
             "source": _string_from(updates.get("workflow_source") or updates.get("source")) or "issue_update",
         }
         if actor_email:
             workflow_metadata["actorEmail"] = actor_email
+        if operation_key:
+            workflow_metadata["operationKey"] = operation_key
+        if operation_reply_id:
+            workflow_metadata["replyId"] = operation_reply_id
         if data["status"] == "done":
             workflow_metadata["doneBlockers"] = []
             workflow_metadata["doneBlockersCleared"] = True
@@ -12929,9 +13459,20 @@ def update_issue(
             project_id=project_id,
             actor_email=actor_email,
             title="Status changed",
-            from_status=old_status,
+            from_status=operation_from_status,
             to_status=data["status"],
             metadata=workflow_metadata,
+            record_id=(
+                _stable_record_id(
+                    "support_issue_event",
+                    project_id,
+                    rec["id"],
+                    operation_key,
+                    "status_changed",
+                )
+                if operation_key
+                else ""
+            ),
         )
     old_priority = _string_from(rec.get("priority")) or "normal"
     if "priority" in data and data["priority"] != old_priority:
@@ -12945,14 +13486,23 @@ def update_issue(
             from_priority=old_priority,
             to_priority=data["priority"],
         )
-    if "assignee_email" in data and data["assignee_email"] != old_assignee:
+    if "assignee_email" in data and (data["assignee_email"] != old_assignee or operation_key):
         _record_assignment(
             issue_id=rec["id"],
             assignee_email=data["assignee_email"],
             assigned_by=actor_email,
             tenant_id=tenant_id,
             project_id=project_id,
+            operation_key=operation_key,
         )
+        assignment_metadata = {
+            "fromAssignee": operation_from_assignee,
+            "toAssignee": data["assignee_email"],
+        }
+        if operation_key:
+            assignment_metadata["operationKey"] = operation_key
+        if operation_reply_id:
+            assignment_metadata["replyId"] = operation_reply_id
         _record_issue_event(
             issue_id=rec["id"],
             event_type="assignment_changed",
@@ -12961,7 +13511,18 @@ def update_issue(
             actor_email=actor_email,
             title="Assignment changed",
             body=data["assignee_email"] or "Unassigned",
-            metadata={"fromAssignee": old_assignee, "toAssignee": data["assignee_email"]},
+            metadata=assignment_metadata,
+            record_id=(
+                _stable_record_id(
+                    "support_issue_event",
+                    project_id,
+                    rec["id"],
+                    operation_key,
+                    "assignment_changed",
+                )
+                if operation_key
+                else ""
+            ),
         )
         if capacity_override:
             capacity_metadata = {
@@ -13545,6 +14106,7 @@ def create_issue_note(
     project_id: str,
     author_email: str,
     body: str,
+    idempotency_key: str = "",
 ) -> dict[str, Any] | None:
     issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
     if not issue:
@@ -13552,18 +14114,44 @@ def create_issue_note(
     note_body = body.strip()
     if not note_body:
         raise ValueError("Note body is required")
+    note_id = (
+        _stable_record_id(
+            "support_internal_note",
+            project_id,
+            issue_id,
+            idempotency_key,
+        )
+        if idempotency_key
+        else generate_id()
+    )
     data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": note_id,
         "issue": issue_id,
         "author_email": author_email,
         "body": note_body,
         "visibility": "internal",
-        "metadata": {},
+        "metadata": {"idempotencyKey": idempotency_key} if idempotency_key else {},
     }
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    note = _normalize_note(_post("/api/collections/support_internal_notes/records", data))
+    try:
+        note_record = _post("/api/collections/support_internal_notes/records", data)
+    except httpx.HTTPStatusError as exc:
+        if not idempotency_key or exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_internal_notes",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(note_id)}'",
+            ),
+        )
+        if not winner:
+            raise
+        note_record = winner
+    note = _normalize_note(note_record)
     _record_issue_event(
         issue_id=issue_id,
         event_type="internal_note_added",
@@ -13573,6 +14161,17 @@ def create_issue_note(
         title="Internal note added",
         body=_clip(note_body, 240),
         metadata={"noteId": note["id"]},
+        record_id=(
+            _stable_record_id(
+                "support_issue_event",
+                project_id,
+                issue_id,
+                idempotency_key,
+                "internal_note_added",
+            )
+            if idempotency_key
+            else ""
+        ),
     )
     mentioned = _mentioned_emails(note_body)
     mentioned_set = set(mentioned)
@@ -13600,6 +14199,7 @@ def create_issue_note(
                 "watcherId": watcher.get("id", "") if watcher else "",
                 "subject": _string_from(issue.get("subject")),
             },
+            dedupe_metadata_key="noteId" if idempotency_key else "",
         )
     _notify_issue_watchers(
         issue_id=issue_id,
@@ -13611,6 +14211,7 @@ def create_issue_note(
         project_id=project_id,
         exclude_emails=mentioned_set | {_string_from(author_email).lower()},
         metadata={"noteId": note["id"], "subject": _string_from(issue.get("subject"))},
+        dedupe_metadata_key="noteId" if idempotency_key else "",
     )
     return note
 
@@ -14021,6 +14622,33 @@ def create_issue_reply(
     if clean_status not in OUTBOUND_STATUSES:
         raise ValueError(f"Unsupported outbound status: {clean_status}")
     channel_context = _reply_channel_context(issue)
+    automatic_lookup_metadata = {
+        "source": source,
+        "deliveryRequired": clean_status == "queued",
+        **channel_context,
+        **(metadata or {}),
+    }
+    automatic_source_message_id = _automatic_reply_source_message_id(automatic_lookup_metadata)
+    automatic_idempotency_key = _automatic_reply_idempotency_key(automatic_lookup_metadata)
+    if automatic_source_message_id and automatic_idempotency_key:
+        existing_automatic_reply = _existing_automatic_reply(
+            issue_id=issue_id,
+            source_message_id=automatic_source_message_id,
+            idempotency_key=automatic_idempotency_key,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        if existing_automatic_reply:
+            completed = _complete_automatic_reply_side_effects(
+                issue=issue,
+                outbound=existing_automatic_reply,
+                created=False,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                manage_issue_state=True,
+                notify_approval=True,
+            )
+            return _normalize_outbound_message(completed)
     reply_target = _reply_target_context(issue, channel_context)
     to_address = _string_from(reply_target.get("value"))
     if not to_address:
@@ -14059,6 +14687,17 @@ def create_issue_reply(
             project_id=project_id,
             owner_email=owner_email,
         )
+    if automatic_source_message_id and automatic_idempotency_key:
+        current_status = _canonical_status(_string_from(issue.get("status")) or "open")
+        reply_metadata["automaticReplyIssueOperation"] = {
+            "version": 1,
+            "claimOwnerEmail": owner_email if should_claim else "",
+            "moveOngoingFromStatus": (
+                current_status
+                if should_update_status and current_status != "ongoing"
+                else ""
+            ),
+        }
     source_body = clean_body
     reply_metadata = _bind_automatic_grounding_metadata(
         reply_metadata,
@@ -14100,7 +14739,24 @@ def create_issue_reply(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    outbound = _post("/api/collections/support_outbound_messages/records", data)
+    outbound, created = _post_outbound_message_once(
+        data,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    if automatic_source_message_id and automatic_idempotency_key:
+        completed = _complete_automatic_reply_side_effects(
+            issue=issue,
+            outbound=outbound,
+            created=created,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            manage_issue_state=True,
+            notify_approval=True,
+        )
+        return _normalize_outbound_message(completed)
+    if not created:
+        return _normalize_outbound_message(outbound)
     if author_email and owner_email and (should_claim or should_update_status):
         issue_updates: dict[str, Any] = {"assigned_by": author_email}
         if should_claim:
@@ -15771,6 +16427,7 @@ def create_issue_action_execution(
     result: dict[str, Any] | None = None,
     error: str = "",
     metadata: dict[str, Any] | None = None,
+    idempotency_key: str = "",
 ) -> dict[str, Any] | None:
     issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
     if not issue:
@@ -15784,9 +16441,26 @@ def create_issue_action_execution(
         raise ValueError("Action label is required")
     if clean_status not in ACTION_EXECUTION_STATUSES:
         raise ValueError(f"Unsupported action execution status: {clean_status}")
+    execution_metadata = {"source": "admin_inbox", **(metadata or {})}
+    automation_context = _record_from(execution_metadata.get("automationContext"))
+    effective_idempotency_key = (
+        _string_from(idempotency_key)
+        or _string_from(automation_context.get("actionIdempotencyKey"))
+    )
+    execution_id = (
+        _stable_record_id(
+            "support_action_execution",
+            project_id,
+            issue_id,
+            effective_idempotency_key,
+            clean_key,
+        )
+        if effective_idempotency_key
+        else generate_id()
+    )
     now = _now_iso()
     data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": execution_id,
         "issue": issue_id,
         "action_key": clean_key,
         "label": clean_label,
@@ -15795,7 +16469,14 @@ def create_issue_action_execution(
         "requested_by": requested_by,
         "result": result or {},
         "error": error.strip(),
-        "metadata": {"source": "admin_inbox", **(metadata or {})},
+        "metadata": {
+            **execution_metadata,
+            **(
+                {"idempotencyKey": effective_idempotency_key}
+                if effective_idempotency_key
+                else {}
+            ),
+        },
         "started_at": now,
     }
     if clean_status in {"success", "failed", "skipped"}:
@@ -15803,7 +16484,23 @@ def create_issue_action_execution(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    execution = _normalize_action_execution(_post("/api/collections/support_action_executions/records", data))
+    try:
+        execution_record = _post("/api/collections/support_action_executions/records", data)
+    except httpx.HTTPStatusError as exc:
+        if not effective_idempotency_key or exc.response.status_code not in {400, 409}:
+            raise
+        winner = _first(
+            "support_action_executions",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(execution_id)}'",
+            ),
+        )
+        if not winner:
+            raise
+        execution_record = winner
+    execution = _normalize_action_execution(execution_record)
     _record_issue_event(
         issue_id=issue_id,
         event_type="action_recorded",
@@ -15817,6 +16514,17 @@ def create_issue_action_execution(
             "actionKey": clean_key,
             "status": clean_status,
         },
+        record_id=(
+            _stable_record_id(
+                "support_issue_event",
+                project_id,
+                issue_id,
+                effective_idempotency_key,
+                "action_recorded",
+            )
+            if effective_idempotency_key
+            else ""
+        ),
     )
     return execution
 
@@ -18766,6 +19474,7 @@ def _automation_reply_context(
     trigger: str,
     actor_email: str,
     context: dict[str, Any] | None,
+    action_index: int = -1,
 ) -> dict[str, Any]:
     run_context = context if isinstance(context, dict) else {}
     action_type = _string_from(action.get("type") or action.get("action") or action.get("kind"))
@@ -18779,9 +19488,22 @@ def _automation_reply_context(
         "actionLabel": _automation_action_value(action, "label", "name", "actionKey", "action_key") or action_type,
         "event": run_context.get("event"),
         "eventSource": run_context.get("source"),
-        "messageId": run_context.get("messageId") or run_context.get("message_id"),
+        "messageId": (
+            run_context.get("messageId")
+            or run_context.get("message_id")
+            or run_context.get("emailId")
+            or run_context.get("email_id")
+        ),
         "channelKey": run_context.get("channelKey") or run_context.get("channel_key"),
     }
+    rule_id = _string_from((rule or {}).get("id"))
+    message_id = _string_from(metadata.get("messageId"))
+    if rule_id and message_id and action_index >= 0:
+        logical_action = f"{rule_id}:{message_id}:{action_index}:{action_type}"
+        metadata["actionIdempotencyKey"] = (
+            f"automation-action:{hashlib.sha256(logical_action.encode('utf-8')).hexdigest()}"
+        )
+        metadata["actionIndex"] = action_index
     if "backlog" in run_context:
         metadata["backlog"] = bool(run_context.get("backlog"))
     return _compact_metadata_context(metadata, default_source="automation")
@@ -18800,10 +19522,19 @@ def _execute_automation_actions(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     issue_id = _string_from(issue.get("id"))
-    for action in actions:
+    for action_index, action in enumerate(actions):
         if not isinstance(action, dict):
             continue
         action_type = _string_from(action.get("type"))
+        action_context = _automation_reply_context(
+            rule=rule,
+            action=action,
+            trigger=trigger,
+            actor_email=actor_email,
+            context=context,
+            action_index=action_index,
+        )
+        operation_key = _string_from(action_context.get("actionIdempotencyKey"))
         if action_type == "assign":
             assignee = _automation_action_value(action, "assigneeEmail", "assignee_email", "email")
             update_issue(
@@ -18855,6 +19586,7 @@ def _execute_automation_actions(
                 project_id=project_id,
                 author_email=actor_email,
                 body=body,
+                idempotency_key=operation_key,
             )
             results.append({"type": action_type, "noteId": note.get("id", "") if note else ""})
         elif action_type == "queue_reply":
@@ -18875,13 +19607,7 @@ def _execute_automation_actions(
                 "feedback_link",
                 default=False,
             )
-            automation_context = _automation_reply_context(
-                rule=rule,
-                action=action,
-                trigger=trigger,
-                actor_email=actor_email,
-                context=context,
-            )
+            automation_context = action_context
             reply_metadata = {
                 "approvalRequired": approval_required,
                 "automationContext": automation_context,
@@ -18901,6 +19627,7 @@ def _execute_automation_actions(
                 author_email=actor_email,
                 body=body,
                 status="queued",
+                source="automation",
                 metadata=reply_metadata,
             )
             results.append(
@@ -18939,13 +19666,7 @@ def _execute_automation_actions(
                 "feedback_link",
                 default=False,
             )
-            automation_context = _automation_reply_context(
-                rule=rule,
-                action=action,
-                trigger=trigger,
-                actor_email=actor_email,
-                context=context,
-            )
+            automation_context = action_context
             answer = create_issue_agent_answer(
                 issue_id,
                 tenant_id=tenant_id,
@@ -19014,13 +19735,7 @@ def _execute_automation_actions(
                 "missing_only",
                 default=True,
             )
-            automation_context = _automation_reply_context(
-                rule=rule,
-                action=action,
-                trigger=trigger,
-                actor_email=actor_email,
-                context=context,
-            )
+            automation_context = action_context
             try:
                 prepared = prepare_issue_custom_fields(
                     issue_id,
@@ -19071,13 +19786,7 @@ def _execute_automation_actions(
                 "requires_approval",
                 default=True,
             )
-            automation_context = _automation_reply_context(
-                rule=rule,
-                action=action,
-                trigger=trigger,
-                actor_email=actor_email,
-                context=context,
-            )
+            automation_context = action_context
             prepared = prepare_issue_triage(
                 issue_id,
                 tenant_id=tenant_id,
@@ -19110,13 +19819,7 @@ def _execute_automation_actions(
                 "requires_approval",
                 default=False,
             )
-            automation_context = _automation_reply_context(
-                rule=rule,
-                action=action,
-                trigger=trigger,
-                actor_email=actor_email,
-                context=context,
-            )
+            automation_context = action_context
             proposed_action = action.get("proposedAction") or action.get("proposed_action")
             if not isinstance(proposed_action, dict):
                 proposed_action = {}

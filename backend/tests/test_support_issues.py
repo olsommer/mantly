@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from automail.api import support_web_chat
@@ -1838,6 +1839,818 @@ def test_upsert_issue_from_channel_email_runs_channel_autopilot(monkeypatch):
     assert autopilot_calls[0]["context"]["issueSourceId"] == "channel:email:support:provider-msg-1"
     issue_post = next(data for path, data in posted if path == "/api/collections/support_issues/records")
     assert issue_post["source"] == "channel:email:support"
+
+
+def test_upsert_issue_from_chat_exact_replay_has_no_issue_side_effects(monkeypatch):
+    existing_issue = {
+        "id": "issue1",
+        "source_email_id": "channel:email:support:message-1",
+        "status": "done",
+        "priority": "normal",
+        "metadata": {
+            "responseResolution": {
+                "outcome": "no_response_required",
+                "reason": "Already handled.",
+            },
+        },
+        "latest_message_at": "2026-07-16T10:00:00Z",
+    }
+    stored_message = {
+        "id": "message1",
+        "issue": "issue1",
+        "source_message_id": "channel:email:support:message-1:0:email",
+        "occurred_at": "2026-07-16T10:00:00Z",
+    }
+    patched: list[tuple[str, dict]] = []
+    posted: list[tuple[str, dict]] = []
+    calls = {"automations": 0, "autopilot": 0, "fallback": 0, "notifications": 0}
+
+    def fake_first(collection: str, *_args, **_kwargs):
+        if collection == "support_issues":
+            return existing_issue
+        if collection == "support_ai_runs":
+            return {
+                "id": "pipeline-run-1",
+                "issue": "issue1",
+                "metadata": {
+                    "issueSync": {
+                        "version": 1,
+                        "completedAt": "2026-07-16T10:01:00Z",
+                    },
+                },
+            }
+        if collection == "support_messages":
+            return stored_message
+        return None
+
+    monkeypatch.setattr(
+        issues,
+        "_ensure_channel",
+        lambda **_kwargs: {
+            "id": "channel1",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True},
+        },
+    )
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(
+        issues,
+        "_upsert_account",
+        lambda **_kwargs: pytest.fail("completed replay must not update the account"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_upsert_contact",
+        lambda **_kwargs: pytest.fail("completed replay must not update the contact"),
+    )
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
+    monkeypatch.setattr(
+        issues,
+        "_run_message_update_automations",
+        lambda **_kwargs: calls.__setitem__("automations", calls["automations"] + 1),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_email_channel_autopilot_package",
+        lambda **_kwargs: calls.__setitem__("autopilot", calls["autopilot"] + 1),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_email_pipeline_reply_draft",
+        lambda **_kwargs: calls.__setitem__("fallback", calls["fallback"] + 1),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_notify_customer_message_subscribers",
+        lambda **_kwargs: calls.__setitem__("notifications", calls["notifications"] + 1),
+    )
+
+    result = issues.upsert_issue_from_chat(
+        {
+            "email_id": "channel:email:support:message-1",
+            "subject": "Already handled",
+            "from_address": "customer@example.com",
+            "messages": [{"user": "email", "role": "email", "content": "Same message."}],
+            "activated_intent": "customer_support",
+            "requires_human": True,
+            "identity_result": {"data": {}},
+            "intent_result": {"matched": True, "actions": []},
+        },
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert result is not None
+    assert result["id"] == "issue1"
+    assert result["status"] == "done"
+    assert result["metadata"]["responseResolution"]["reason"] == "Already handled."
+    assert patched == []
+    assert posted == []
+    assert calls == {"automations": 0, "autopilot": 0, "fallback": 0, "notifications": 0}
+
+
+def test_upsert_issue_from_chat_incomplete_replay_resumes_and_marks_completion(monkeypatch):
+    existing_issue = {
+        "id": "issue1",
+        "source_email_id": "channel:email:support:message-1",
+        "status": "open",
+        "priority": "normal",
+        "queue_key": "support",
+        "metadata": {},
+    }
+    stored_message = {
+        "id": "message1",
+        "issue": "issue1",
+        "source_message_id": "channel:email:support:message-1:0:email",
+        "occurred_at": "2026-07-16T10:00:00Z",
+    }
+    pipeline_run = {
+        "id": "pipeline-run-1",
+        "issue": "issue1",
+        "metadata": {"emailId": "channel:email:support:message-1"},
+    }
+    order: list[str] = []
+    patched: list[tuple[str, dict]] = []
+
+    def fake_first(collection: str, *_args, **_kwargs):
+        if collection == "support_issues":
+            return existing_issue
+        if collection == "support_ai_runs":
+            return pipeline_run
+        if collection == "support_messages":
+            return stored_message
+        return None
+
+    def fake_patch(path: str, data: dict):
+        patched.append((path, data))
+        order.append("completion" if path.endswith("/pipeline-run-1") else "issue_update")
+        return data
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(
+        issues,
+        "_ensure_channel",
+        lambda **_kwargs: {
+            "id": "channel1",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True},
+        },
+    )
+    monkeypatch.setattr(
+        issues,
+        "_upsert_account",
+        lambda **_kwargs: order.append("account") or {"id": "account1"},
+    )
+    monkeypatch.setattr(
+        issues,
+        "_upsert_contact",
+        lambda **_kwargs: order.append("contact") or {"id": "contact1"},
+    )
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda *_args, **_kwargs: pytest.fail("stored message replay must not insert a message"),
+    )
+    monkeypatch.setattr(issues, "_refresh_account_contact_counts", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_external_objects", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_ensure_issue_sla_events", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_account_insights", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_knowledge_gap", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_upsert_ai_run_from_chat", lambda **_kwargs: pipeline_run)
+    monkeypatch.setattr(
+        issues,
+        "_record_issue_event",
+        lambda **_kwargs: order.append("event"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_notify_customer_message_subscribers",
+        lambda **_kwargs: order.append("notification"),
+    )
+    monkeypatch.setattr(issues, "_prepare_runbook_action_approvals", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_run_message_update_automations",
+        lambda **_kwargs: order.append("automation") or {"processed": 0},
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_email_channel_autopilot_package",
+        lambda **_kwargs: order.append("autopilot") or {"reply": {"id": "reply1"}, "run": {"id": "run1"}},
+    )
+
+    result = issues.upsert_issue_from_chat(
+        {
+            "email_id": "channel:email:support:message-1",
+            "subject": "Recover this attempt",
+            "from_address": "customer@example.com",
+            "messages": [{"user": "email", "role": "email", "content": "Same message."}],
+            "activated_intent": "customer_support",
+            "requires_human": True,
+            "identity_result": {"data": {}},
+            "intent_result": {"matched": True, "actions": []},
+        },
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert result is not None
+    assert "account" in order and "automation" in order and "autopilot" in order
+    assert order[-1] == "completion"
+    completion_patch = patched[-1]
+    assert completion_patch[0].endswith("/pipeline-run-1")
+    assert completion_patch[1]["metadata"]["issueSync"]["version"] == 1
+    assert stored_message["occurred_at"] == "2026-07-16T10:00:00Z"
+
+
+def test_upsert_ai_run_preserves_issue_sync_completion_metadata(monkeypatch):
+    existing = {
+        "id": "pipeline-run-1",
+        "metadata": {
+            "issueSync": {"version": 1, "completedAt": "2026-07-16T10:00:00Z"},
+            "keep": "value",
+        },
+    }
+    patched: list[dict] = []
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: existing)
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda _path, data: patched.append(data) or data,
+    )
+
+    result = issues._upsert_ai_run_from_chat(
+        issue_id="issue1",
+        issue={"id": "issue1", "message_count": 1},
+        chat={"email_id": "email-1"},
+        identity_result={},
+        intent_result={},
+        phishing_result={},
+        prompt_injection_result={},
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert result is not None
+    assert patched[0]["metadata"]["keep"] == "value"
+    assert patched[0]["metadata"]["issueSync"] == existing["metadata"]["issueSync"]
+
+
+def test_upsert_messages_exact_replay_preserves_original_timestamp(monkeypatch):
+    existing = {
+        "id": "message1",
+        "source_message_id": "email-1:0:email",
+        "occurred_at": "2026-07-16T10:00:00Z",
+    }
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: existing)
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda *_args, **_kwargs: pytest.fail("an immutable replay message must not be patched"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda *_args, **_kwargs: pytest.fail("an exact replay must not create a message"),
+    )
+
+    result = issues._upsert_messages(
+        issue_id="issue1",
+        email_id="email-1",
+        chat_record_id="chat1",
+        creator="automation",
+        from_address="customer@example.com",
+        messages=[{"user": "email", "role": "email", "content": "Same message."}],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert result is None
+    assert existing["occurred_at"] == "2026-07-16T10:00:00Z"
+
+
+def test_automatic_reply_key_is_shared_across_agent_and_pipeline_sources():
+    source_message_id = "channel:email:support:provider-message-1"
+    agent_metadata = {
+        "source": "agent_answer",
+        "automationContext": {
+            "source": "channel_autopilot",
+            "sourceMessageId": source_message_id,
+        },
+    }
+    pipeline_metadata = {
+        "source": "email_pipeline",
+        "sourceEmailId": source_message_id,
+    }
+
+    assert issues._automatic_reply_idempotency_key(agent_metadata) == (
+        issues._automatic_reply_idempotency_key(pipeline_metadata)
+    )
+    assert issues._automatic_reply_idempotency_key(agent_metadata).startswith(
+        "automatic-inbound-reply:"
+    )
+    assert issues._automatic_reply_idempotency_key(
+        {**agent_metadata, "revisionOfReplyId": "reply1"}
+    ) == ""
+    assert issues._automatic_reply_idempotency_key(
+        {
+            "source": "email_pipeline",
+            "sourceEmailId": "channel:email:support:provider-message-2",
+        }
+    ) != issues._automatic_reply_idempotency_key(pipeline_metadata)
+
+    automation_context = {
+        "source": "automation",
+        "messageId": source_message_id,
+        "actionIdempotencyKey": "automation-action:rule-1:message-1:0",
+    }
+    assert issues._automatic_reply_idempotency_key(
+        {"source": "automation", "automationContext": automation_context}
+    ) == issues._automatic_reply_idempotency_key(
+        {"source": "agent_answer", "automationContext": automation_context}
+    )
+
+
+def test_automation_action_key_is_stable_across_inbound_recovery_trigger():
+    rule = {"id": "rule1", "name": "Always handle"}
+    action = {"type": "queue_reply", "body": "We are looking into this."}
+
+    created_context = issues._automation_reply_context(
+        rule=rule,
+        action=action,
+        trigger="issue_created",
+        actor_email="automation",
+        context={"emailId": "email-1"},
+        action_index=0,
+    )
+    recovered_context = issues._automation_reply_context(
+        rule=rule,
+        action=action,
+        trigger="issue_updated",
+        actor_email="automation",
+        context={"messageId": "email-1"},
+        action_index=0,
+    )
+
+    assert created_context["actionIdempotencyKey"] == recovered_context["actionIdempotencyKey"]
+    assert created_context["messageId"] == recovered_context["messageId"] == "email-1"
+
+
+def test_pipeline_fallback_reuses_legacy_agent_draft_for_same_inbound(monkeypatch):
+    email_id = "channel:email:support:provider-message-1"
+    legacy_agent_draft = {
+        "id": "agent-draft-1",
+        "issue": "issue1",
+        "status": "sent",
+        "body": "Grounded answer.",
+        "metadata": {
+            "source": "agent_answer",
+            "automationContext": {
+                "source": "channel_autopilot",
+                "sourceEmailId": email_id,
+                "sourceMessageId": email_id,
+            },
+        },
+    }
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: None)
+    def fake_list_all(collection, *_args, **_kwargs):
+        if collection == "support_outbound_messages":
+            return [legacy_agent_draft]
+        if collection == "support_issue_events":
+            return [
+                {
+                    "id": "draft-event-1",
+                    "event_type": "reply_drafted",
+                    "metadata": {"replyId": "agent-draft-1"},
+                },
+            ]
+        return []
+
+    patched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda path, data: patched.append((path, data)) or data,
+    )
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda *_args, **_kwargs: pytest.fail("fallback must reuse the prior automatic reply"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_record_issue_event",
+        lambda **_kwargs: pytest.fail("fallback reuse must not emit a second draft event"),
+    )
+
+    result = issues._ensure_email_pipeline_reply_draft(
+        issue={
+            "id": "issue1",
+            "source_email_id": "thread-level-source",
+            "contact_email": "customer@example.com",
+            "subject": "Need help",
+        },
+        messages=[
+            {
+                "user": "response",
+                "role": "response",
+                "content": {"emailBody": "Pipeline fallback."},
+            },
+        ],
+        chat={"email_id": email_id, "creator": "automation"},
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert result is not None
+    assert result["id"] == "agent-draft-1"
+    assert result["status"] == "sent"
+    assert patched[0][0].endswith("/agent-draft-1")
+    assert patched[0][1]["metadata"]["automaticReplyCompletion"]["version"] == 1
+
+
+def test_outbound_idempotency_unique_conflict_returns_race_winner(monkeypatch):
+    source_message_id = "channel:email:support:provider-message-1"
+    metadata = {"source": "email_pipeline", "sourceEmailId": source_message_id}
+    idempotency_key = issues._automatic_reply_idempotency_key(metadata)
+    winner = {
+        "id": "winner-reply",
+        "issue": "issue1",
+        "status": "draft",
+        "idempotency_key": idempotency_key,
+        "metadata": metadata,
+    }
+    first_calls = 0
+
+    def fake_first(*_args, **_kwargs):
+        nonlocal first_calls
+        first_calls += 1
+        return None if first_calls == 1 else winner
+
+    def race_loser_post(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://pb.test/api/collections/support_outbound_messages/records")
+        response = httpx.Response(400, request=request)
+        raise httpx.HTTPStatusError("unique constraint", request=request, response=response)
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(issues, "_post", race_loser_post)
+    data = {
+        "id": "loser-reply",
+        "issue": "issue1",
+        "project": "project1",
+        "status": "draft",
+        "metadata": metadata,
+    }
+
+    outbound, created = issues._post_outbound_message_once(
+        data,
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert created is False
+    assert outbound["id"] == "winner-reply"
+    assert data["idempotency_key"] == idempotency_key
+    assert data["metadata"]["automaticReplySourceMessageId"] == source_message_id
+
+
+def test_outbound_idempotency_allows_distinct_inbound_messages_on_same_issue(monkeypatch):
+    posted: list[dict] = []
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda _path, data: posted.append(dict(data)) or data,
+    )
+
+    results = []
+    for suffix in ("1", "2"):
+        results.append(
+            issues._post_outbound_message_once(
+                {
+                    "id": f"reply-{suffix}",
+                    "issue": "issue1",
+                    "project": "project1",
+                    "status": "draft",
+                    "metadata": {
+                        "source": "email_pipeline",
+                        "sourceEmailId": f"channel:email:support:provider-message-{suffix}",
+                    },
+                },
+                tenant_id="tenant1",
+                project_id="project1",
+            )
+        )
+
+    assert [created for _outbound, created in results] == [True, True]
+    assert len(posted) == 2
+    assert posted[0]["issue"] == posted[1]["issue"] == "issue1"
+    assert posted[0]["idempotency_key"] != posted[1]["idempotency_key"]
+
+
+def test_create_issue_reply_completed_race_winner_is_noop(monkeypatch):
+    winner = {
+        "id": "winner-reply",
+        "issue": "issue1",
+        "status": "draft",
+        "body": "Winner body.",
+        "metadata": {
+            "source": "agent_answer",
+            "approvalRequired": True,
+            "automaticReplyIssueOperation": {
+                "version": 1,
+                "claimOwnerEmail": "agent@example.com",
+                "moveOngoingFromStatus": "",
+            },
+            "automaticReplyCompletion": {
+                "version": 1,
+                "completedAt": "2026-07-16T10:00:00Z",
+            },
+            "automationContext": {
+                "source": "channel_autopilot",
+                "sourceMessageId": "channel:email:support:provider-message-1",
+            },
+        },
+    }
+    monkeypatch.setattr(
+        issues,
+        "get_issue",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "channel": "email",
+            "contactEmail": "customer@example.com",
+            "subject": "Need help",
+            "assigneeEmail": "agent@example.com",
+        },
+    )
+    monkeypatch.setattr(issues, "_existing_automatic_reply", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_post_outbound_message_once",
+        lambda *_args, **_kwargs: (winner, False),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_record_issue_event",
+        lambda **_kwargs: pytest.fail("race loser must not emit a reply event"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_notify_reply_approval_required",
+        lambda **_kwargs: pytest.fail("race loser must not notify a second approval"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "update_issue",
+        lambda *_args, **_kwargs: pytest.fail("race loser must not mutate the issue"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda *_args, **_kwargs: pytest.fail("completed winner must not be patched"),
+    )
+
+    reply = issues.create_issue_reply(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        body="Losing body.",
+        source="agent_answer",
+        metadata={
+            "approvalRequired": True,
+            "automationContext": {
+                "source": "channel_autopilot",
+                "sourceMessageId": "channel:email:support:provider-message-1",
+            },
+        },
+    )
+
+    assert reply is not None
+    assert reply["id"] == "winner-reply"
+    assert reply["body"] == "Winner body."
+
+
+def test_create_issue_reply_incomplete_winner_heals_side_effects_once(monkeypatch):
+    winner = {
+        "id": "winner-reply",
+        "issue": "issue1",
+        "status": "draft",
+        "body": "Winner body.",
+        "created_by": "automation",
+        "from_address": "automation",
+        "metadata": {
+            "source": "agent_answer",
+            "approvalRequired": True,
+            "automaticReplyIssueOperation": {
+                "version": 1,
+                "claimOwnerEmail": "agent@example.com",
+                "moveOngoingFromStatus": "",
+            },
+            "automationContext": {
+                "source": "channel_autopilot",
+                "sourceMessageId": "channel:email:support:provider-message-1",
+            },
+        },
+    }
+    issue = {
+        "id": "issue1",
+        "channel": "email",
+        "contactEmail": "customer@example.com",
+        "subject": "Need help",
+        "assigneeEmail": "agent@example.com",
+    }
+    posted: list[tuple[str, dict]] = []
+    patched: list[tuple[str, dict]] = []
+    issue_updates: list[dict] = []
+
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
+    monkeypatch.setattr(issues, "_existing_automatic_reply", lambda **_kwargs: winner)
+    monkeypatch.setattr(issues, "_reply_action_owner_email", lambda *_args, **_kwargs: "agent@example.com")
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda path, data: posted.append((path, dict(data))) or data,
+    )
+
+    def fake_patch(path: str, data: dict):
+        patched.append((path, data))
+        if path.endswith("/winner-reply"):
+            winner.update(data)
+        return data
+
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(
+        issues,
+        "update_issue",
+        lambda *_args, **kwargs: issue_updates.append(kwargs["updates"]) or issue,
+    )
+
+    def create_reply():
+        return issues.create_issue_reply(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            author_email="automation",
+            body="Losing body.",
+            source="agent_answer",
+            metadata={
+                "approvalRequired": True,
+                "automationContext": {
+                    "source": "channel_autopilot",
+                    "sourceMessageId": "channel:email:support:provider-message-1",
+                },
+            },
+        )
+
+    first = create_reply()
+    second = create_reply()
+
+    assert first is not None and second is not None
+    assert first["id"] == second["id"] == "winner-reply"
+    assert issue_updates == [
+        {
+            "assigned_by": "automation",
+            "workflow_source": "automatic_reply",
+            "operation_key": "automatic_reply:winner-reply",
+            "reply_id": "winner-reply",
+            "assignee_email": "agent@example.com",
+            "operation_from_assignee": "",
+        },
+    ]
+    event_posts = [data for path, data in posted if path.endswith("support_issue_events/records")]
+    notification_posts = [data for path, data in posted if path.endswith("support_notifications/records")]
+    assert len(event_posts) == 1
+    assert event_posts[0]["metadata"]["replyId"] == "winner-reply"
+    assert len(notification_posts) == 1
+    assert notification_posts[0]["recipient_email"] == "agent@example.com"
+    assert notification_posts[0]["metadata"]["replyId"] == "winner-reply"
+    assert len(patched) == 1
+    assert winner["metadata"]["automaticReplyCompletion"]["version"] == 1
+
+
+def test_update_issue_operation_recovers_children_after_state_patch(monkeypatch):
+    issue_record = {
+        "id": "issue1",
+        "status": "open",
+        "priority": "normal",
+        "assignee_email": "",
+        "queue_key": "",
+        "queue_name": "",
+        "tags": [],
+        "metadata": {},
+        "subject": "Need help",
+    }
+    assignments: dict[str, dict] = {}
+    events: dict[str, dict] = {}
+    notifications: dict[str, dict] = {}
+    fail_assignment_once = True
+
+    def conflict(path: str) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", f"http://pb.test{path}")
+        response = httpx.Response(400, request=request)
+        return httpx.HTTPStatusError("duplicate id", request=request, response=response)
+
+    def fake_first(collection: str, filter_str: str = "", *_args, **_kwargs):
+        if collection == "support_issues":
+            return dict(issue_record)
+        records = {
+            "support_issue_assignments": assignments,
+            "support_issue_events": events,
+            "support_notifications": notifications,
+        }.get(collection, {})
+        return next((record for record_id, record in records.items() if f"id='{record_id}'" in filter_str), None)
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection == "support_notifications":
+            return list(notifications.values())
+        return []
+
+    def fake_patch(path: str, data: dict):
+        if "/support_issues/records/" in path:
+            issue_record.update(data)
+        return data
+
+    def fake_post(path: str, data: dict):
+        nonlocal fail_assignment_once
+        record = dict(data)
+        record_id = record["id"]
+        if path.endswith("support_issue_events/records"):
+            if record_id in events:
+                raise conflict(path)
+            events[record_id] = record
+            return record
+        if path.endswith("support_issue_assignments/records"):
+            if fail_assignment_once:
+                fail_assignment_once = False
+                raise RuntimeError("simulated crash after issue state patch")
+            if record_id in assignments:
+                raise conflict(path)
+            assignments[record_id] = record
+            return record
+        if path.endswith("support_notifications/records"):
+            if record_id in notifications:
+                raise conflict(path)
+            notifications[record_id] = record
+            return record
+        return record
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(issues, "_post", fake_post)
+    monkeypatch.setattr(issues, "_ensure_queue_allows_assignee", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_queue_capacity_assignment_override", lambda **_kwargs: {})
+
+    updates = {
+        "status": "ongoing",
+        "assignee_email": "agent@example.com",
+        "assigned_by": "automation",
+        "workflow_source": "automatic_reply",
+        "operation_key": "automatic_reply:reply1",
+        "reply_id": "reply1",
+        "operation_from_status": "open",
+        "operation_from_assignee": "",
+    }
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        issues.update_issue(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            updates=updates,
+        )
+
+    assert issue_record["status"] == "ongoing"
+    assert issue_record["assignee_email"] == "agent@example.com"
+    assert assignments == {}
+
+    for _ in range(2):
+        result = issues.update_issue(
+            "issue1",
+            tenant_id="tenant1",
+            project_id="project1",
+            updates=updates,
+        )
+        assert result is not None
+
+    assert len(assignments) == 1
+    assert len(notifications) == 1
+    assert len(events) == 2
+    assert {event["event_type"] for event in events.values()} == {
+        "assignment_changed",
+        "status_changed",
+    }
+    assert all(event["metadata"]["replyId"] == "reply1" for event in events.values())
 
 
 def test_upsert_issue_from_chat_no_match_skips_autopilot_and_support_side_effects(monkeypatch):
@@ -26330,6 +27143,12 @@ def test_merge_issues_moves_children_and_marks_source(monkeypatch):
             return target
         if collection == "support_messages" and "issue='target1'" in filter_str and "source_message_id='dup'" in filter_str:
             return {"id": "existingDup"}
+        if (
+            collection == "support_outbound_messages"
+            and "issue='target1'" in filter_str
+            and "idempotency_key='reply-dup'" in filter_str
+        ):
+            return {"id": "existingReplyDup"}
         return None
 
     def fake_list_all(collection: str, filter_str: str = "", *_args, **_kwargs):
@@ -26345,6 +27164,11 @@ def test_merge_issues_moves_children_and_marks_source(monkeypatch):
             ]
         if collection == "support_internal_notes" and "issue='source1'" in filter_str:
             return [{"id": "note1"}]
+        if collection == "support_outbound_messages" and "issue='source1'" in filter_str:
+            return [
+                {"id": "reply1", "idempotency_key": "reply-unique"},
+                {"id": "replyDup", "idempotency_key": "reply-dup"},
+            ]
         return []
 
     monkeypatch.setattr(issues, "_first", fake_first)
@@ -26366,6 +27190,8 @@ def test_merge_issues_moves_children_and_marks_source(monkeypatch):
     assert patch_by_path["/api/collections/support_messages/records/msg1"] == {"issue": "target1"}
     assert "/api/collections/support_messages/records/msgDup" not in patch_by_path
     assert patch_by_path["/api/collections/support_internal_notes/records/note1"] == {"issue": "target1"}
+    assert patch_by_path["/api/collections/support_outbound_messages/records/reply1"] == {"issue": "target1"}
+    assert "/api/collections/support_outbound_messages/records/replyDup" not in patch_by_path
     target_patch = patch_by_path["/api/collections/support_issues/records/target1"]
     assert target_patch["priority"] == "urgent"
     assert target_patch["tags"] == ["vip", "bug"]

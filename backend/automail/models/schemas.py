@@ -94,12 +94,84 @@ class IntentAction(CamelCaseModel):
     initial_value: Optional[str] = None  # LLM-extracted pre-fill value
 
 
+class ConcernRoute(BaseModel):
+    """One independently actionable concern selected by the intent router."""
+
+    summary: str = ""
+    source_text: str = ""
+    intent_name: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
+class VerifiedFact(CamelCaseModel):
+    """Allowlisted fact prepared for ticket-level reply composition."""
+
+    fact: str = ""
+    path: str = ""
+    value: str | bool | int | float | None = None
+    source: str = "runbook"
+
+
+class RunbookToolEvidence(CamelCaseModel):
+    """Safe, structured facts derived from one runbook tool call."""
+
+    tool_name: str
+    facts: list[VerifiedFact] = Field(default_factory=list)
+    status: str = "success"
+
+
+class RunbookActionOutcome(CamelCaseModel):
+    """Execution/proposal state for one runbook action."""
+
+    name: str
+    label: str = ""
+    status: Literal["proposed", "pending_input", "succeeded", "failed", "skipped"] = "proposed"
+    initial_value: Optional[str] = None
+    detail: str = ""
+    reference: str = ""
+
+
+class RunbookAttachment(CamelCaseModel):
+    """Attachment made available by a runbook or one of its tools."""
+
+    filename: str
+    description: str = ""
+    source: Literal["runbook", "tool"] = "runbook"
+    mode: str = "dynamic"
+
+
+class RunbookOutcome(CamelCaseModel):
+    """Structured output of one concern's independently executed runbook."""
+
+    concern_id: str
+    concern_summary: str = ""
+    source_text: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    matched: bool = False
+    intent_name: Optional[str] = None
+    status: Literal["ready", "requires_human", "unmatched", "failed"] = "unmatched"
+    summary: str = ""
+    actions: list[IntentAction] = Field(default_factory=list)
+    action_outcomes: list[RunbookActionOutcome] = Field(default_factory=list)
+    verified_facts: list[VerifiedFact] = Field(default_factory=list)
+    tool_evidence: list[RunbookToolEvidence] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    reply_requirements: list[str] = Field(default_factory=list)
+    forbidden_claims: list[str] = Field(default_factory=list)
+    attachments: list[RunbookAttachment] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+    error: Optional[str] = None
+
+
 class IntentResult(CamelCaseModel):
-    """Result of Phase 2: customer intent analysis."""
+    """Result of Phase 2 with legacy primary-intent compatibility fields."""
     matched: bool = False
     intent_name: Optional[str] = None
     actions: list[IntentAction] = Field(default_factory=list)
     response: IntentResponseConfig = Field(default_factory=IntentResponseConfig)
+    concerns: list[RunbookOutcome] = Field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -163,7 +235,18 @@ class ActionFill(BaseModel):
     initial_value: Optional[str] = None
 
 
-class IntentProcessingOutput(BaseModel):
+class RunbookProcessingDetails(BaseModel):
+    """Shared structured handoff from a runbook to the ticket composer."""
+
+    summary: str = ""
+    missing_information: list[str] = Field(default_factory=list)
+    reply_requirements: list[str] = Field(default_factory=list)
+    forbidden_claims: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+
+
+class IntentProcessingOutput(RunbookProcessingDetails):
     """Structured output for the intent-processing stage (Stage B).
 
     The LLM fills action values and decides whether human review is needed.
@@ -171,15 +254,10 @@ class IntentProcessingOutput(BaseModel):
     frontmatter — the LLM only provides initial_value fills.
     """
     action_fills: list[ActionFill] = Field(default_factory=list)
-    requires_human: bool = False
-    requires_human_reason: Optional[str] = None
 
 
-class IntentReviewOutput(BaseModel):
+class IntentReviewOutput(RunbookProcessingDetails):
     """Structured output for intent processing when no actions are configured."""
-
-    requires_human: bool = False
-    requires_human_reason: Optional[str] = None
 
 
 class Attachment(CamelCaseModel):
@@ -219,6 +297,10 @@ class ResponseDraft(BaseModel):
     response_attachments: Optional[List[str]] = None  # Just filenames
     response_cc: Optional[List[str]] = None
     response_bcc: Optional[List[str]] = None
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+    conflicting_requirements: list[str] = Field(default_factory=list)
 
 
 class AgentResponse(CamelCaseModel):

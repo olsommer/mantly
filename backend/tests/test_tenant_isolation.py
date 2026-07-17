@@ -443,7 +443,7 @@ def test_pb_client_list_tenant_users_scopes_by_tenant(monkeypatch):
 
 @pytest.mark.no_gemini
 def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypatch):
-    seen: dict[str, str | None] = {}
+    seen: dict[str, object] = {}
 
     class DummyPipelineResult:
         identity_result = None
@@ -467,7 +467,10 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
     monkeypatch.setattr("automail.api.process.get_user_default_project", lambda user_id: None)
     monkeypatch.setattr("automail.api.process.get_user_projects", lambda user_id: [])
     monkeypatch.setattr("automail.api.process.parse_email_attachments", lambda email: {})
-    monkeypatch.setattr("automail.api.process.load_attachment_files", lambda result, intents_dir=None: [])
+    monkeypatch.setattr(
+        "automail.api.process.load_attachment_files",
+        lambda result, intents_dir=None, intent_result=None, strict_intent_ownership=False: [],
+    )
 
     def fake_run_pipeline(
         email,
@@ -476,8 +479,10 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
         tenant_id=None,
         project_id=None,
         config_source=None,
+        compose_response=True,
     ):
         seen["tenant_id"] = tenant_id
+        seen["compose_response"] = compose_response
         return DummyPipelineResult()
 
     monkeypatch.setattr("automail.api.process.run_pipeline", fake_run_pipeline)
@@ -510,6 +515,7 @@ def test_process_email_passes_tenant_to_pipeline(client, auth_enabled, monkeypat
     assert response.status_code == 200
     assert seen == {
         "tenant_id": "tenant-a",
+        "compose_response": True,
         "tools_used": [{"name": "lookup_shipment", "method": "GET", "status": "success"}],
     }
     assert stored["metadata"]["toolsUsed"] == [

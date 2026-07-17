@@ -157,9 +157,56 @@ def create_response_user_prompt(
     elif identity_result:
         identity_text = '<customer_identity status="not_found" />'
 
-    # Build intent context section
+    # Build concern/runbook context. New runs carry one structured outcome per
+    # concern; the singular branch remains for cached and legacy callers.
     intent_text = ""
-    if intent_result and intent_result.matched:
+    concerns = list(getattr(intent_result, "concerns", None) or []) if intent_result else []
+    if concerns:
+        intent_text = f'<intent_context status="multi" concern_count="{len(concerns)}">\n'
+        for index, concern in enumerate(concerns[:10], start=1):
+            concern_id = str(getattr(concern, "concern_id", "") or f"concern-{index}")
+            intent_name = str(getattr(concern, "intent_name", "") or "")
+            intent_text += (
+                f"  <concern id={_xml_attr(concern_id)} matched={_xml_attr(bool(getattr(concern, 'matched', False)))}"
+                f" status={_xml_attr(getattr(concern, 'status', ''))}"
+                f" requires_human={_xml_attr(bool(getattr(concern, 'requires_human', False)))}>\n"
+            )
+            intent_text += f"    <summary>{_xml_text(getattr(concern, 'concern_summary', ''))}</summary>\n"
+            intent_text += f"    <source_text>{_xml_text(getattr(concern, 'source_text', ''))}</source_text>\n"
+            intent_text += f"    <runbook>{_xml_text(intent_name)}</runbook>\n"
+            intent_text += f"    <confidence>{_xml_text(getattr(concern, 'confidence', 0))}</confidence>\n"
+            reason = getattr(concern, "requires_human_reason", None) or getattr(concern, "error", None)
+            if reason:
+                intent_text += f"    <reason>{_xml_text(reason)}</reason>\n"
+            for fact in list(getattr(concern, "verified_facts", None) or [])[:24]:
+                intent_text += (
+                    f"    <verified_fact path={_xml_attr(getattr(fact, 'path', ''))}"
+                    f" source={_xml_attr(getattr(fact, 'source', 'runbook'))}>"
+                    f"{_xml_text(getattr(fact, 'value', ''))}</verified_fact>\n"
+                )
+            for tool_result in list(getattr(concern, "tool_evidence", None) or [])[:10]:
+                tool_name = getattr(tool_result, "tool_name", "")
+                tool_status = getattr(tool_result, "status", "")
+                intent_text += (
+                    f"    <tool_result name={_xml_attr(tool_name)} status={_xml_attr(tool_status)}>\n"
+                )
+                for fact in list(getattr(tool_result, "facts", None) or [])[:24]:
+                    intent_text += (
+                        f"      <fact path={_xml_attr(getattr(fact, 'path', ''))}>"
+                        f"{_xml_text(getattr(fact, 'value', ''))}</fact>\n"
+                    )
+                intent_text += "    </tool_result>\n"
+            for action in list(getattr(concern, "action_outcomes", None) or [])[:20]:
+                intent_text += (
+                    f"    <action name={_xml_attr(getattr(action, 'name', ''))}"
+                    f" status={_xml_attr(getattr(action, 'status', ''))}>"
+                    f"{_xml_text(getattr(action, 'detail', ''))}</action>\n"
+                )
+            for missing in list(getattr(concern, "missing_information", None) or [])[:10]:
+                intent_text += f"    <missing_information>{_xml_text(missing)}</missing_information>\n"
+            intent_text += "  </concern>\n"
+        intent_text += "</intent_context>"
+    elif intent_result and intent_result.matched:
         description = ""
         if intent_result.intent_name:
             from automail.pipeline.intent.intents_factory import get_intent_description
@@ -170,7 +217,29 @@ def create_response_user_prompt(
         intent_text += "</intent_context>"
 
     rules_text = "<rules>\n"
-    if intent_result and intent_result.matched and intent_result.intent_name:
+    if concerns:
+        intent_rules = []
+        seen_rules: set[str] = set()
+        for concern in concerns:
+            intent_name = str(getattr(concern, "intent_name", "") or "")
+            configured_rules = []
+            if intent_name:
+                from automail.pipeline.intent.intents_factory import get_intent_response_rules
+                configured_rules = get_intent_response_rules(intent_name, intents_dir=intents_dir)
+            contributed_rules = [
+                *configured_rules,
+                *list(getattr(concern, "reply_requirements", None) or []),
+                *[
+                    f"Forbidden claim: {claim}"
+                    for claim in list(getattr(concern, "forbidden_claims", None) or [])
+                ],
+            ]
+            for rule in contributed_rules:
+                clean_rule = str(rule).strip()
+                if clean_rule and clean_rule not in seen_rules:
+                    seen_rules.add(clean_rule)
+                    intent_rules.append(clean_rule)
+    elif intent_result and intent_result.matched and intent_result.intent_name:
         from automail.pipeline.intent.intents_factory import get_intent_response_rules
         intent_rules = get_intent_response_rules(intent_result.intent_name, intents_dir=intents_dir)
     else:
@@ -180,12 +249,34 @@ def create_response_user_prompt(
             rules_text += f"  <rule>{_xml_text(rule)}</rule>\n"
 
     # Build available response attachment section
-    if available_response_attachments is None and intent_result and intent_result.matched and intent_result.intent_name:
+    if available_response_attachments is None and intent_result:
         from automail.pipeline.intent.intents_factory import get_intent_response_attachments
-        available_response_attachments = get_intent_response_attachments(
-            intent_result.intent_name,
-            intents_dir=intents_dir,
-        )
+        available_response_attachments = []
+        seen_filenames: set[str] = set()
+        attachment_intents = [
+            str(getattr(concern, "intent_name", "") or "")
+            for concern in concerns
+            if getattr(concern, "matched", False)
+        ] or ([intent_result.intent_name] if intent_result.matched and intent_result.intent_name else [])
+        for intent_name in attachment_intents:
+            for attachment in get_intent_response_attachments(intent_name, intents_dir=intents_dir):
+                filename = str(attachment.get("filename") or "").strip()
+                if filename and filename not in seen_filenames:
+                    seen_filenames.add(filename)
+                    available_response_attachments.append(attachment)
+        for concern in concerns:
+            for attachment in list(getattr(concern, "attachments", None) or []):
+                filename = str(getattr(attachment, "filename", "") or "").strip()
+                if not filename or filename in seen_filenames:
+                    continue
+                seen_filenames.add(filename)
+                available_response_attachments.append(
+                    {
+                        "filename": filename,
+                        "description": str(getattr(attachment, "description", "") or ""),
+                        "mode": str(getattr(attachment, "mode", "dynamic") or "dynamic"),
+                    }
+                )
 
     available_attachments_text = "<available_attachments>\n"
     if available_response_attachments:

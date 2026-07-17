@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from automail.db.pocketbase.client import _get_binary, _list_all
+from automail.pipeline.intent.consumers import attachment_intent_names
 
 try:
     from docling.document_converter import DocumentConverter  # pyright: ignore[reportMissingImports]
@@ -103,7 +104,13 @@ def _stored_pb_filename(record: dict) -> str:
     return str(stored or "")
 
 
-def load_attachment_files(agent_response: Any, intents_dir: Any = None) -> Optional[list[dict[str, Any]]]:
+def load_attachment_files(
+    agent_response: Any,
+    intents_dir: Any = None,
+    *,
+    intent_result: Any = None,
+    strict_intent_ownership: bool = False,
+) -> Optional[list[dict[str, Any]]]:
     """
     Load attachment files from filenames and convert to base64.
 
@@ -151,20 +158,34 @@ def load_attachment_files(agent_response: Any, intents_dir: Any = None) -> Optio
                         f"project='{_escape_pb(project_id)}'",
                         f"filename='{_escape_pb(filename)}'",
                     ]
-                    activated_intent = getattr(agent_response, "activated_intent", None)
-                    if activated_intent:
+                    preferred = []
+                    intent_names = attachment_intent_names(
+                        intent_result,
+                        filename,
+                        owners_only=strict_intent_ownership,
+                    )
+                    activated_intent = str(getattr(agent_response, "activated_intent", None) or "").strip()
+                    if (
+                        not strict_intent_ownership
+                        and activated_intent
+                        and activated_intent not in intent_names
+                    ):
+                        intent_names.append(activated_intent)
+                    for intent_name in intent_names:
                         preferred = _list_all(
                             "intent_attachments",
-                            " && ".join([*filters, f"intent='{_escape_pb(str(activated_intent))}'"]),
+                            " && ".join([*filters, f"intent='{_escape_pb(intent_name)}'"]),
                             per_page=1,
                         )
-                    else:
-                        preferred = []
-                    records = preferred or _list_all(
-                        "intent_attachments",
-                        " && ".join(filters),
-                        per_page=1,
-                    )
+                        if preferred:
+                            break
+                    records = preferred
+                    if not records and not strict_intent_ownership:
+                        records = _list_all(
+                            "intent_attachments",
+                            " && ".join(filters),
+                            per_page=1,
+                        )
                     if records:
                         record = records[0]
                         stored_name = _stored_pb_filename(record)

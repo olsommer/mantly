@@ -65,9 +65,9 @@ interface ResponseAttachmentMeta {
 }
 
 interface ResponseConfig {
-    enabled: boolean;
+    enabled: boolean;              // legacy file field; reply generation now belongs to Inbox
     responseRules: string;
-    responseTrigger: 'auto' | 'button';
+    responseTrigger: 'auto' | 'button'; // legacy file field kept for lossless editing
     attachments: ResponseAttachmentMeta[];
     useFeedbackLearnings: boolean;
 }
@@ -986,7 +986,7 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
     const [saving, setSaving] = useState(false);
     const [deleting, setDeleting] = useState(false);
 
-    // File management for response attachments
+    // Files supplied by this runbook to the final ticket composer
     const [intentFiles, setIntentFiles] = useState<IntentFileInfo[]>([]);
     const [uploadingFile, setUploadingFile] = useState(false);
     const [attachmentsDialogOpen, setAttachmentsDialogOpen] = useState(false);
@@ -1487,14 +1487,14 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
         return (
             <div className="flex-1 min-h-0 overflow-y-auto space-y-4">
                 <HintBanner storageKey="intent-identification" title={t('What are AI runbooks?')}>
-                    {t('AI runbooks teach the agent how to recognize a ticket type, ask knowledge, draft replies, and prepare actions.')}
+                    {t('AI runbooks teach the agent how to recognize concerns, gather evidence, follow policies, and prepare actions. The Inbox Reply Composer combines every matched runbook into one customer draft.')}
                 </HintBanner>
 
                 <div className="flex items-center justify-between">
                     <div>
                         <h2 className="text-lg font-semibold">{t('AI runbooks')}</h2>
                         <p className="text-sm text-muted-foreground">
-                            {t('Each AI runbook defines when to match a ticket and how the agent should respond.')}
+                            {t('Each runbook defines when a concern matches and what facts, constraints, and actions the final reply must respect.')}
                         </p>
                     </div>
                     <Button size="sm" onClick={() => openNew()}>
@@ -1604,7 +1604,6 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
         );
     }
 
-    const responseEnabled = form.response.enabled;
     const feedbackLearningsEnabled = form.response.useFeedbackLearnings;
     const canEditLearnings = userRole === 'root' || userRole === 'admin' || userRole === 'editor';
     const canPublishLearnings = userRole === 'root' || userRole === 'admin';
@@ -1720,33 +1719,19 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                             })}
                                         </span>
                                     </div>
-                                    {responseEnabled ? (
-                                        <Switch
-                                            checked={feedbackLearningsEnabled}
-                                            onCheckedChange={v => setForm(f => ({
-                                                ...f,
-                                                response: { ...f.response, useFeedbackLearnings: v },
-                                            }))}
-                                        />
-                                    ) : (
-                                        <Badge variant="outline" className="text-[10px] text-muted-foreground">{t('No response')}</Badge>
-                                    )}
+                                    <Switch
+                                        checked={feedbackLearningsEnabled}
+                                        onCheckedChange={v => setForm(f => ({
+                                            ...f,
+                                            response: { ...f.response, useFeedbackLearnings: v },
+                                        }))}
+                                    />
                                 </div>
 
                                 {loadingLearnings ? (
                                     <div className="flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs text-muted-foreground">
                                         <Loader className="size-3 animate-spin" /> {t('Loading learnings...')}
                                     </div>
-                                ) : !responseEnabled ? (
-                                    <Item variant="outline" size="sm">
-                                        <ItemMedia variant="icon" className="size-7">
-                                            <Lightbulb className="size-3" />
-                                        </ItemMedia>
-                                        <ItemContent>
-                                            <ItemTitle className="text-xs">{t('No response configured')}</ItemTitle>
-                                            <ItemDescription className="text-xs">{t('Feedback is stored as evidence only and never changes this runbook automatically.')}</ItemDescription>
-                                        </ItemContent>
-                                    </Item>
                                 ) : !feedbackLearningsEnabled ? (
                                     <Item variant="outline" size="sm">
                                         <ItemMedia variant="icon" className="size-7">
@@ -1754,7 +1739,7 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                         </ItemMedia>
                                         <ItemContent>
                                             <ItemTitle className="text-xs">{t('Learnings disabled')}</ItemTitle>
-                                            <ItemDescription className="text-xs">{t('Enable existing learning rules in the response section.')}</ItemDescription>
+                                            <ItemDescription className="text-xs">{t('Enable existing learning rules with the switch above.')}</ItemDescription>
                                         </ItemContent>
                                     </Item>
                                 ) : learnings.length === 0 ? (
@@ -1843,7 +1828,7 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                     <ItemContent className="max-w-sm flex-none items-center text-center">
                                         <ItemTitle className="justify-center text-sm text-muted-foreground">{t('No tools or actions configured')}</ItemTitle>
                                         <ItemDescription className="text-center text-xs leading-relaxed text-muted-foreground">
-                                            {t('Instructions guide tool calls and action execution. Add a tool or action to enable this section. For response copy, use Rules.')}
+                                            {t('Instructions guide tool calls and action execution. Add a tool or action to enable this section. Put customer-facing constraints in Customer communication requirements.')}
                                         </ItemDescription>
                                     </ItemContent>
                                 </Item>
@@ -1905,7 +1890,7 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                     </Card>
                 </div>
 
-                {/* ── Column 3: Actions + Response ── */}
+                {/* ── Column 3: Actions + communication requirements ── */}
                 <div className="flex flex-col overflow-hidden gap-4">
                     {/* Regular actions (top ~30%) */}
                     <Card className={cn('flex flex-col overflow-hidden p-3', regularActions.length === 0 ? 'shrink-0' : 'flex-[3]')}>
@@ -1951,192 +1936,154 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                         </section>
                     </Card>
 
-                    {/* Response section (bottom ~70%) */}
+                    {/* Inputs supplied to the ticket-level reply composer (bottom ~70%) */}
                     <Card className="flex min-h-0 flex-col overflow-hidden p-3 flex-[7]">
                         <section className="flex min-h-0 flex-1 flex-col gap-3">
-                            <div className="flex shrink-0 items-center justify-between gap-2">
-                                <div>
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('Response')}</h3>
-                                    <p className="text-xs text-muted-foreground mt-1">
-                                        {t('Enable to have the agent draft a reply when this runbook matches.')}
-                                    </p>
-                                </div>
-                                <Switch
-                                    checked={responseEnabled}
-                                    disabled={form.requireReview}
-                                    onCheckedChange={v => setForm(f => ({
-                                        ...f,
-                                        response: { ...f.response, enabled: v },
-                                    }))}
-                                />
+                            <div className="shrink-0">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('Customer communication requirements')}</h3>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                    {t('Supply evidence, constraints, and attachments to the Inbox Reply Composer. Runbooks do not create separate customer drafts.')}
+                                </p>
                             </div>
 
-                            {responseEnabled && (
-                                <div className={`flex min-h-0 flex-1 flex-col gap-3 ${form.requireReview ? 'pointer-events-none opacity-40' : ''}`}>
-                                    {/* Rules */}
-                                    <div className="flex min-h-0 flex-1 flex-col gap-1">
-                                        <Label className="shrink-0 text-xs">{t('Rules')}</Label>
-                                        <Textarea
-                                            value={form.response.responseRules}
-                                            onChange={e => setForm(f => ({
-                                                ...f,
-                                                response: { ...f.response, responseRules: e.target.value },
-                                            }))}
-                                            placeholder={t('Always respond in formal German\nNever quote fees\nAttach the standard cover letter')}
-                                            className="min-h-28 flex-1 resize-none overflow-y-auto field-sizing-fixed text-sm"
-                                            rows={3}
-                                        />
-                                    </div>
+                            <div className="flex min-h-0 flex-1 flex-col gap-3">
+                                <div className="flex min-h-0 flex-1 flex-col gap-1">
+                                    <Label className="shrink-0 text-xs">{t('Required points and constraints')}</Label>
+                                    <Textarea
+                                        value={form.response.responseRules}
+                                        onChange={e => setForm(f => ({
+                                            ...f,
+                                            response: { ...f.response, responseRules: e.target.value },
+                                        }))}
+                                        placeholder={t('State the verified cancellation date\nDescribe pending actions as pending\nNever promise availability without a tool result')}
+                                        className="min-h-28 flex-1 resize-none overflow-y-auto field-sizing-fixed text-sm"
+                                        rows={3}
+                                    />
+                                </div>
 
-                                    {/* Trigger mode */}
-                                    <Item size="sm" variant="outline" className="shrink-0 px-3 py-2 shadow-sm">
+                                <div className="shrink-0 space-y-2">
+                                    <Item size="sm" variant="outline" className="px-3 py-2 shadow-sm">
+                                        <ItemMedia variant="icon" className="size-7 !self-center !translate-y-0">
+                                            <Paperclip className="size-3" />
+                                        </ItemMedia>
                                         <ItemContent>
-                                            <ItemTitle className="text-xs">{t('Trigger')}</ItemTitle>
-                                            <ItemDescription className="text-xs">{t('Auto-show or require a button click in the add-in')}</ItemDescription>
+                                            <ItemTitle className="text-xs">{t('Reply composer attachments')}</ItemTitle>
+                                            <ItemDescription className="text-xs">{t('Files this runbook makes available to the final ticket composer')}</ItemDescription>
                                         </ItemContent>
-                                        <ItemActions className="gap-1">
-                                            {(['auto', 'button'] as const).map(mode => (
-                                                <Button key={mode} type="button" size="sm"
-                                                    variant={form.response.responseTrigger === mode ? 'default' : 'outline'}
-                                                    className="h-7 text-xs px-2"
-                                                    onClick={() => setForm(f => ({
-                                                        ...f,
-                                                        response: { ...f.response, responseTrigger: mode },
-                                                    }))}>
-                                                    {t(mode === 'auto' ? 'Auto' : 'Button')}
-                                                </Button>
-                                            ))}
+                                        <ItemActions>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                className="h-7 text-xs px-2"
+                                                onClick={() => setAttachmentsDialogOpen(true)}
+                                            >
+                                                {t('Files')} ({intentFiles.length})
+                                            </Button>
+                                            <input
+                                                ref={fileInputRef}
+                                                type="file"
+                                                className="hidden"
+                                                multiple
+                                                onChange={e => handleFileUpload(e.target.files)}
+                                            />
+                                            <Button
+                                                type="button" size="sm" variant="outline"
+                                                className="h-7 text-xs px-2"
+                                                disabled={uploadingFile || (view === 'new' && !editName)}
+                                                onClick={() => fileInputRef.current?.click()}
+                                            >
+                                                {uploadingFile
+                                                    ? <Loader className="size-3 animate-spin" />
+                                                    : <Upload className="size-3" />
+                                                }
+                                                {t('Upload')}
+                                            </Button>
                                         </ItemActions>
                                     </Item>
-
-                                    {/* Attachments */}
-                                    <div className="shrink-0 space-y-2">
-                                        <Item size="sm" variant="outline" className="px-3 py-2 shadow-sm">
-                                            <ItemMedia variant="icon" className="size-7 !self-center !translate-y-0">
-                                                <Paperclip className="size-3" />
-                                            </ItemMedia>
-                                            <ItemContent>
-                                                <ItemTitle className="text-xs">{t('Attachments')}</ItemTitle>
-                                                <ItemDescription className="text-xs">{t('Uploaded response files the agent can include')}</ItemDescription>
-                                            </ItemContent>
-                                            <ItemActions>
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant="outline"
-                                                    className="h-7 text-xs px-2"
-                                                    onClick={() => setAttachmentsDialogOpen(true)}
-                                                >
-                                                    {t('Files')} ({intentFiles.length})
-                                                </Button>
-                                                <input
-                                                    ref={fileInputRef}
-                                                    type="file"
-                                                    className="hidden"
-                                                    multiple
-                                                    onChange={e => handleFileUpload(e.target.files)}
-                                                />
-                                                <Button
-                                                    type="button" size="sm" variant="outline"
-                                                    className="h-7 text-xs px-2"
-                                                    disabled={uploadingFile || (view === 'new' && !editName)}
-                                                    onClick={() => fileInputRef.current?.click()}
-                                                >
-                                                    {uploadingFile
-                                                        ? <Loader className="size-3 animate-spin" />
-                                                        : <Upload className="size-3" />
-                                                    }
-                                                    {t('Upload')}
-                                                </Button>
-                                            </ItemActions>
-                                        </Item>
-                                    </div>
-
                                 </div>
-                            )}
+                            </div>
                         </section>
                     </Card>
                 </div>
 
             </div>
 
-            {responseEnabled && (
-                <Dialog open={attachmentsDialogOpen} onOpenChange={setAttachmentsDialogOpen}>
-                    <DialogContent className="max-h-[85vh] overflow-y-auto">
-                        <DialogHeader>
-                            <DialogTitle>{t('Attachments')}</DialogTitle>
-                            <DialogDescription>{t('Uploaded response files that can be included always or when the agent decides.')}</DialogDescription>
-                        </DialogHeader>
-                        {intentFiles.length === 0 ? (
-                            <Item variant="outline" size="sm">
-                                <ItemMedia variant="icon" className="size-7">
-                                    <Paperclip className="size-3" />
-                                </ItemMedia>
-                                <ItemContent>
-                                    <ItemTitle className="text-xs">{t('No uploaded files')}</ItemTitle>
-                                    <ItemDescription className="text-xs">{t('Upload files from the response section.')}</ItemDescription>
-                                </ItemContent>
-                            </Item>
-                        ) : (
-                            <ItemGroup className="gap-2">
-                                {intentFiles.map(file => {
-                                    const meta = form.response.attachments.find(
-                                        a => a.filename === file.filename,
-                                    );
-                                    const mode = meta?.mode ?? 'always';
-                                    const description = meta?.description ?? '';
+            <Dialog open={attachmentsDialogOpen} onOpenChange={setAttachmentsDialogOpen}>
+                <DialogContent className="max-h-[85vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle>{t('Reply composer attachments')}</DialogTitle>
+                        <DialogDescription>{t('Files this runbook supplies to the final ticket composer. Include them always or let the composer decide.')}</DialogDescription>
+                    </DialogHeader>
+                    {intentFiles.length === 0 ? (
+                        <Item variant="outline" size="sm">
+                            <ItemMedia variant="icon" className="size-7">
+                                <Paperclip className="size-3" />
+                            </ItemMedia>
+                            <ItemContent>
+                                <ItemTitle className="text-xs">{t('No uploaded files')}</ItemTitle>
+                                <ItemDescription className="text-xs">{t('Upload files from Customer communication requirements.')}</ItemDescription>
+                            </ItemContent>
+                        </Item>
+                    ) : (
+                        <ItemGroup className="gap-2">
+                            {intentFiles.map(file => {
+                                const meta = form.response.attachments.find(
+                                    a => a.filename === file.filename,
+                                );
+                                const mode = meta?.mode ?? 'always';
+                                const description = meta?.description ?? '';
 
-                                    return (
-                                        <Item key={file.filename} size="sm" variant="outline" className="gap-1.5 p-2.5">
-                                            <ItemHeader>
-                                                <ItemContent className="min-w-0 flex-row items-center gap-1.5">
-                                                    <Paperclip className="size-3 shrink-0 text-muted-foreground" />
-                                                    <ItemTitle className="min-w-0 flex-1 text-xs">
-                                                        <span className="block truncate">{file.filename}</span>
-                                                    </ItemTitle>
-                                                    <span className="text-[10px] text-muted-foreground shrink-0">
-                                                        {(file.size / 1024).toFixed(0)} KB
-                                                    </span>
-                                                </ItemContent>
-                                                <Button
-                                                    type="button"
-                                                    variant="ghost"
-                                                    size="icon-xs"
-                                                    onClick={() => handleDeleteFile(file.filename)}
-                                                    className="shrink-0 text-muted-foreground hover:text-destructive"
-                                                >
-                                                    <X className="size-3.5" />
-                                                </Button>
-                                            </ItemHeader>
-                                            <Input
-                                                value={description}
-                                                onChange={e => updateResponseAttachment(file.filename, { description: e.target.value })}
-                                                placeholder={t('Description (helps agent decide for dynamic mode)')}
-                                                className="h-7 text-xs"
-                                            />
-                                            <ItemHeader>
-                                                <span className="text-[11px] text-muted-foreground">
-                                                    {t(mode === 'always' ? 'Always include' : 'Agent decides')}
+                                return (
+                                    <Item key={file.filename} size="sm" variant="outline" className="gap-1.5 p-2.5">
+                                        <ItemHeader>
+                                            <ItemContent className="min-w-0 flex-row items-center gap-1.5">
+                                                <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                                                <ItemTitle className="min-w-0 flex-1 text-xs">
+                                                    <span className="block truncate">{file.filename}</span>
+                                                </ItemTitle>
+                                                <span className="text-[10px] text-muted-foreground shrink-0">
+                                                    {(file.size / 1024).toFixed(0)} KB
                                                 </span>
-                                                <ItemActions className="gap-0.5">
-                                                    {(['always', 'dynamic'] as const).map(m => (
-                                                        <Button key={m} type="button" size="sm"
-                                                            variant={mode === m ? 'default' : 'outline'}
-                                                            className="h-6 text-[10px] px-1.5"
-                                                            onClick={() => updateResponseAttachment(file.filename, { mode: m })}>
-                                                            {t(m === 'always' ? 'Always' : 'Dynamic')}
-                                                        </Button>
-                                                    ))}
-                                                </ItemActions>
-                                            </ItemHeader>
-                                        </Item>
-                                    );
-                                })}
-                            </ItemGroup>
-                        )}
-                    </DialogContent>
-                </Dialog>
-            )}
+                                            </ItemContent>
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon-xs"
+                                                onClick={() => handleDeleteFile(file.filename)}
+                                                className="shrink-0 text-muted-foreground hover:text-destructive"
+                                            >
+                                                <X className="size-3.5" />
+                                            </Button>
+                                        </ItemHeader>
+                                        <Input
+                                            value={description}
+                                            onChange={e => updateResponseAttachment(file.filename, { description: e.target.value })}
+                                            placeholder={t('Description (helps the composer decide in dynamic mode)')}
+                                            className="h-7 text-xs"
+                                        />
+                                        <ItemHeader>
+                                            <span className="text-[11px] text-muted-foreground">
+                                                {t(mode === 'always' ? 'Always include' : 'Composer decides')}
+                                            </span>
+                                            <ItemActions className="gap-0.5">
+                                                {(['always', 'dynamic'] as const).map(m => (
+                                                    <Button key={m} type="button" size="sm"
+                                                        variant={mode === m ? 'default' : 'outline'}
+                                                        className="h-6 text-[10px] px-1.5"
+                                                        onClick={() => updateResponseAttachment(file.filename, { mode: m })}>
+                                                        {t(m === 'always' ? 'Always' : 'Dynamic')}
+                                                    </Button>
+                                                ))}
+                                            </ItemActions>
+                                        </ItemHeader>
+                                    </Item>
+                                );
+                            })}
+                        </ItemGroup>
+                    )}
+                </DialogContent>
+            </Dialog>
 
             <Dialog open={learningsDialogOpen} onOpenChange={setLearningsDialogOpen}>
                 <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
@@ -2509,7 +2456,7 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                         <div>
                                             <Label className="text-xs">{t('Tool returns file')}</Label>
                                             <p className="mt-1 text-xs text-muted-foreground">
-                                                {t('Extract a base64 file from the JSON response and make it available as a response attachment.')}
+                                                {t('Extract a base64 file from the JSON response and make it available to the final ticket composer.')}
                                             </p>
                                         </div>
                                         <Switch
@@ -2522,9 +2469,9 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                         <div className="space-y-3">
                                             <div className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-2">
                                                 <div>
-                                                    <Label className="text-xs">{t('Attach to response')}</Label>
+                                                    <Label className="text-xs">{t('Make available to composer')}</Label>
                                                     <p className="mt-0.5 text-xs text-muted-foreground">
-                                                        {t('Add the generated filename to the response automatically.')}
+                                                        {t('Supply the generated file to the final ticket composer automatically.')}
                                                     </p>
                                                 </div>
                                                 <Switch

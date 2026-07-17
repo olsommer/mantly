@@ -12,6 +12,7 @@ from automail.monitoring import (
     pipeline_output_summary,
 )
 from automail.pipeline.drafts import ensure_draft_exists, get_draft_source
+from automail.pipeline.intent.consumers import resolve_intent_action_payloads
 
 router = APIRouter()
 
@@ -70,10 +71,14 @@ async def preview_email(request: Request, ctx: ProjectEditorDep) -> list:
 
     # Resolve action payloads with identity data
     if intent_result and identity_result and identity_result.data:
-        for action in intent_result.actions:
-            action.payload = {**identity_result.data, **action.payload}
+        resolve_intent_action_payloads(intent_result, identity_result.data)
 
-    attachments = load_attachment_files(result, intents_dir=draft)
+    attachments = load_attachment_files(
+        result,
+        intents_dir=draft,
+        intent_result=intent_result,
+        strict_intent_ownership=True,
+    )
     attachment_list = attachments if attachments else []
 
     email_message = Message(

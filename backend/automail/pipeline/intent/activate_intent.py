@@ -1,13 +1,16 @@
 """Router tools for selecting an intent."""
 
+import json
 import logging
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Annotated, Any
 
 from langchain.tools import tool
+from pydantic import Field
 
+from automail.models import ConcernRoute
 from automail.pipeline.intent.intents_factory import get_intent_body
 
 logger = logging.getLogger(__name__)
@@ -44,3 +47,28 @@ def activate_intent(intent_name: str) -> str:
 def no_match(reason: str = "") -> str:
     """Signal that no configured intent matches the incoming email."""
     return reason or "No configured intent matches this email."
+
+
+@tool(return_direct=True)
+def route_concerns(
+    concerns: Annotated[
+        list[ConcernRoute],
+        Field(min_length=1, max_length=3),
+    ],
+) -> str:
+    """Route one to three independent email concerns to configured intents.
+
+    Set ``intent_name`` to null for a concern that has no matching runbook.
+    ``source_text`` must be the smallest useful excerpt from the incoming email.
+    """
+    intents_dir = _intents_dir_override.get()
+    routed: list[dict[str, Any]] = []
+    for concern in concerns[:3]:
+        item = concern.model_dump()
+        intent_name = str(concern.intent_name or "").strip()
+        if intent_name and get_intent_body(intent_name, intents_dir=intents_dir) is None:
+            item["reason"] = f"Unknown intent: {intent_name}"
+            item["intent_name"] = None
+        routed.append(item)
+    logger.info("Routed %d concern(s)", len(routed))
+    return json.dumps({"concerns": routed})

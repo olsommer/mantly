@@ -12,7 +12,7 @@ from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attem
 
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.integrations.http_tool import _make_http_tool, current_generated_attachments, raw_tool_to_definition
-from automail.models import Email, IdentityResult, IntentAction
+from automail.models import ConcernRoute, Email, IdentityResult, IntentAction
 from automail.pipeline.intent.intents_factory import (
     get_intent_frontmatters,
     get_intent_tools,
@@ -142,6 +142,26 @@ def _find_activated_intent(messages: list[Any]) -> str | None:
         return None
     intent_name = str(args.get("intent_name") or "").strip()
     return intent_name or None
+
+
+def _find_routed_concerns(messages: list[Any]) -> list[ConcernRoute] | None:
+    """Parse the multi-concern router call, preserving its declared order."""
+    args = _find_router_tool_call(messages, "route_concerns")
+    if args is None:
+        return None
+    raw_concerns = args.get("concerns")
+    if not isinstance(raw_concerns, list):
+        return []
+
+    concerns: list[ConcernRoute] = []
+    for raw in raw_concerns[:3]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            concerns.append(ConcernRoute.model_validate(raw))
+        except Exception as exc:
+            logger.warning("Ignoring invalid routed concern: %s", exc)
+    return concerns
 
 
 def _find_no_match_reason(messages: list[Any]) -> str | None:
@@ -318,5 +338,16 @@ def _build_process_user_message(
             )
             extra = f" (uses: {', '.join(mapped_fields)})" if mapped_fields else ""
             parts.append(f"- **{a.name}**: {desc}{extra}")
+
+    parts.extend([
+        "",
+        "## Required Structured Runbook Outcome",
+        "Do not draft or address a customer reply. Return only the structured outcome.",
+        "Summarize the runbook decision without presenting inferred business facts as verified.",
+        "Tool evidence is captured directly by the runtime. Do not repeat or reinterpret "
+        "tool payloads as evidence.",
+        "List missing information, customer reply requirements, and forbidden claims "
+        "separately so one ticket-level composer can combine all concerns later.",
+    ])
 
     return "\n".join(parts)

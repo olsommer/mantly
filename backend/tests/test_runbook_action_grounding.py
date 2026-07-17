@@ -96,10 +96,17 @@ def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypat
         "actionType": "button",
         "webhook": "https://hooks.example.test/open-ticket",
         "method": "POST",
-        "payload": {"actionName": "open_ticket", "actionLabel": "Open ticket"},
+        "payload": {
+            "actionName": "open_ticket",
+            "actionLabel": "Open ticket",
+            "concernId": "primary",
+            "runbook": "",
+        },
         "query": {},
         "body": {"order": "{orderId}"},
         "headers": {},
+        "concernId": "primary",
+        "runbook": "",
     }
 
 
@@ -510,7 +517,7 @@ def test_channel_autopilot_marks_grounding_block_as_withheld(monkeypatch):
     assert events[0]["metadata"]["draftBlockedReason"] == "grounding_check_failed"
 
 
-def test_automation_prepared_reply_requires_persisted_reply_id():
+def test_automation_customer_reply_requires_persisted_reply_id():
     without_reply = {
         "items": [
             {
@@ -533,9 +540,21 @@ def test_automation_prepared_reply_requires_persisted_reply_id():
             }
         ]
     }
+    with_queued_reply = {
+        "items": [
+            {
+                "result": {
+                    "actions": [
+                        {"type": "queue_reply", "replyId": "reply2"}
+                    ]
+                }
+            }
+        ]
+    }
 
-    assert issues._automation_prepared_agent_reply(without_reply) is False
-    assert issues._automation_prepared_agent_reply(with_reply) is True
+    assert issues._automation_created_customer_reply(without_reply) is False
+    assert issues._automation_created_customer_reply(with_reply) is True
+    assert issues._automation_created_customer_reply(with_queued_reply) is True
 
 
 def test_automatic_action_context_distinguishes_pending_from_proven_success():

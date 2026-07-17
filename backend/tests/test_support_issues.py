@@ -86,6 +86,11 @@ def _default_email_webhook_token(monkeypatch):
 
     monkeypatch.setattr(issues, "_claim_issue_reply_delivery", fake_claim_issue_reply_delivery)
     monkeypatch.setattr(issues, "_complete_issue_reply_delivery", fake_complete_issue_reply_delivery)
+    monkeypatch.setattr(
+        issues,
+        "_apply_direct_channel_runbooks",
+        lambda *, issue, **_kwargs: issue,
+    )
 
 
 def test_send_support_email_reply_attaches_files(monkeypatch):
@@ -1705,7 +1710,15 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     assert issue["queueName"] == "Support"
     assert issue["accountName"] == "Example Co"
     assert issue["contactEmail"] == "ada@example.com"
-    assert issue["actionLog"] == [{"label": "Open ticket", "type": "button", "status": "available"}]
+    assert issue["actionLog"] == [
+        {
+            "label": "Open ticket",
+            "type": "button",
+            "status": "available",
+            "concernId": "primary",
+            "runbook": "",
+        }
+    ]
     by_path = {path: data for path, data in posted}
     assert by_path["/api/collections/support_channels/records"]["channel_key"] == "email:addin"
     assert by_path["/api/collections/support_accounts/records"]["project"] == "project1"
@@ -1839,6 +1852,77 @@ def test_upsert_issue_from_channel_email_runs_channel_autopilot(monkeypatch):
     assert autopilot_calls[0]["context"]["issueSourceId"] == "channel:email:support:provider-msg-1"
     issue_post = next(data for path, data in posted if path == "/api/collections/support_issues/records")
     assert issue_post["source"] == "channel:email:support"
+
+
+def test_upsert_issue_queue_reply_automation_suppresses_other_reply_paths(monkeypatch):
+    channel = {
+        "id": "channel1",
+        "channelKey": "email:support",
+        "type": "email",
+        "config": {"autoPrepareAgentReply": True},
+    }
+
+    monkeypatch.setattr(issues, "generate_id", lambda: "issue123")
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(issues, "_ensure_channel", lambda **_kwargs: channel)
+    monkeypatch.setattr(issues, "_upsert_account", lambda **_kwargs: {"id": "account123"})
+    monkeypatch.setattr(issues, "_upsert_contact", lambda **_kwargs: {"id": "contact123"})
+    monkeypatch.setattr(issues, "_post", lambda _path, data: data)
+    monkeypatch.setattr(issues, "_patch", lambda _path, data: data)
+    monkeypatch.setattr(issues, "_ensure_issue_sla_events", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_refresh_account_contact_counts", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_external_objects", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_account_insights", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_knowledge_gap", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_upsert_ai_run_from_chat", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_run_automation_rules_for_issue",
+        lambda **_kwargs: {
+            "processed": 1,
+            "failed": 0,
+            "items": [
+                {
+                    "status": "success",
+                    "result": {
+                        "actions": [
+                            {"type": "queue_reply", "replyId": "automation-reply"},
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_email_channel_autopilot_package",
+        lambda **_kwargs: pytest.fail("queue_reply must suppress channel autopilot"),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_email_pipeline_reply_draft",
+        lambda **_kwargs: pytest.fail("queue_reply must suppress pipeline fallback"),
+    )
+
+    issue = issues.upsert_issue_from_chat(
+        {
+            "email_id": "channel:email:support:provider-msg-1",
+            "subject": "Need support",
+            "from_address": "customer@example.com",
+            "messages": [{"user": "email", "role": "email", "content": "Need support."}],
+            "activated_intent": "customer_support",
+            "requires_human": False,
+            "identity_result": {"data": {}},
+            "intent_result": {"matched": True, "actions": []},
+        },
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email:support",
+    )
+
+    assert issue is not None
+    assert issue["id"] == "issue123"
 
 
 def test_upsert_issue_from_chat_exact_replay_has_no_issue_side_effects(monkeypatch):
@@ -11459,6 +11543,80 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
     assert event_types == ["reply_drafted", "agent_answer_prepared"]
 
 
+def test_create_issue_agent_answer_persists_strict_runbook_attachments(monkeypatch):
+    posted: list[tuple[str, dict]] = []
+    ids = iter(["reply123", "event123", "aiRun123", "event456"])
+    issue = {
+        "id": "issue1",
+        "channel": "email",
+        "contactEmail": "customer@example.com",
+        "subject": "Return request",
+        "messages": [{"direction": "customer", "body": "Please send the return files."}],
+    }
+    resolved = [
+        {
+            "filename": "label.pdf",
+            "content_base64": "TEFCRUw=",
+            "content_type": "application/pdf",
+        },
+        {
+            "filename": "terms.pdf",
+            "content_base64": "VEVSTVM=",
+            "content_type": "application/pdf",
+        },
+    ]
+
+    monkeypatch.setattr(issues, "generate_id", lambda: next(ids))
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_upsert_agent_answer_knowledge_gap", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "update_issue", lambda *_args, **_kwargs: {"id": "issue1"})
+    monkeypatch.setattr(
+        issues,
+        "draft_issue_automation_answer",
+        lambda **_kwargs: IssueAgentDraft(
+            answer="The return label and terms are attached.",
+            confidence="medium",
+            generation_mode="llm",
+            response_attachments=("label.pdf", "terms.pdf"),
+        ),
+    )
+    resolution_calls: list[tuple[str, ...]] = []
+
+    def resolve(_issue, filenames, **_kwargs):
+        resolution_calls.append(filenames)
+        return resolved, ()
+
+    monkeypatch.setattr(issues, "_resolve_runbook_reply_attachments", resolve)
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="agent@example.com",
+    )
+
+    assert resolution_calls == [("label.pdf", "terms.pdf")]
+    assert result is not None
+    assert result["responseAttachments"] == ["label.pdf", "terms.pdf"]
+    outbound = next(
+        data
+        for path, data in posted
+        if path == "/api/collections/support_outbound_messages/records"
+    )
+    assert [item["filename"] for item in outbound["metadata"]["attachments"]] == [
+        "label.pdf",
+        "terms.pdf",
+    ]
+    ai_run = next(
+        data
+        for path, data in posted
+        if path == "/api/collections/support_ai_runs/records"
+    )
+    assert ai_run["metadata"]["responseAttachments"] == ["label.pdf", "terms.pdf"]
+
+
 def test_create_issue_agent_failure_has_low_confidence_no_citations_or_reply(monkeypatch):
     posted: list[tuple[str, dict]] = []
     ids = iter(["aiRun123", "event123"])
@@ -12767,7 +12925,19 @@ def test_create_issue_agent_answer_routes_low_confidence_auto_send_to_approval(m
     assert gap["metadata"]["replyId"] == "reply123"
 
 
-def test_create_issue_agent_answer_blocks_auto_send_when_approval_required(monkeypatch):
+@pytest.mark.parametrize(
+    ("issue_review_field", "approval_required"),
+    [
+        (None, True),
+        ("requiresHuman", False),
+        ("requires_human", False),
+    ],
+)
+def test_create_issue_agent_answer_blocks_auto_send_for_any_approval_gate(
+    monkeypatch,
+    issue_review_field: str | None,
+    approval_required: bool,
+):
     posted: list[tuple[str, dict]] = []
     updates: list[dict] = []
     ids = iter(["reply123", "aiRun123", "gap123"])
@@ -12779,6 +12949,8 @@ def test_create_issue_agent_answer_blocks_auto_send_when_approval_required(monke
         "assigneeEmail": "",
         "messages": [{"id": "msg1", "direction": "customer", "body": "Can this be changed?"}],
     }
+    if issue_review_field:
+        issue[issue_review_field] = True
 
     monkeypatch.setattr(issues, "generate_id", lambda: next(ids))
     monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
@@ -12805,7 +12977,7 @@ def test_create_issue_agent_answer_blocks_auto_send_when_approval_required(monke
         project_id="project1",
         author_email="automation",
         question="Draft and send if safe.",
-        approval_required=True,
+        approval_required=approval_required,
         auto_send=True,
         use_knowledge_agent=False,
     )
@@ -18938,6 +19110,75 @@ def test_run_automation_rules_for_issue_prepares_agent_reply(monkeypatch):
     assert action_result["automationContext"]["actionType"] == "prepare_agent_reply"
 
 
+def test_multiple_matching_automation_rules_create_only_one_customer_reply(monkeypatch):
+    posted: list[tuple[str, dict]] = []
+    replies: list[dict] = []
+    rules = [
+        {
+            "id": "rule-a",
+            "name": "First reply",
+            "active": True,
+            "trigger": "issue_created",
+            "conditions": {},
+            "actions": [{"type": "queue_reply", "body": "First durable reply"}],
+        },
+        {
+            "id": "rule-b",
+            "name": "Second reply",
+            "active": True,
+            "trigger": "issue_created",
+            "conditions": {},
+            "actions": [{"type": "prepare_agent_reply", "createDraft": True}],
+        },
+    ]
+    monkeypatch.setattr(
+        issues,
+        "_list_all",
+        lambda collection, *_args, **_kwargs: rules
+        if collection == "support_automation_rules"
+        else [],
+    )
+    monkeypatch.setattr(issues, "_patch", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda path, data: posted.append((path, data)) or data,
+    )
+    monkeypatch.setattr(issues, "generate_id", lambda: "run-id")
+    monkeypatch.setattr(
+        issues,
+        "create_issue_reply",
+        lambda *_args, **kwargs: replies.append(kwargs) or {"id": "reply-one"},
+    )
+    monkeypatch.setattr(
+        issues,
+        "create_issue_agent_answer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("second reply producer must not run")
+        ),
+    )
+
+    result = issues._run_automation_rules_for_issue(
+        issue={"id": "issue1", "requires_human": False},
+        trigger="issue_created",
+        tenant_id="tenant1",
+        project_id="project1",
+        context={"messageId": "message1"},
+    )
+
+    assert result["processed"] == 2
+    assert len(replies) == 1
+    second_actions = result["items"][1]["result"]["actions"]
+    assert second_actions == [
+        {
+            "type": "prepare_agent_reply",
+            "status": "skipped",
+            "replyId": "",
+            "reason": "customer_reply_already_created",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     (
         "answer",
@@ -19187,10 +19428,38 @@ def test_run_automation_queue_reply_requires_approval_by_default(monkeypatch):
     assert replies[0]["metadata"]["approved"] is False
     assert replies[0]["metadata"]["reviewStatus"] == "pending"
     assert replies[0]["metadata"]["automationContext"]["ruleName"] == "Queue approval reply"
-    assert replies[1]["metadata"]["approvalRequired"] is False
-    assert replies[1]["metadata"]["automationContext"]["ruleId"] == "rule123"
+    assert len(replies) == 1
     assert action_results[0]["approvalRequired"] is True
-    assert action_results[1]["approvalRequired"] is False
+    assert action_results[1] == {
+        "type": "queue_reply",
+        "status": "skipped",
+        "replyId": "",
+        "reason": "customer_reply_already_created",
+    }
+
+
+def test_run_automation_queue_reply_can_skip_approval_for_safe_issue(monkeypatch):
+    replies: list[dict] = []
+    monkeypatch.setattr(
+        issues,
+        "create_issue_reply",
+        lambda _issue_id, **kwargs: replies.append(kwargs) or {"id": "reply1"},
+    )
+
+    results = issues._execute_automation_actions(
+        issue={"id": "issue123", "requires_human": False},
+        actions=[{
+            "type": "queue_reply",
+            "body": "Auto send allowed.",
+            "approvalRequired": False,
+        }],
+        tenant_id="tenant1",
+        project_id="project1",
+        actor_email="automation",
+    )
+
+    assert replies[0]["metadata"]["approvalRequired"] is False
+    assert results[0]["approvalRequired"] is False
 
 
 def test_run_automation_queue_reply_can_include_feedback_link(monkeypatch):
@@ -19201,7 +19470,7 @@ def test_run_automation_queue_reply_can_include_feedback_link(monkeypatch):
         "name": "Queue feedback reply",
         "active": True,
         "trigger": "issue_created",
-        "conditions": {"requiresHuman": True},
+        "conditions": {},
         "actions": [
             {
                 "type": "queue_reply",
@@ -19216,7 +19485,7 @@ def test_run_automation_queue_reply_can_include_feedback_link(monkeypatch):
         "priority": "high",
         "status": "open",
         "assignee_email": "",
-        "requires_human": True,
+        "requires_human": False,
     }
 
     monkeypatch.setattr(issues, "generate_id", lambda: "run123")
@@ -21768,6 +22037,7 @@ def test_channel_auto_prepare_can_request_guarded_auto_send(monkeypatch):
         }
 
     monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_issue_by_id", lambda *_args, **_kwargs: {"requires_human": False})
     monkeypatch.setattr(issues, "prepare_issue_triage", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(issues, "prepare_issue_custom_fields", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(issues, "create_issue_agent_answer", fake_agent)
@@ -21813,6 +22083,47 @@ def test_channel_auto_prepare_can_request_guarded_auto_send(monkeypatch):
     assert autopilot_event["metadata"]["autoSendRequested"] is True
     assert autopilot_event["metadata"]["autoSend"] is True
     assert autopilot_event["metadata"]["autoSendPolicy"] == "approval_not_required"
+
+
+def test_channel_auto_prepare_keeps_review_gated_issue_out_of_auto_send(monkeypatch):
+    agent_calls: list[dict] = []
+
+    def fake_agent(issue_id: str, **kwargs):
+        agent_calls.append({"issue_id": issue_id, **kwargs})
+        return {
+            "reply": {"id": "reply-review"},
+            "run": {"id": "run-review"},
+            "autoSendRequested": True,
+            "autoSend": False,
+            "autoSendPolicy": "approval_required",
+            "autoSendBlockedReason": "approval_required",
+        }
+
+    monkeypatch.setattr(issues, "_post", lambda _path, data: data)
+    monkeypatch.setattr(issues, "_issue_by_id", lambda *_args, **_kwargs: {"requires_human": True})
+    monkeypatch.setattr(issues, "prepare_issue_triage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "prepare_issue_custom_fields", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "create_issue_agent_answer", fake_agent)
+
+    result = issues._channel_auto_prepare_agent_reply(
+        channel={
+            "id": "channel1",
+            "channelKey": "email-main",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True, "agentAutoSend": True},
+        },
+        issue_id="issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        source="channel:email-main",
+        message_id="message1",
+    )
+
+    assert result is not None
+    assert agent_calls[0]["approval_required"] is True
+    assert agent_calls[0]["auto_send"] is True
+    assert result["autopilotActions"][2]["autoSend"] is False
+    assert result["autopilotActions"][2]["autoSendBlockedReason"] == "approval_required"
 
 
 def test_channel_auto_prepare_skips_missing_custom_field_schema(monkeypatch):

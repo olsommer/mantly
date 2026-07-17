@@ -107,6 +107,10 @@ class IssueAgentDraft:
     citation_ids: tuple[str, ...] = field(default_factory=tuple)
     citation_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     missing_information: tuple[str, ...] = field(default_factory=tuple)
+    response_attachments: tuple[str, ...] = field(default_factory=tuple)
+    covered_concern_ids: tuple[str, ...] = field(default_factory=tuple)
+    requires_human: bool = False
+    requires_human_reason: str = ""
     tool_calls: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
@@ -165,6 +169,10 @@ class KnowledgeAgentOutput(BaseModel):
         description="Exact article chunk paths read with standalone cat calls and used as evidence",
     )
     missing_information: list[str] = Field(default_factory=list)
+    response_attachments: list[str] = Field(default_factory=list)
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: str = ""
 
 
 class AutomationAnswerOutput(BaseModel):
@@ -174,6 +182,10 @@ class AutomationAnswerOutput(BaseModel):
     confidence: Literal["low", "medium", "high"]
     citation_ids: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
+    response_attachments: list[str] = Field(default_factory=list)
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: str = ""
 
 
 class AutomationGroundingUnitAssessment(BaseModel):
@@ -437,13 +449,272 @@ def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
         "summary": _string_from(issue.get("aiSummary")),
         "runbook": _string_from(issue.get("activatedIntent") or issue.get("activated_intent")),
     }
-    runbook_actions = _automatic_runbook_action_context(issue)
+    concern_context, tool_evidence, run_scope = _automatic_runbook_concern_context(issue)
+    if concern_context:
+        ticket["concerns"] = concern_context
+    if tool_evidence:
+        ticket["toolEvidence"] = tool_evidence
+    runbook_actions = _automatic_runbook_action_context(
+        issue,
+        concern_ids={
+            _string_from(concern.get("id"))
+            for concern in concern_context
+            if isinstance(concern, dict) and _string_from(concern.get("id"))
+        },
+        source_message_id=_string_from(run_scope.get("sourceMessageId")),
+    )
     if runbook_actions:
         ticket["runbookActions"] = runbook_actions
     return ticket
 
 
-def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, Any]]:
+def _validated_response_attachments(
+    issue: dict[str, Any],
+    requested_filenames: list[str],
+) -> tuple[str, ...]:
+    """Allow only latest-run attachment names; always-mode files cannot be omitted."""
+    ticket = _ticket_context(issue)
+    available: dict[str, str] = {}
+    for concern in ticket.get("concerns", []):
+        if not isinstance(concern, dict):
+            continue
+        for item in concern.get("attachments", []):
+            if not isinstance(item, dict):
+                continue
+            filename = _string_from(item.get("filename"))
+            if filename:
+                available.setdefault(filename, _string_from(item.get("mode")).lower())
+
+    selected: list[str] = []
+    for raw_filename in requested_filenames[:20]:
+        filename = _string_from(raw_filename)
+        if filename in available and filename not in selected:
+            selected.append(filename)
+    for filename, mode in available.items():
+        if mode in {"always", "generated"} and filename not in selected:
+            selected.append(filename)
+    return tuple(selected[:20])
+
+
+def _validated_concern_coverage(
+    issue: dict[str, Any],
+    covered_concern_ids: list[str],
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[tuple[str, ...], bool, str]:
+    expected_ids = [
+        _string_from(concern.get("id"))
+        for concern in _ticket_context(issue).get("concerns", [])
+        if isinstance(concern, dict) and _string_from(concern.get("id"))
+    ]
+    covered_ids = tuple(
+        _string_from(item)
+        for item in covered_concern_ids[:20]
+        if _string_from(item)
+    )
+    reasons: list[str] = []
+    requires_human = bool(model_requires_human)
+    if expected_ids and (
+        len(covered_ids) != len(expected_ids)
+        or set(covered_ids) != set(expected_ids)
+    ):
+        requires_human = True
+        reasons.append("Reply composer did not confirm exact coverage of every concern.")
+    if model_requires_human:
+        reasons.append(model_reason.strip() or "Reply composer requested human review.")
+    return covered_ids, requires_human, " ".join(dict.fromkeys(reasons))[:1_000]
+
+
+def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return []
+    return [
+        clean[:item_limit]
+        for item in values[:limit]
+        if (clean := _string_from(item))
+    ]
+
+
+def _automatic_tool_evidence_context(value: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Expose only the bounded, allowlisted facts recorded by HTTP tools."""
+    if not isinstance(value, list):
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in value[:limit]:
+        if not isinstance(item, dict):
+            continue
+        status = _string_from(item.get("status"))
+        record: dict[str, Any] = {
+            "name": _string_from(item.get("name") or item.get("toolName") or item.get("tool_name"))[:160],
+            "method": _string_from(item.get("method"))[:16],
+            "status": status[:80],
+        }
+        facts = item.get("responseFacts") or item.get("response_facts") or item.get("facts")
+        if status == "success" and isinstance(facts, (dict, list)) and facts:
+            # http_tool owns the allowlist and size bounds. Round-trip through JSON
+            # to detach the prompt context from mutable persisted metadata.
+            try:
+                record["responseFacts"] = json.loads(json.dumps(facts, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
+        if record["name"]:
+            evidence.append(record)
+    return evidence
+
+
+def _automatic_runbook_concern_context(
+    issue: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Return latest per-message concern outcomes plus safe tool evidence."""
+    runs = issue.get("aiRuns")
+    if not isinstance(runs, list):
+        return [], [], {}
+
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        source = _string_from(run.get("source"))
+        if source in {"agent_answer", "triage", "custom_fields"}:
+            continue
+        intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
+        raw_concerns = intent_result.get("concerns")
+        if not isinstance(raw_concerns, list) or not raw_concerns:
+            continue
+
+        concerns: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_concerns[:10]):
+            if not isinstance(raw, dict):
+                continue
+            outcome = _record_from(raw.get("outcome") or raw.get("runbookOutcome") or raw.get("runbook_outcome"))
+            intent_name = _string_from(
+                raw.get("intentName")
+                or raw.get("intent_name")
+                or raw.get("runbook")
+                or outcome.get("intentName")
+                or outcome.get("intent_name")
+                or outcome.get("runbook")
+            )
+            matched_value = raw.get("matched")
+            matched = bool(intent_name) if matched_value is None else bool(matched_value)
+            concern: dict[str, Any] = {
+                "id": _string_from(raw.get("concernId") or raw.get("concern_id") or raw.get("id"))
+                or f"concern-{index + 1}",
+                "text": _string_from(
+                    raw.get("text")
+                    or raw.get("sourceText")
+                    or raw.get("source_text")
+                    or raw.get("summary")
+                )[:1_000],
+                "matched": matched,
+                "runbook": intent_name[:240],
+                "confidence": _string_from(raw.get("confidence") or outcome.get("confidence"))[:40],
+                "status": _string_from(outcome.get("status") or raw.get("status"))[:80],
+                "requiresHuman": bool(
+                    outcome.get("requiresHuman")
+                    or outcome.get("requires_human")
+                    or raw.get("requiresHuman")
+                    or raw.get("requires_human")
+                ),
+            }
+            reason = _string_from(
+                raw.get("reason")
+                or raw.get("unmatchedReason")
+                or raw.get("unmatched_reason")
+                or raw.get("requiresHumanReason")
+                or raw.get("requires_human_reason")
+                or outcome.get("reason")
+                or outcome.get("requiresHumanReason")
+                or outcome.get("requires_human_reason")
+                or outcome.get("error")
+                or raw.get("error")
+            )
+            if reason:
+                concern["reason"] = reason[:500]
+            missing = _bounded_string_list(
+                outcome.get("missingInformation")
+                or outcome.get("missing_information")
+                or raw.get("missingInformation")
+                or raw.get("missing_information")
+            )
+            if missing:
+                concern["missingInformation"] = missing
+            requirements = _bounded_string_list(
+                outcome.get("replyRequirements")
+                or outcome.get("reply_requirements")
+                or outcome.get("responseRules")
+                or outcome.get("response_rules")
+                or raw.get("replyRequirements")
+                or raw.get("reply_requirements")
+            )
+            if requirements:
+                concern["replyRequirements"] = requirements
+            forbidden = _bounded_string_list(
+                outcome.get("forbiddenClaims")
+                or outcome.get("forbidden_claims")
+                or raw.get("forbiddenClaims")
+                or raw.get("forbidden_claims")
+            )
+            if forbidden:
+                concern["forbiddenClaims"] = forbidden
+            raw_attachments = (
+                outcome.get("attachments")
+                or raw.get("attachments")
+                or []
+            )
+            attachments: list[dict[str, str]] = []
+            if isinstance(raw_attachments, list):
+                for raw_attachment in raw_attachments[:20]:
+                    attachment = _record_from(raw_attachment)
+                    filename = _string_from(attachment.get("filename"))
+                    if not filename:
+                        continue
+                    attachments.append(
+                        {
+                            "filename": filename[:240],
+                            "description": _string_from(attachment.get("description"))[:500],
+                            "mode": _string_from(attachment.get("mode") or "dynamic")[:40],
+                            "source": _string_from(attachment.get("source") or "runbook")[:40],
+                        }
+                    )
+            if attachments:
+                concern["attachments"] = attachments
+            concern_tools = _automatic_tool_evidence_context(
+                outcome.get("toolEvidence")
+                or outcome.get("tool_evidence")
+                or outcome.get("toolCalls")
+                or outcome.get("tool_calls")
+                or raw.get("toolEvidence")
+                or raw.get("tool_evidence")
+                or raw.get("toolCalls")
+                or raw.get("tool_calls")
+            )
+            if concern_tools:
+                concern["toolEvidence"] = concern_tools
+            concerns.append(concern)
+
+        metadata = _record_from(run.get("metadata"))
+        source_message_id = _string_from(
+            metadata.get("emailId")
+            or metadata.get("messageId")
+            or metadata.get("sourceMessageId")
+        )
+        # Modern runs bind evidence to each concern. Flat run-level calls can
+        # include identity or another concern and are not customer-claim proof.
+        return concerns, [], {"sourceMessageId": source_message_id}
+    return [], [], {}
+
+
+def _automatic_runbook_action_context(
+    issue: dict[str, Any],
+    *,
+    concern_ids: set[str] | None = None,
+    source_message_id: str = "",
+) -> list[dict[str, Any]]:
     actions = issue.get("actionExecutions")
     if not isinstance(actions, list):
         return []
@@ -457,19 +728,38 @@ def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, A
             and _string_from(metadata.get("source")) != "runbook"
         ):
             continue
+        execution_source_message_id = _string_from(
+            metadata.get("sourceMessageId") or metadata.get("source_message_id")
+        )
+        execution_concern_id = _string_from(
+            metadata.get("concernId") or metadata.get("concern_id")
+        )
+        if source_message_id and execution_source_message_id != source_message_id:
+            continue
+        if concern_ids and execution_concern_id not in concern_ids:
+            continue
         result = _record_from(execution.get("result"))
         proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
         name = _string_from(proposed.get("name") or execution.get("actionKey"))
         label = _string_from(proposed.get("label") or execution.get("label") or name)
+        concern_id = _string_from(
+            execution_concern_id
+            or proposed.get("concernId")
+            or proposed.get("concern_id")
+        )
+        runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
         status = _string_from(execution.get("status"))
         if status == "pending" and metadata.get("approvalRequired") is True:
-            context.append(
-                {
-                    "name": name,
-                    "label": label,
-                    "status": "pending_approval",
-                }
-            )
+            action_context = {
+                "name": name,
+                "label": label,
+                "status": "pending_approval",
+            }
+            if concern_id:
+                action_context["concernId"] = concern_id
+            if runbook:
+                action_context["runbook"] = runbook
+            context.append(action_context)
             if len(context) >= 10:
                 break
             continue
@@ -487,6 +777,10 @@ def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, A
                 "status": status,
                 "completedAt": _string_from(execution.get("completedAt")),
             }
+            if concern_id:
+                action_context["concernId"] = concern_id
+            if runbook:
+                action_context["runbook"] = runbook
             if error:
                 action_context["error"] = error
             context.append(action_context)
@@ -512,15 +806,18 @@ def _automatic_runbook_action_context(issue: dict[str, Any]) -> list[dict[str, A
                 value = response.get(key)
                 if isinstance(value, (str, int, float, bool)):
                     proof[key] = value
-        context.append(
-            {
-                "name": name,
-                "label": label,
-                "status": "success",
-                "completedAt": _string_from(execution.get("completedAt")),
-                "proof": proof,
-            }
-        )
+        action_context = {
+            "name": name,
+            "label": label,
+            "status": "success",
+            "completedAt": _string_from(execution.get("completedAt")),
+            "proof": proof,
+        }
+        if concern_id:
+            action_context["concernId"] = concern_id
+        if runbook:
+            action_context["runbook"] = runbook
+        context.append(action_context)
         if len(context) >= 10:
             break
     return context
@@ -843,6 +1140,12 @@ def draft_issue_agent_answer(
             missing_information.append(
                 "Full source content requires human review: " + ", ".join(truncated_citation_ids)
             )
+        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+            issue,
+            structured.covered_concern_ids,
+            model_requires_human=structured.requires_human,
+            model_reason=structured.requires_human_reason,
+        )
         return IssueAgentDraft(
             answer=answer,
             confidence=confidence,
@@ -850,15 +1153,31 @@ def draft_issue_agent_answer(
             citation_ids=citation_ids,
             citation_evidence=citation_evidence,
             missing_information=tuple(dict.fromkeys(missing_information))[:10],
+            response_attachments=_validated_response_attachments(
+                issue,
+                structured.response_attachments,
+            ),
+            covered_concern_ids=covered_concern_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue agent answer: %s", exc)
+        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+            issue,
+            [],
+            model_requires_human=True,
+            model_reason="Knowledge answer generation failed.",
+        )
         return IssueAgentDraft(
             answer=_knowledge_failure_answer(question, messages),
             confidence="low",
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
+            covered_concern_ids=covered_concern_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls if workspace else (),
         )
     finally:
@@ -890,6 +1209,8 @@ def draft_issue_automation_answer(
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error="Automatic answer capacity is temporarily exhausted",
+            requires_human=True,
+            requires_human_reason="Automatic answer capacity is temporarily exhausted.",
         )
     deferred_slot_release = False
     parent_usage_collector: Any = None
@@ -978,20 +1299,42 @@ def draft_issue_automation_answer(
         missing_information = tuple(
             dict.fromkeys(item.strip()[:500] for item in structured.missing_information[:10] if item.strip())
         )
+        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+            issue,
+            structured.covered_concern_ids,
+            model_requires_human=structured.requires_human,
+            model_reason=structured.requires_human_reason,
+        )
         return IssueAgentDraft(
             answer=answer,
             confidence=confidence,
             generation_mode="llm",
             citation_ids=citation_ids,
             missing_information=missing_information,
+            response_attachments=_validated_response_attachments(
+                issue,
+                structured.response_attachments,
+            ),
+            covered_concern_ids=covered_concern_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue automation answer: %s", exc)
+        covered_concern_ids, requires_human, requires_human_reason = _validated_concern_coverage(
+            issue,
+            [],
+            model_requires_human=True,
+            model_reason="Automatic answer generation failed.",
+        )
         return IssueAgentDraft(
             answer=fallback_answer,
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
+            covered_concern_ids=covered_concern_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
         )
     finally:
         if not deferred_slot_release:

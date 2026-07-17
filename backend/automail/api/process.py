@@ -27,6 +27,7 @@ from automail.monitoring import (
 )
 from automail.pipeline import run_pipeline
 from automail.pipeline.drafts import ensure_draft_exists, get_live_source
+from automail.pipeline.intent.consumers import resolve_intent_action_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +278,10 @@ def process_email_for_context(
                 tenant_id=tenant_id,
                 project_id=project_id if project_id else None,
                 config_source=config_source,
+                # Connected channels create and ground the single final draft
+                # from the persisted Inbox ticket. Add-in calls still need the
+                # same composer synchronously in their response payload.
+                compose_response=not source.startswith("channel:"),
             )
         except Exception as e:
             logger.error("Error during pipeline processing: %s", e)
@@ -297,7 +302,12 @@ def process_email_for_context(
         )
 
         # Load attachment files if any
-        attachments = load_attachment_files(result, intents_dir=config_source)
+        attachments = load_attachment_files(
+            result,
+            intents_dir=config_source,
+            intent_result=intent_result,
+            strict_intent_ownership=True,
+        )
         attachment_list = attachments if attachments else []
 
         # Create message for original email
@@ -309,8 +319,7 @@ def process_email_for_context(
 
         # Resolve action payloads with identity data so the add-in can POST them to webhooks
         if intent_result and identity_result and identity_result.data:
-            for action in intent_result.actions:
-                action.payload = identity_result.data
+            resolve_intent_action_payloads(intent_result, identity_result.data)
 
         # Create message for agent response (includes v3 pipeline results)
         ai_message = Message(

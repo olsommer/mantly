@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1228,67 +1229,124 @@ def _priority(
     return "normal"
 
 
-def _action_log(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _intent_action_groups(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return concern-scoped actions, falling back to the legacy primary list."""
     result = _record_from(intent_result)
+    concerns = result.get("concerns")
+    groups: list[dict[str, Any]] = []
+    if isinstance(concerns, list):
+        for index, raw_concern in enumerate(concerns[:10]):
+            concern = _record_from(raw_concern)
+            outcome = _record_from(
+                concern.get("outcome")
+                or concern.get("runbookOutcome")
+                or concern.get("runbook_outcome")
+            )
+            actions = outcome.get("actions") or concern.get("actions")
+            if not isinstance(actions, list):
+                continue
+            runbook = _string_from(
+                concern.get("intentName")
+                or concern.get("intent_name")
+                or concern.get("runbook")
+                or outcome.get("intentName")
+                or outcome.get("intent_name")
+                or outcome.get("runbook")
+            )
+            if not runbook:
+                continue
+            groups.append(
+                {
+                    "concernId": _string_from(
+                        concern.get("concernId")
+                        or concern.get("concern_id")
+                        or concern.get("id")
+                    )
+                    or f"concern-{index + 1}",
+                    "runbook": runbook,
+                    "actions": actions,
+                }
+            )
+    if groups:
+        return groups
     actions = result.get("actions")
     if not isinstance(actions, list):
         return []
+    return [
+        {
+            "concernId": "primary",
+            "runbook": _string_from(result.get("intentName") or result.get("intent_name")),
+            "actions": actions,
+        }
+    ]
+
+
+def _action_log(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        label = _string_from(action.get("label") or action.get("name") or action.get("type"))
-        if not label:
-            continue
-        entries.append(
-            {
-                "label": label,
-                "type": _string_from(action.get("type") or "button"),
-                "status": "available",
-            }
-        )
+    for group in _intent_action_groups(intent_result):
+        for action in group["actions"]:
+            if not isinstance(action, dict):
+                continue
+            label = _string_from(action.get("label") or action.get("name") or action.get("type"))
+            if not label:
+                continue
+            entries.append(
+                {
+                    "label": label,
+                    "type": _string_from(action.get("type") or "button"),
+                    "status": "available",
+                    "concernId": group["concernId"],
+                    "runbook": group["runbook"],
+                }
+            )
     return entries
 
 
 def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict[str, Any]]:
-    result = _record_from(intent_result)
-    actions = result.get("actions")
-    if not isinstance(actions, list):
-        return []
     proposals: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        if "enabled" in action and not _bool_from(action.get("enabled")):
-            continue
-        name = _string_from(action.get("name"))
-        label = _string_from(action.get("label") or name)
-        action_type = _string_from(action.get("type") or "button").lower()
-        separate_call = _bool_from(action.get("separateCall") or action.get("separate_call"))
-        if action_type != "button" and not separate_call:
-            continue
-        webhook = _string_from(action.get("webhook"))
-        if not name or not label or not webhook:
-            continue
-        payload = _record_from(action.get("payload"))
-        payload.update({"actionName": name, "actionLabel": label})
-        initial_value = _string_from(action.get("initialValue") or action.get("initial_value"))
-        if initial_value:
-            payload[name] = initial_value
-        proposals.append(
-            {
-                "type": "runbook_webhook",
-                "name": name,
-                "label": label,
-                "actionType": action_type,
-                "webhook": webhook,
-                "method": _string_from(action.get("method") or "POST").upper(),
-                "payload": payload,
-                "query": _record_from(action.get("query")),
-                "body": _record_from(action.get("body")),
-                "headers": _record_from(action.get("headers")),
-            }
-        )
+    for group in _intent_action_groups(intent_result):
+        for action in group["actions"]:
+            if not isinstance(action, dict):
+                continue
+            if "enabled" in action and not _bool_from(action.get("enabled")):
+                continue
+            name = _string_from(action.get("name"))
+            label = _string_from(action.get("label") or name)
+            action_type = _string_from(action.get("type") or "button").lower()
+            separate_call = _bool_from(action.get("separateCall") or action.get("separate_call"))
+            if action_type != "button" and not separate_call:
+                continue
+            webhook = _string_from(action.get("webhook"))
+            if not name or not label or not webhook:
+                continue
+            payload = dict(_record_from(action.get("payload")))
+            payload.update(
+                {
+                    "actionName": name,
+                    "actionLabel": label,
+                    "concernId": group["concernId"],
+                    "runbook": group["runbook"],
+                }
+            )
+            initial_value = _string_from(action.get("initialValue") or action.get("initial_value"))
+            if initial_value:
+                payload[name] = initial_value
+            proposals.append(
+                {
+                    "type": "runbook_webhook",
+                    "name": name,
+                    "label": label,
+                    "actionType": action_type,
+                    "webhook": webhook,
+                    "method": _string_from(action.get("method") or "POST").upper(),
+                    "payload": payload,
+                    "query": _record_from(action.get("query")),
+                    "body": _record_from(action.get("body")),
+                    "headers": _record_from(action.get("headers")),
+                    "concernId": group["concernId"],
+                    "runbook": group["runbook"],
+                }
+            )
     return proposals
 
 
@@ -1301,9 +1359,13 @@ def _prepare_runbook_action_approvals(
     project_id: str,
 ) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
-    for proposed_action in _runbook_action_proposals(intent_result):
+    proposals = _runbook_action_proposals(intent_result)
+    for proposed_action in proposals:
+        concern_id = _string_from(proposed_action.get("concernId")) or "primary"
+        runbook = _string_from(proposed_action.get("runbook")) or "runbook"
         action_key = _key_from(
-            f"runbook:{source_message_id}:{_string_from(proposed_action.get('name'))}"
+            f"runbook:{source_message_id}:{concern_id}:{runbook}:"
+            f"{_string_from(proposed_action.get('name'))}"
         )
         existing = _first(
             "support_action_executions",
@@ -1316,6 +1378,23 @@ def _prepare_runbook_action_approvals(
                 ),
             ),
         )
+        if not existing and len(proposals) == 1:
+            # Resume pre-multi-concern partial runs without preparing the same
+            # business action under the newer concern-scoped key.
+            legacy_action_key = _key_from(
+                f"runbook:{source_message_id}:{_string_from(proposed_action.get('name'))}"
+            )
+            existing = _first(
+                "support_action_executions",
+                _issue_filter(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    extra=(
+                        f"issue='{_escape_pb(issue_id)}' && "
+                        f"action_key='{_escape_pb(legacy_action_key)}'"
+                    ),
+                ),
+            )
         if existing:
             prepared.append(_normalize_action_execution(existing))
             continue
@@ -1338,6 +1417,8 @@ def _prepare_runbook_action_approvals(
                 "approved": False,
                 "reviewStatus": "pending",
                 "sourceMessageId": source_message_id,
+                "concernId": concern_id,
+                "runbook": runbook,
                 "runbookAction": _string_from(proposed_action.get("name")),
                 "proposedAction": proposed_action,
             },
@@ -6521,6 +6602,193 @@ def _upsert_ai_run_from_chat(
     return {**create_data, **created}
 
 
+def _direct_channel_run_key(*, source: str, source_message_id: str) -> str:
+    return _key_from(f"{source}:{source_message_id}:runbooks")
+
+
+def _apply_direct_channel_runbooks(
+    *,
+    issue: dict[str, Any],
+    source: str,
+    source_message_id: str,
+    subject: str,
+    body: str,
+    identity: dict[str, str],
+    identity_data: dict[str, Any],
+    tenant_id: str | None,
+    project_id: str,
+) -> dict[str, Any]:
+    """Persist one direct message's runbook result before ticket automation."""
+    from automail.pipeline.drafts import get_live_source
+    from automail.support.channel_runbooks import run_direct_channel_runbooks
+
+    issue_id = _string_from(issue.get("id"))
+    if not issue_id:
+        return issue
+    run_key = _direct_channel_run_key(source=source, source_message_id=source_message_id)
+    existing = _first(
+        "support_ai_runs",
+        _issue_filter(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            extra=(
+                f"issue='{_escape_pb(issue_id)}' && "
+                f"run_key='{_escape_pb(run_key)}'"
+            ),
+        ),
+    )
+    now = _now_iso()
+    if existing:
+        intent_result = _parse(existing.get("intent_result"), dict)
+        issue_updates = {
+            "activated_intent": _string_from(existing.get("activated_intent")),
+            "requires_human": bool(existing.get("requires_human", True)),
+            "action_log": _action_log(intent_result),
+        }
+        try:
+            _patch(f"/api/collections/support_issues/records/{issue_id}", issue_updates)
+            if intent_result.get("matched"):
+                _prepare_runbook_action_approvals(
+                    issue_id=issue_id,
+                    intent_result=intent_result,
+                    source_message_id=source_message_id,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+        except Exception:
+            issue_updates["requires_human"] = True
+            logger.error(
+                "Could not resume direct-channel runbook state: source=%s message=%s",
+                source,
+                source_message_id,
+                exc_info=True,
+            )
+            try:
+                _patch(
+                    f"/api/collections/support_issues/records/{issue_id}",
+                    {"requires_human": True},
+                )
+            except Exception:
+                logger.error("Could not persist direct-channel resume fallback", exc_info=True)
+        return {**issue, **issue_updates}
+
+    result = None
+    error = ""
+    try:
+        result = run_direct_channel_runbooks(
+            source_message_id=source_message_id,
+            subject=subject,
+            body=body,
+            from_address=identity.get("contact_email", ""),
+            identity=identity,
+            identity_data=identity_data,
+            config_source=get_live_source(project_id, tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        error = _clip(str(exc) or exc.__class__.__name__, 1_000)
+        logger.error(
+            "Direct-channel runbooks failed: source=%s message=%s error=%s",
+            source,
+            source_message_id,
+            error,
+            exc_info=True,
+        )
+
+    requires_human = bool(error or result is None or result.requires_human)
+    intent_result = result.intent_result if result else {"concerns": [], "error": error}
+    activated_intent = result.activated_intent if result else ""
+    summary = result.summary if result else error
+    metadata: dict[str, Any] = {
+        "kind": "direct_channel_runbooks",
+        "channel": source,
+        "messageId": source_message_id,
+        "sourceMessageId": source_message_id,
+    }
+    if result and result.generated_attachments:
+        metadata["generatedAttachments"] = result.generated_attachments
+    run_data: dict[str, Any] = {
+        "id": generate_id(),
+        "issue": issue_id,
+        "run_key": run_key,
+        "source": source,
+        "status": "failed" if error else "needs_human" if requires_human else "success",
+        "activated_intent": activated_intent,
+        "requires_human": requires_human,
+        "summary": summary,
+        "identity_result": result.identity_result if result else {},
+        "intent_result": intent_result,
+        "security_result": {},
+        "token_usage": result.token_usage if result else {},
+        "tool_calls": result.tool_calls if result else [],
+        "metadata": metadata,
+        "started_at": now,
+        "completed_at": now,
+    }
+    if tenant_id:
+        run_data["tenant"] = tenant_id
+    run_data["project"] = project_id
+    run_persisted = False
+    try:
+        persisted_run = _post("/api/collections/support_ai_runs/records", run_data)
+        run_persisted = True
+        usage_calls = _parse(run_data.get("token_usage"), dict).get("calls")
+        if isinstance(usage_calls, list) and usage_calls:
+            try:
+                from automail.db.pocketbase.client import store_llm_usage_events
+
+                store_llm_usage_events(
+                    usage_calls,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    run_id=_string_from(persisted_run.get("id")) or _string_from(run_data.get("id")),
+                )
+            except Exception:
+                logger.warning("Failed to store direct-channel LLM usage events", exc_info=True)
+    except Exception:
+        logger.error(
+            "Could not persist direct-channel runbook result: source=%s message=%s",
+            source,
+            source_message_id,
+            exc_info=True,
+        )
+    if not run_persisted:
+        requires_human = True
+
+    issue_updates = {
+        "activated_intent": activated_intent,
+        "requires_human": requires_human,
+        "action_log": _action_log(intent_result),
+    }
+    try:
+        _patch(f"/api/collections/support_issues/records/{issue_id}", issue_updates)
+        if result and result.intent_result.get("matched"):
+            _prepare_runbook_action_approvals(
+                issue_id=issue_id,
+                intent_result=intent_result,
+                source_message_id=source_message_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+    except Exception:
+        issue_updates["requires_human"] = True
+        logger.error(
+            "Could not apply direct-channel runbook state: source=%s message=%s",
+            source,
+            source_message_id,
+            exc_info=True,
+        )
+        try:
+            _patch(
+                f"/api/collections/support_issues/records/{issue_id}",
+                {"requires_human": True},
+            )
+        except Exception:
+            logger.error("Could not persist direct-channel human-review fallback", exc_info=True)
+    return {**issue, **issue_updates}
+
+
 def _email_metadata_from_chat(chat: dict[str, Any]) -> dict[str, Any]:
     metadata = _record_from(chat.get("metadata"))
     references = metadata.get("references")
@@ -6915,7 +7183,7 @@ def upsert_issue_from_chat(
                 message_id=email_id,
                 context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
             )
-            if not _automation_prepared_agent_reply(automation_result):
+            if not _automation_created_customer_reply(automation_result):
                 prepared = _ensure_email_channel_autopilot_package(
                     issue=issue,
                     channel=channel,
@@ -7066,7 +7334,7 @@ def upsert_issue_from_chat(
             actor_email="automation",
             context={"source": source, "emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata},
         )
-        if not _automation_prepared_agent_reply(automation_result):
+        if not _automation_created_customer_reply(automation_result):
             prepared = _ensure_email_channel_autopilot_package(
                 issue=rec,
                 channel=channel,
@@ -9883,6 +10151,8 @@ def _record_agent_answer_ai_run(
     grounding_error: str = "",
     grounding_gate: dict[str, Any] | None = None,
     token_usage: dict[str, Any] | None = None,
+    response_attachments: tuple[str, ...] | None = None,
+    unresolved_response_attachments: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     now = _now_iso()
     run_key = _key_from(f"agent-answer:{now}:{question or issue_id}")
@@ -9914,6 +10184,14 @@ def _record_agent_answer_ai_run(
     clean_missing_information = [item[:500] for item in (missing_information or ())[:10] if item]
     clean_grounding_issues = [item[:500] for item in (grounding_issues or ())[:10] if item]
     clean_grounding_gate = _record_from(grounding_gate)
+    clean_response_attachments = [
+        item[:240] for item in (response_attachments or ())[:20] if item
+    ]
+    clean_unresolved_response_attachments = [
+        item[:240]
+        for item in (unresolved_response_attachments or ())[:20]
+        if item
+    ]
     data: dict[str, Any] = {
         "id": generate_id(),
         "issue": issue_id,
@@ -9942,6 +10220,8 @@ def _record_agent_answer_ai_run(
             "priorAgentRunIds": prior_ids,
             "accountContext": clean_account_context,
             "conversationContext": clean_conversation_context,
+            "responseAttachments": clean_response_attachments,
+            "unresolvedResponseAttachments": clean_unresolved_response_attachments,
         },
         "security_result": {},
         "token_usage": _record_from(token_usage),
@@ -9991,6 +10271,8 @@ def _record_agent_answer_ai_run(
             "autoSendPolicy": _string_from(reply_metadata.get("autoSendPolicy")),
             "autoSendBlockedReason": _string_from(reply_metadata.get("autoSendBlockedReason")),
             "replyStatus": _string_from(reply.get("status")) if reply else "",
+            "responseAttachments": clean_response_attachments,
+            "unresolvedResponseAttachments": clean_unresolved_response_attachments,
         },
         "started_at": now,
         "completed_at": now,
@@ -10019,6 +10301,147 @@ def _agent_answer_token_usage(collector: Any, *, event_start: int) -> dict[str, 
         return {}
     captured = [event for event in events[max(0, event_start):] if isinstance(event, dict)]
     return aggregate_usage_calls(captured) if captured else {}
+
+
+def _latest_runbook_ai_run(issue: dict[str, Any]) -> dict[str, Any]:
+    for run in issue.get("aiRuns", []):
+        if not isinstance(run, dict):
+            continue
+        if _string_from(run.get("source")) in {"agent_answer", "triage", "custom_fields"}:
+            continue
+        intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
+        if isinstance(intent_result.get("concerns"), list):
+            return run
+    return {}
+
+
+def _latest_runbook_intent_result(issue: dict[str, Any]) -> dict[str, Any]:
+    run = _latest_runbook_ai_run(issue)
+    return _record_from(run.get("intentResult") or run.get("intent_result"))
+
+
+def _persisted_runbook_reply_attachment(
+    issue: dict[str, Any],
+    filename: str,
+) -> dict[str, Any] | None:
+    """Find a generated runbook attachment persisted on a message or AI run."""
+    latest_run = _latest_runbook_ai_run(issue)
+    metadata = _record_from(latest_run.get("metadata"))
+    attachments = metadata.get("generatedAttachments")
+    if isinstance(attachments, list):
+        for raw_attachment in attachments:
+            attachment = _record_from(raw_attachment)
+            attachment_filename = _string_from(
+                attachment.get("filename")
+                or attachment.get("fileName")
+                or attachment.get("name")
+            )
+            if attachment_filename == filename:
+                return attachment
+    if _string_from(metadata.get("kind")) == "direct_channel_runbooks":
+        # Direct-message files live on that exact message's latest run. Never
+        # substitute an older pipeline message that reused the same filename.
+        return None
+    for message in reversed(issue.get("messages", [])):
+        if not isinstance(message, dict):
+            continue
+        if _string_from(message.get("direction")).lower() != "ai":
+            continue
+        attachments = message.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for raw_attachment in attachments:
+            attachment = _record_from(raw_attachment)
+            attachment_filename = _string_from(
+                attachment.get("filename")
+                or attachment.get("fileName")
+                or attachment.get("name")
+            )
+            if attachment_filename == filename:
+                return attachment
+    return None
+
+
+def _runbook_attachment_requires_persisted_file(
+    intent_result: dict[str, Any],
+    filename: str,
+) -> bool:
+    """Return whether the latest run declares a tool-generated attachment."""
+    concerns = intent_result.get("concerns")
+    if not isinstance(concerns, list):
+        return False
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        outcome = _record_from(concern.get("outcome"))
+        attachments = concern.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = outcome.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for raw_attachment in attachments:
+            attachment = _record_from(raw_attachment)
+            if _string_from(attachment.get("filename")) != filename:
+                continue
+            return (
+                _string_from(attachment.get("source")).lower() == "tool"
+                or _string_from(attachment.get("mode")).lower() == "generated"
+            )
+    return False
+
+
+def _resolve_runbook_reply_attachments(
+    issue: dict[str, Any],
+    filenames: tuple[str, ...],
+    *,
+    tenant_id: str | None,
+    project_id: str,
+) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+    """Resolve only attachment names owned by latest matched runbook concerns."""
+    if not filenames:
+        return [], ()
+
+    from automail.api.attachments import load_attachment_files
+    from automail.pipeline.drafts import get_live_source
+
+    intent_result = _latest_runbook_intent_result(issue)
+    source = get_live_source(project_id, tenant_id=tenant_id)
+    resolved: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+    for filename in filenames:
+        persisted = _persisted_runbook_reply_attachment(issue, filename)
+        if persisted:
+            resolved.append(persisted)
+            continue
+        if _runbook_attachment_requires_persisted_file(intent_result, filename):
+            # Never replace a missing tool-generated artifact with a same-name
+            # static runbook file.
+            unresolved.append(filename)
+            continue
+        response = SimpleNamespace(
+            response_attachments=[filename],
+            generated_attachments=[],
+            activated_intent=None,
+        )
+        try:
+            loaded = load_attachment_files(
+                response,
+                intents_dir=source,
+                intent_result=intent_result,
+                strict_intent_ownership=True,
+            )
+        except Exception:
+            logger.warning(
+                "Could not resolve runbook reply attachment %s",
+                filename,
+                exc_info=True,
+            )
+            unresolved.append(filename)
+            continue
+        if loaded:
+            resolved.extend(loaded)
+        else:
+            unresolved.append(filename)
+    return resolved, tuple(unresolved)
 
 
 class _AgentAnswerUsageSink:
@@ -10299,7 +10722,16 @@ def _create_issue_agent_answer(
         return None
     usage_sink = _AgentAnswerUsageSink(tenant_id=tenant_id, project_id=project_id)
     question = _clip(_string_from(question), 4_000)
-    clean_approval_required = bool(approval_required)
+    # A persisted ticket review gate is authoritative for every agent-answer
+    # entry point, including generic automation rules. Callers may request
+    # auto-send, but they cannot bypass a concern that requires human review.
+    issue_requires_human = _config_bool(
+        issue,
+        "requiresHuman",
+        "requires_human",
+        default=False,
+    )
+    clean_approval_required = bool(approval_required or issue_requires_human)
     requested_auto_send = bool(auto_send)
     clean_automation_context = _compact_metadata_context(automation_context)
     clean_revision_context = _compact_metadata_context(revision_context, default_source="reply_revision")
@@ -10371,6 +10803,8 @@ def _create_issue_agent_answer(
             articles=fallback_articles,
             **draft_kwargs,
         )
+    if draft.requires_human:
+        clean_approval_required = True
     answer = draft.answer
     confidence = draft.confidence
     articles: list[dict[str, Any]] = [] if use_knowledge_agent else fallback_articles
@@ -10460,6 +10894,21 @@ def _create_issue_agent_answer(
     should_create_reply = (create_draft or auto_send) and not (
         use_knowledge_agent and bool(draft.error)
     )
+    selected_response_attachments = tuple(draft.response_attachments)
+    resolved_reply_attachments: list[dict[str, Any]] = []
+    unresolved_response_attachments: tuple[str, ...] = ()
+    if should_create_reply and selected_response_attachments:
+        (
+            resolved_reply_attachments,
+            unresolved_response_attachments,
+        ) = _resolve_runbook_reply_attachments(
+            issue,
+            selected_response_attachments,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        if unresolved_response_attachments:
+            clean_approval_required = True
     citation_previews = [
         _agent_citation_preview(article, citation_evidence)
         for article in articles
@@ -10655,6 +11104,11 @@ def _create_issue_agent_answer(
             "autoSend": effective_auto_send,
             "autoSendRequested": requested_auto_send,
             "autoSendPolicy": auto_send_policy,
+            "responseAttachments": list(selected_response_attachments),
+            "unresolvedResponseAttachments": list(unresolved_response_attachments),
+            "coveredConcernIds": list(draft.covered_concern_ids),
+            "composerRequiresHuman": draft.requires_human,
+            "composerRequiresHumanReason": draft.requires_human_reason,
         }
         if auto_send_blocked_reason:
             reply_metadata["autoSendBlockedReason"] = auto_send_blocked_reason
@@ -10681,6 +11135,7 @@ def _create_issue_agent_answer(
                 status=reply_status,
                 source="agent_answer",
                 metadata=reply_metadata,
+                attachments=resolved_reply_attachments,
             )
         except ValueError as exc:
             if not effective_auto_send or str(exc) != AUTOMATIC_REPLY_TERMINAL_ERROR:
@@ -10710,6 +11165,7 @@ def _create_issue_agent_answer(
                 status=reply_status,
                 source="agent_answer",
                 metadata=reply_metadata,
+                attachments=resolved_reply_attachments,
             )
         if reply:
             persisted_reply_metadata = _parse(reply.get("metadata"), dict)
@@ -10757,6 +11213,8 @@ def _create_issue_agent_answer(
         grounding_error=grounding_error,
         grounding_gate=grounding_gate,
         token_usage=token_usage,
+        response_attachments=selected_response_attachments,
+        unresolved_response_attachments=unresolved_response_attachments,
     )
     usage_sink.bind(
         run_id=_string_from(run.get("id")),
@@ -10808,6 +11266,11 @@ def _create_issue_agent_answer(
         "autoSend": effective_auto_send,
         "autoSendRequested": requested_auto_send,
         "autoSendPolicy": auto_send_policy,
+        "responseAttachments": list(selected_response_attachments),
+        "unresolvedResponseAttachments": list(unresolved_response_attachments),
+        "coveredConcernIds": list(draft.covered_concern_ids),
+        "composerRequiresHuman": draft.requires_human,
+        "composerRequiresHumanReason": draft.requires_human_reason,
     }
     if knowledge_gap:
         event_metadata["knowledgeGapId"] = knowledge_gap["id"]
@@ -10864,6 +11327,11 @@ def _create_issue_agent_answer(
         "autoSendPolicy": auto_send_policy,
         "autoSendBlockedReason": auto_send_blocked_reason,
         "draftBlockedReason": draft_blocked_reason,
+        "responseAttachments": list(selected_response_attachments),
+        "unresolvedResponseAttachments": list(unresolved_response_attachments),
+        "coveredConcernIds": list(draft.covered_concern_ids),
+        "composerRequiresHuman": draft.requires_human,
+        "composerRequiresHumanReason": draft.requires_human_reason,
     }
 
 
@@ -11542,7 +12010,13 @@ def _compact_metadata_context(context: dict[str, Any] | None, *, default_source:
     return result
 
 
-def _automation_prepared_agent_reply(result: dict[str, Any] | None) -> bool:
+def _automation_created_customer_reply(result: dict[str, Any] | None) -> bool:
+    """Return whether an automation action persisted a customer reply.
+
+    ``replyId`` is the durable success proof. Both a static ``queue_reply`` and
+    an agent-generated ``prepare_agent_reply`` own the reply for this event, so
+    channel autopilot must not create a second draft afterward.
+    """
     if not isinstance(result, dict):
         return False
     items = result.get("items")
@@ -11560,8 +12034,8 @@ def _automation_prepared_agent_reply(result: dict[str, Any] | None) -> bool:
         for action in actions:
             if (
                 isinstance(action, dict)
-                and action.get("type") == "prepare_agent_reply"
-                and action.get("status") == "prepared"
+                and _string_from(action.get("type"))
+                in {"queue_reply", "prepare_agent_reply"}
                 and _string_from(action.get("replyId"))
             ):
                 return True
@@ -11580,7 +12054,7 @@ def _channel_auto_prepare_agent_reply(
     automation_result: dict[str, Any] | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if _automation_prepared_agent_reply(automation_result):
+    if _automation_created_customer_reply(automation_result):
         return None
     config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
     enabled = _config_bool(
@@ -11606,6 +12080,16 @@ def _channel_auto_prepare_agent_reply(
         "auto_send_agent_reply",
         default=False,
     )
+    # The persisted review gate only changes the automatic-send decision.
+    # Avoid an otherwise unnecessary database read for the normal draft path.
+    issue_requires_human = False
+    if agent_auto_send:
+        issue_record = _issue_by_id(
+            issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        ) or {}
+        issue_requires_human = bool(issue_record.get("requires_human"))
     try:
         automation_context = _compact_metadata_context(
             {
@@ -11670,7 +12154,13 @@ def _channel_auto_prepare_agent_reply(
                 "agent_include_feedback_link",
                 default=False,
             ),
-            approval_required=not agent_auto_send,
+            # One uncertain, unmatched, failed, or review-gated concern makes
+            # the combined customer reply review-only. Other concerns still
+            # process and remain useful in the draft.
+            approval_required=(
+                not agent_auto_send
+                or issue_requires_human
+            ),
             auto_send=agent_auto_send,
             automation_context=automation_context,
             use_knowledge_agent=False,
@@ -17224,7 +17714,7 @@ def _portal_auto_prepare_agent_reply(
     message_id: str,
     automation_result: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if _automation_prepared_agent_reply(automation_result):
+    if _automation_created_customer_reply(automation_result):
         return None
     question = "Draft an approval-ready response to the latest customer portal message from the ticket context and knowledge base."
     try:
@@ -17837,9 +18327,22 @@ def create_web_chat_session(
         body=_clip(clean_body, 240),
         metadata={"webChatSessionId": session_id, "messageId": message_id, "pageUrl": _string_from(page_url)},
     )
+    processed_issue = issue_data
+    if _string_from(initial_message):
+        processed_issue = _apply_direct_channel_runbooks(
+            issue=issue_data,
+            source="web_chat",
+            source_message_id=f"web-chat:{session_id}:{message_id}",
+            subject=_string_from(issue_data.get("subject")),
+            body=clean_body,
+            identity=identity,
+            identity_data=identity_data,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
     _ensure_issue_sla_events(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id)
     automation_result = _run_automation_rules_for_issue(
-        issue=issue_data,
+        issue=processed_issue,
         trigger="issue_created",
         tenant_id=tenant_id,
         project_id=project_id,
@@ -17861,7 +18364,7 @@ def create_web_chat_session(
         tenant_id=tenant_id,
         project_id=project_id,
     )
-    issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id) or _normalize_issue(issue_data)
+    issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id) or _normalize_issue(processed_issue)
     return {
         **session,
         "issue": issue,
@@ -18039,8 +18542,19 @@ def _create_web_chat_message_issue(
             "ticketCreationMode": "per_message",
         },
     )
-    automation_result = _run_automation_rules_for_issue(
+    processed_issue = _apply_direct_channel_runbooks(
         issue=rec,
+        source="web_chat",
+        source_message_id=f"web-chat:{session_id}:{message_id}",
+        subject=_string_from(issue_data.get("subject")),
+        body=body,
+        identity=identity,
+        identity_data=identity_data,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    automation_result = _run_automation_rules_for_issue(
+        issue=processed_issue,
         trigger="issue_created",
         tenant_id=tenant_id,
         project_id=project_id,
@@ -18067,7 +18581,7 @@ def _create_web_chat_message_issue(
         tenant_id=tenant_id,
         project_id=project_id,
     )
-    return message, rec
+    return message, processed_issue
 
 
 def create_web_chat_message(
@@ -18178,8 +18692,36 @@ def create_web_chat_message(
         project_id=project_id,
         metadata={"webChatSessionId": _string_from(session.get("id"))},
     )
-    automation_result = _run_message_update_automations(
+    visitor_email = sender_email or _string_from(session.get("visitor_email"))
+    visitor_name = sender_name or _string_from(session.get("visitor_name"))
+    visitor_id = _string_from(session.get("visitor_id"))
+    page_url = _string_from(session.get("page_url"))
+    identity = _web_chat_identity(
+        visitor_email=visitor_email,
+        visitor_name=visitor_name,
+        visitor_id=visitor_id,
+        session_key=session_key,
+    )
+    processed_issue = _apply_direct_channel_runbooks(
         issue={**issue, **issue_updates},
+        source="web_chat",
+        source_message_id=f"web-chat:{_string_from(session.get('id'))}:{message_id}",
+        subject=_string_from(issue.get("subject")) or _web_chat_subject(visitor_name, page_url),
+        body=clean_body,
+        identity=identity,
+        identity_data={
+            "provider": "web_chat",
+            "visitorId": visitor_id,
+            "visitorEmail": visitor_email,
+            "visitorName": visitor_name,
+            "pageUrl": page_url,
+            "sessionKey": session_key,
+        },
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    automation_result = _run_message_update_automations(
+        issue=processed_issue,
         tenant_id=tenant_id,
         project_id=project_id,
         actor_email="automation",
@@ -18686,10 +19228,21 @@ def ingest_slack_event(
             project_id=channel_project_id,
             metadata={"channelKey": _string_from(channel.get("channelKey")), "threadTs": thread_ts, **external_keys},
         )
+    processed_issue = _apply_direct_channel_runbooks(
+        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        source="slack",
+        source_message_id=source_message_id,
+        subject=_channel_subject(text, provider="Slack", channel_id=channel_id, thread_id=thread_ts),
+        body=text,
+        identity=identity,
+        identity_data=identity_data,
+        tenant_id=channel_tenant_id,
+        project_id=channel_project_id,
+    )
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=channel_tenant_id, project_id=channel_project_id)
         automation_result = _run_automation_rules_for_issue(
-            issue=issue_data,
+            issue=processed_issue,
             trigger="issue_created",
             tenant_id=channel_tenant_id,
             project_id=channel_project_id,
@@ -18708,7 +19261,7 @@ def ingest_slack_event(
         )
     else:
         automation_result = _run_message_update_automations(
-            issue={**existing_issue, **issue_updates},
+            issue=processed_issue,
             tenant_id=channel_tenant_id,
             project_id=channel_project_id,
             actor_email="automation",
@@ -18729,7 +19282,7 @@ def ingest_slack_event(
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,
-        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        issue=processed_issue,
         body=text,
         tenant_id=channel_tenant_id,
         project_id=channel_project_id,
@@ -19125,10 +19678,21 @@ def ingest_teams_event(
             project_id=channel_project_id,
             metadata={"channelKey": _string_from(channel.get("channelKey")), "threadId": thread_id, **external_keys},
         )
+    processed_issue = _apply_direct_channel_runbooks(
+        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        source="teams",
+        source_message_id=source_message_id,
+        subject=_channel_subject(text, provider="Teams", channel_id=channel_id, thread_id=thread_id),
+        body=text,
+        identity=identity,
+        identity_data=identity_data,
+        tenant_id=channel_tenant_id,
+        project_id=channel_project_id,
+    )
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=channel_tenant_id, project_id=channel_project_id)
         automation_result = _run_automation_rules_for_issue(
-            issue=issue_data,
+            issue=processed_issue,
             trigger="issue_created",
             tenant_id=channel_tenant_id,
             project_id=channel_project_id,
@@ -19147,7 +19711,7 @@ def ingest_teams_event(
         )
     else:
         automation_result = _run_message_update_automations(
-            issue={**existing_issue, **issue_updates},
+            issue=processed_issue,
             tenant_id=channel_tenant_id,
             project_id=channel_project_id,
             actor_email="automation",
@@ -19168,7 +19732,7 @@ def ingest_teams_event(
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,
-        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        issue=processed_issue,
         body=text,
         tenant_id=channel_tenant_id,
         project_id=channel_project_id,
@@ -19519,6 +20083,7 @@ def _execute_automation_actions(
     rule: dict[str, Any] | None = None,
     trigger: str = "",
     context: dict[str, Any] | None = None,
+    customer_reply_claimed: bool = False,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     issue_id = _string_from(issue.get("id"))
@@ -19526,6 +20091,28 @@ def _execute_automation_actions(
         if not isinstance(action, dict):
             continue
         action_type = _string_from(action.get("type"))
+        creates_customer_reply = action_type == "queue_reply" or (
+            action_type in {"prepare_agent_reply", "ask_agent", "agent_answer"}
+            and bool(
+                action.get("createDraft", action.get("create_draft", True))
+                or action.get("autoSend")
+                or action.get("auto_send")
+            )
+        )
+        if customer_reply_claimed and creates_customer_reply:
+            results.append(
+                {
+                    "type": (
+                        "prepare_agent_reply"
+                        if action_type in {"ask_agent", "agent_answer"}
+                        else action_type
+                    ),
+                    "status": "skipped",
+                    "replyId": "",
+                    "reason": "customer_reply_already_created",
+                }
+            )
+            continue
         action_context = _automation_reply_context(
             rule=rule,
             action=action,
@@ -19591,13 +20178,21 @@ def _execute_automation_actions(
             results.append({"type": action_type, "noteId": note.get("id", "") if note else ""})
         elif action_type == "queue_reply":
             body = _automation_action_value(action, "body")
-            approval_required = _config_bool(
-                action,
-                "approvalRequired",
-                "approval_required",
-                "requiresApproval",
-                "requires_approval",
-                default=True,
+            approval_required = bool(
+                _config_bool(
+                    issue,
+                    "requiresHuman",
+                    "requires_human",
+                    default=False,
+                )
+                or _config_bool(
+                    action,
+                    "approvalRequired",
+                    "approval_required",
+                    "requiresApproval",
+                    "requires_approval",
+                    default=True,
+                )
             )
             include_feedback_link = _config_bool(
                 action,
@@ -19862,7 +20457,18 @@ def _execute_automation_actions(
                     "automationContext": automation_context,
                 }
             )
+        if results and _string_from(results[-1].get("replyId")):
+            customer_reply_claimed = True
     return results
+
+
+def _automation_action_results_created_customer_reply(results: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(result, dict)
+        and _string_from(result.get("replyId"))
+        and _string_from(result.get("type")) in {"queue_reply", "prepare_agent_reply"}
+        for result in results
+    )
 
 
 def _automation_action_preview(action: dict[str, Any]) -> dict[str, Any]:
@@ -20219,6 +20825,7 @@ def _run_automation_rules_for_issue(
         per_page=200,
     )
     runs: list[dict[str, Any]] = []
+    customer_reply_claimed = False
     for rule in rules:
         rule_trigger = _string_from(rule.get("trigger")) or "issue_created"
         if rule_trigger not in {trigger, "any_issue_event"}:
@@ -20237,7 +20844,10 @@ def _run_automation_rules_for_issue(
                 rule=rule,
                 trigger=trigger,
                 context=context,
+                customer_reply_claimed=customer_reply_claimed,
             )
+            if _automation_action_results_created_customer_reply(action_results):
+                customer_reply_claimed = True
             _patch(
                 f"/api/collections/support_automation_rules/records/{rule['id']}",
                 {"last_run_at": _now_iso()},
@@ -22553,10 +23163,21 @@ def _ingest_generic_channel_message_event(
                 **external_keys,
             },
         )
+    processed_issue = _apply_direct_channel_runbooks(
+        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        source=provider_key,
+        source_message_id=source_message_id,
+        subject=_channel_subject(body, provider=provider.title(), channel_id=channel_id, thread_id=thread_id),
+        body=body,
+        identity=identity,
+        identity_data=identity_data,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id)
         automation_result = _run_automation_rules_for_issue(
-            issue=issue_data,
+            issue=processed_issue,
             trigger="issue_created",
             tenant_id=tenant_id,
             project_id=project_id,
@@ -22580,7 +23201,7 @@ def _ingest_generic_channel_message_event(
         )
     else:
         automation_result = _run_message_update_automations(
-            issue={**existing_issue, **issue_updates},
+            issue=processed_issue,
             tenant_id=tenant_id,
             project_id=project_id,
             actor_email="automation",
@@ -22607,7 +23228,7 @@ def _ingest_generic_channel_message_event(
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,
-        issue={**(existing_issue if existing_issue else issue_data), **issue_updates, "id": issue_id},
+        issue=processed_issue,
         body=body,
         tenant_id=tenant_id,
         project_id=project_id,

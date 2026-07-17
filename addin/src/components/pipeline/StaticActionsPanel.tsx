@@ -1,12 +1,57 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Sparkles } from "lucide-react";
 import { IdentityPanel } from "@/components/pipeline/IdentityPanel";
 import { IntentPanel } from "@/components/pipeline/IntentPanel";
 import { ActionWidget } from "@/components/pipeline/ActionButton";
-import type { IdentityResult, IntentResult } from "@/models/email";
+import type { IdentityResult, IntentAction, IntentResult } from "@/models/email";
 import { t } from "@/lib/i18n";
+
+interface ScopedIntentAction {
+    key: string;
+    action: IntentAction;
+}
+
+interface IntentActionGroup {
+    key: string;
+    label?: string;
+    actions: ScopedIntentAction[];
+}
+
+const buildActionGroups = (intentResult?: IntentResult): IntentActionGroup[] => {
+    const concernGroups = (intentResult?.concerns ?? []).flatMap((concern, concernIndex) => {
+        if (concern.actions.length === 0) return [];
+
+        const concernKey = concern.concernId.trim() || `concern-${concernIndex + 1}`;
+        return [{
+            key: concernKey,
+            label: concern.intentName?.trim() || concern.concernSummary?.trim() || concernKey,
+            actions: concern.actions.map((action, actionIndex) => ({
+                key: `${concernKey}:${action.name}:${actionIndex}`,
+                action,
+            })),
+        }];
+    });
+
+    if (concernGroups.length > 0) return concernGroups;
+
+    const legacyActions = intentResult?.actions ?? [];
+    if (legacyActions.length === 0) return [];
+    return [{
+        key: "legacy",
+        actions: legacyActions.map((action, actionIndex) => ({
+            key: `legacy:${action.name}:${actionIndex}`,
+            action,
+        })),
+    }];
+};
+
+const initialActionValues = (groups: IntentActionGroup[]): Record<string, string> => Object.fromEntries(
+    groups.flatMap(group => group.actions)
+        .filter(({ action }) => (action.type ?? 'button') !== 'button')
+        .map(({ key, action }) => [key, action.initialValue ?? '']),
+);
 
 interface StaticActionsPanelProps {
     identityResult?: IdentityResult;
@@ -14,6 +59,7 @@ interface StaticActionsPanelProps {
     chatId: string;
     projectId?: string | null;
     responseRevealed: boolean;
+    hasComposedResponse?: boolean;
     onRevealResponse: () => void;
 }
 
@@ -23,24 +69,25 @@ export const StaticActionsPanel = ({
     chatId,
     projectId,
     responseRevealed,
+    hasComposedResponse = false,
     onRevealResponse,
 }: StaticActionsPanelProps) => {
+    const actionGroups = useMemo(() => buildActionGroups(intentResult), [intentResult]);
+
     // Action widget values (dropdowns, inputs, calendars) — owned here, passed to buttons as siblingValues
     const [actionValues, setActionValues] = useState<Record<string, string>>(
-        () => Object.fromEntries(
-            (intentResult?.actions ?? [])
-                .filter(a => (a.type ?? 'button') !== 'button')
-                .map(a => [a.name, a.initialValue ?? ''])
-        )
+        () => initialActionValues(actionGroups),
     );
+
+    useEffect(() => {
+        setActionValues(initialActionValues(actionGroups));
+    }, [actionGroups]);
+
     const handleActionChange = useCallback(
-        (name: string, val: string) => setActionValues(v => ({ ...v, [name]: val })),
+        (key: string, val: string) => setActionValues(v => ({ ...v, [key]: val })),
         [],
     );
 
-    const actions = intentResult?.actions ?? [];
-    const inputActions = actions.filter(a => (a.type ?? 'button') !== 'button');
-    const buttonActions = actions.filter(a => (a.type ?? 'button') === 'button');
     const responseEnabled = intentResult?.response?.enabled ?? false;
     const hasIdentityResult =
         !!identityResult &&
@@ -51,9 +98,8 @@ export const StaticActionsPanel = ({
             (identityResult.toolCallsMade ?? []).length > 0
         );
     const hasIntentControls =
-        inputActions.length > 0 ||
-        buttonActions.length > 0 ||
-        (responseEnabled && !responseRevealed);
+        actionGroups.length > 0 ||
+        (responseEnabled && !responseRevealed && !hasComposedResponse);
 
     return (
         <div className="bg-gray-50">
@@ -68,29 +114,50 @@ export const StaticActionsPanel = ({
                                 </CardTitle>
                             </CardHeader>
                             <CardContent className="space-y-2 px-0">
-                            {inputActions.map(action => (
-                                <ActionWidget
-                                    key={action.name}
-                                    action={action}
-                                    chatId={chatId}
-                                    projectId={projectId}
-                                    value={actionValues[action.name] ?? ''}
-                                    onChange={val => handleActionChange(action.name, val)}
-                                    siblingValues={actionValues}
-                                />
-                            ))}
-                            {buttonActions.map(action => (
-                                <ActionWidget
-                                    key={action.name}
-                                    action={action}
-                                    chatId={chatId}
-                                    projectId={projectId}
-                                    value=""
-                                    onChange={() => {}}
-                                    siblingValues={actionValues}
-                                />
-                            ))}
-                            {responseEnabled && !responseRevealed && (
+                            {actionGroups.map(group => {
+                                const inputActions = group.actions.filter(
+                                    ({ action }) => (action.type ?? 'button') !== 'button',
+                                );
+                                const buttonActions = group.actions.filter(
+                                    ({ action }) => (action.type ?? 'button') === 'button',
+                                );
+                                const siblingValues = Object.fromEntries(
+                                    inputActions.map(({ key, action }) => [action.name, actionValues[key] ?? '']),
+                                );
+
+                                return (
+                                    <div key={group.key} className="space-y-2">
+                                        {group.label && (
+                                            <p className="text-[11px] font-medium text-muted-foreground">
+                                                {group.label}
+                                            </p>
+                                        )}
+                                        {inputActions.map(({ key, action }) => (
+                                            <ActionWidget
+                                                key={key}
+                                                action={action}
+                                                chatId={chatId}
+                                                projectId={projectId}
+                                                value={actionValues[key] ?? ''}
+                                                onChange={val => handleActionChange(key, val)}
+                                                siblingValues={siblingValues}
+                                            />
+                                        ))}
+                                        {buttonActions.map(({ key, action }) => (
+                                            <ActionWidget
+                                                key={key}
+                                                action={action}
+                                                chatId={chatId}
+                                                projectId={projectId}
+                                                value=""
+                                                onChange={() => {}}
+                                                siblingValues={siblingValues}
+                                            />
+                                        ))}
+                                    </div>
+                                );
+                            })}
+                            {responseEnabled && !responseRevealed && !hasComposedResponse && (
                                 <Button variant="outline" size="sm" onClick={onRevealResponse} className="w-full">
                                     <Sparkles className="size-3.5 mr-1" />
                                     {t('pipeline.generateResponse')}

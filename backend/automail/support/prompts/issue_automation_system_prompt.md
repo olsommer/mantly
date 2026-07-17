@@ -7,6 +7,7 @@ Rules:
 - Treat related conversation history as context, not as one merged customer request.
 - When `ticket.concerns` is present, cover every concern exactly once in one coherent customer answer. A concern may be answered, described as pending, or called out with the smallest missing detail. Never silently omit an unmatched or blocked concern.
 - Never concatenate separate runbook drafts. Synthesize one greeting, one ordered body, and one sign-off.
+- Write the entire customer-facing answer in the supplied Required Reply Language. This is derived from the latest customer text; never infer language from a name, email address, country, or account profile.
 - Use account context to prioritize next steps, but never expose internal health or risk labels unless the customer already stated them.
 - If knowledge is missing, state what is known, ask for the smallest needed detail, and never invent policy or product behavior.
 - Cite only exact article IDs from the supplied reviewed knowledge that directly support the answer.

@@ -45,6 +45,7 @@ GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
 _AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
+LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
@@ -332,6 +333,232 @@ def _automatic_message_context(messages: list[dict[str, Any]], limit: int = 8) -
     return _message_context(customer_messages, limit=limit)
 
 
+_LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
+    "en": {
+        "hello": 4,
+        "please": 3,
+        "thanks": 3,
+        "thank": 3,
+        "where": 2,
+        "when": 2,
+        "what": 2,
+        "tell": 2,
+        "help": 2,
+        "current": 2,
+        "estimated": 2,
+        "order": 2,
+        "delivery": 2,
+        "shipment": 2,
+        "refund": 2,
+        "cancel": 2,
+        "request": 2,
+        "pending": 2,
+        "review": 2,
+        "received": 2,
+        "we": 1,
+        "have": 1,
+        "the": 1,
+        "and": 1,
+        "your": 1,
+        "my": 1,
+        "is": 1,
+        "are": 1,
+        "with": 1,
+    },
+    "fr": {
+        "bonjour": 4,
+        "merci": 4,
+        "colis": 3,
+        "commande": 3,
+        "livraison": 3,
+        "remboursement": 3,
+        "annuler": 3,
+        "retard": 3,
+        "suivi": 3,
+        "pouvez": 2,
+        "pourriez": 2,
+        "souhaite": 2,
+        "aide": 2,
+        "réponse": 2,
+        "question": 2,
+        "quel": 2,
+        "quelle": 2,
+        "où": 2,
+        "quand": 2,
+        "vous": 1,
+        "votre": 1,
+        "mon": 1,
+        "ma": 1,
+        "mes": 1,
+        "est": 1,
+        "pour": 1,
+        "avec": 1,
+        "nous": 2,
+        "demande": 3,
+        "examinons": 3,
+        "reçu": 2,
+        "reçue": 2,
+        "cours": 2,
+        "sera": 1,
+    },
+    "de": {
+        "hallo": 4,
+        "danke": 4,
+        "bitte": 3,
+        "bestellung": 3,
+        "lieferung": 3,
+        "paket": 3,
+        "verspätet": 3,
+        "stornieren": 3,
+        "kündigen": 3,
+        "rückerstattung": 3,
+        "sendungsverfolgung": 3,
+        "wissen": 2,
+        "sagen": 2,
+        "helfen": 2,
+        "wann": 2,
+        "warum": 2,
+        "wo": 2,
+        "wie": 2,
+        "mein": 1,
+        "meine": 1,
+        "meiner": 1,
+        "ihre": 1,
+        "ist": 1,
+        "sind": 1,
+        "und": 1,
+        "nicht": 1,
+        "mir": 1,
+        "wir": 2,
+        "haben": 2,
+        "anfrage": 3,
+        "erhalten": 2,
+        "prüfen": 3,
+    },
+    "es": {
+        "hola": 4,
+        "gracias": 4,
+        "necesito": 4,
+        "pedido": 3,
+        "envío": 3,
+        "entrega": 3,
+        "reembolso": 3,
+        "cancelar": 3,
+        "seguimiento": 3,
+        "ayuda": 3,
+        "quisiera": 2,
+        "saber": 2,
+        "dónde": 2,
+        "cuando": 2,
+        "cuándo": 2,
+        "qué": 2,
+        "respuesta": 2,
+        "pregunta": 2,
+        "favor": 1,
+        "con": 1,
+        "mi": 1,
+        "está": 1,
+        "por": 1,
+        "su": 1,
+        "solicitud": 3,
+        "estamos": 2,
+        "revisando": 3,
+        "pendiente": 2,
+        "hemos": 2,
+        "recibido": 2,
+        "será": 1,
+    },
+    "it": {
+        "ciao": 4,
+        "grazie": 4,
+        "vorrei": 4,
+        "ordine": 3,
+        "consegna": 3,
+        "spedizione": 3,
+        "rimborso": 3,
+        "annullare": 3,
+        "pacco": 3,
+        "ritardo": 3,
+        "sapere": 2,
+        "aiuto": 2,
+        "bisogno": 2,
+        "dove": 2,
+        "quando": 2,
+        "risposta": 2,
+        "domanda": 2,
+        "stato": 2,
+        "favore": 1,
+        "mio": 1,
+        "mia": 1,
+        "del": 1,
+        "della": 1,
+        "con": 1,
+        "per": 1,
+        "richiesta": 3,
+        "sospeso": 2,
+        "sospesa": 2,
+        "stiamo": 2,
+        "esaminando": 3,
+        "abbiamo": 2,
+        "ricevuto": 2,
+        "ricevuta": 2,
+        "sarà": 1,
+    },
+}
+_LANGUAGE_PHRASE_WEIGHTS: dict[str, dict[str, int]] = {
+    "en": {"thank you": 4},
+    "fr": {"s il vous plaît": 5},
+    "de": {"vielen dank": 5},
+    "es": {"por favor": 4},
+    "it": {"per favore": 4},
+}
+_LANGUAGE_CHARACTER_WEIGHTS: dict[str, dict[str, int]] = {
+    "fr": {"ç": 3, "œ": 3, "ê": 2, "î": 2, "û": 2},
+    "de": {"ß": 4, "ä": 3, "ö": 3, "ü": 3},
+    "es": {"¿": 4, "¡": 4, "ñ": 4, "á": 1, "í": 1, "ó": 1, "ú": 1},
+    "it": {"ì": 3, "ò": 3},
+}
+_LANGUAGE_NAMES = {
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+}
+
+
+def _detected_supported_language(*values: str) -> str:
+    clean = "\n".join(value for value in values if value).casefold()
+    words = re.findall(r"[^\W\d_]+", clean, flags=re.UNICODE)
+    word_counts: dict[str, int] = {}
+    for word in words:
+        word_counts[word] = word_counts.get(word, 0) + 1
+    normalized_text = " ".join(words)
+    scores: dict[str, int] = {}
+    for language, word_weights in _LANGUAGE_WORD_WEIGHTS.items():
+        score = sum(
+            weight * min(word_counts.get(word, 0), 2)
+            for word, weight in word_weights.items()
+        )
+        score += sum(
+            weight
+            for phrase, weight in _LANGUAGE_PHRASE_WEIGHTS.get(language, {}).items()
+            if phrase in normalized_text
+        )
+        score += sum(
+            weight
+            for character, weight in _LANGUAGE_CHARACTER_WEIGHTS.get(language, {}).items()
+            if character in clean
+        )
+        scores[language] = score
+    return max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
+
+
+def _latest_customer_language(messages: list[dict[str, Any]]) -> str:
+    context = _automatic_message_context(messages, limit=1)
+    return _detected_supported_language(context[-1]["body"] if context else "")
+
+
 def _knowledge_failure_answer(
     question: str,
     messages: list[dict[str, Any]] | None = None,
@@ -342,19 +569,7 @@ def _knowledge_failure_answer(
         if message_body:
             language_parts.append(message_body[:1_000])
             break
-    clean = "\n".join(language_parts).casefold()
-    language_markers = {
-        "fr": ("é", "è", "ê", "à", "ç", " vous ", " pour ", " réponse", " question", " indiquez", " dites"),
-        "de": ("ä", "ö", "ü", "ß", " bitte ", " antwort", " frage", " nicht ", " wissen", " sagen"),
-        "es": ("¿", "¡", "ñ", " respuesta", " pregunta", " por favor", " indique", " dígame"),
-        "it": (" risposta", " domanda", " per favore", " dica", " conoscenza"),
-    }
-    padded = f" {clean} "
-    scores = {
-        language: sum(marker in padded for marker in markers)
-        for language, markers in language_markers.items()
-    }
-    language = max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
+    language = _detected_supported_language(*language_parts)
     return {
         "de": (
             "Die Wissensrecherche konnte nicht abgeschlossen werden. Es wurde keine belegte Antwort erstellt. "
@@ -1375,11 +1590,15 @@ def draft_issue_automation_answer(
         config = resolve_effective_config(read_config(), tenant_id, project_id)
         llm = create_llm(config, timeout=45, max_retries=0, temperature=0.2)
         usage_context = getattr(llm, "_mantly_usage_context", None)
+        reply_language = _latest_customer_language(messages)
+        reply_language_name = _LANGUAGE_NAMES[reply_language]
+        ticket_context = _automatic_ticket_context(issue)
         user_prompt = _AUTOMATION_USER_TEMPLATE.format(
-            ticket=_json(_automatic_ticket_context(issue)),
+            ticket=_json(ticket_context),
             account_intelligence=_json(_record_from(account_context)),
             conversation_context=_json(_automatic_conversation_context(conversation_context)),
             messages=_json(_automatic_message_context(messages)),
+            reply_language=reply_language_name,
             knowledge_articles=_json(_article_context(articles)),
             prior_agent_answers=_json(_agent_chat_context(prior_agent_runs)),
             question=(question.strip() or "Prepare the best support answer and next step.")[:4_000],
@@ -1411,6 +1630,35 @@ def draft_issue_automation_answer(
                     config=invoke_config,
                 )
                 record_usage_from_result(response, usage_context)
+                structured = response.get("structured_response") if isinstance(response, dict) else None
+                first_answer = _string_from(getattr(structured, "answer", ""))
+                correction_reasons: list[str] = []
+                if first_answer and _detected_supported_language(first_answer) != reply_language:
+                    correction_reasons.append(
+                        f"Rewrite the entire answer in {reply_language_name}."
+                    )
+                pending_action_check = check_pending_action_claims(
+                    answer=first_answer,
+                    runbook_actions=ticket_context.get("runbookActions", []),
+                )
+                if pending_action_check.blocked:
+                    correction_reasons.append(
+                        "Remove every statement that says or promises a pending business action "
+                        "has started, completed, or will definitely occur. Describe it only as "
+                        "pending approval or conditional on review."
+                    )
+                if correction_reasons:
+                    correction_prompt = (
+                        f"{user_prompt}\n\n"
+                        "## Correction Required\n"
+                        + " ".join(correction_reasons)
+                        + " Preserve the same evidence and coverage boundaries."
+                    )
+                    response = agent.invoke(
+                        {"messages": [{"role": "user", "content": correction_prompt}]},
+                        config=invoke_config,
+                    )
+                    record_usage_from_result(response, usage_context)
             return response
 
         parent_usage_collector = current_collector()
@@ -1437,6 +1685,10 @@ def draft_issue_automation_answer(
         answer = _clean_answer(structured.answer)
         if not answer:
             raise ValueError("Issue automation returned an empty answer")
+        if _detected_supported_language(answer) != reply_language:
+            raise ValueError(
+                f"Automatic answer language mismatch: expected {reply_language_name}"
+            )
         available_ids = {_string_from(article.get("id")) for article in articles if _string_from(article.get("id"))}
         citation_ids = tuple(
             dict.fromkeys(
@@ -1627,6 +1879,24 @@ def assess_issue_automation_grounding(
         )
     )
     ticket_evidence = _automatic_ticket_context(issue)
+    expected_language = _latest_customer_language(messages)
+    detected_answer_language = _detected_supported_language(answer)
+    if expected_language != detected_answer_language:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=LANGUAGE_MISMATCH_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            error=(
+                f"Answer language {_LANGUAGE_NAMES[detected_answer_language]} does not match "
+                f"latest customer language {_LANGUAGE_NAMES[expected_language]}"
+            ),
+        )
     pending_action_check = check_pending_action_claims(
         answer=answer,
         runbook_actions=ticket_evidence.get("runbookActions", []),

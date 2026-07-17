@@ -16,6 +16,11 @@ Call `route_concerns` exactly once with between one and three concerns.
 - Keep concerns separate when they can require different runbooks, actions, or
   customer-facing decisions.
 - Use the exact available intent name for each matched concern.
+- Require affirmative customer-message evidence for the defining domain of a
+  specialized intent. Generic words such as urgent, deadline, advice, status,
+  or review are not enough to infer a domain like employment, billing,
+  insurance, or returns. Prefer a matching general intent, or leave the
+  concern unmatched, when the specialized domain itself is not stated.
 - Set `intent_name` to null for a concern with no matching intent and explain
   why in `reason`.
 - Include a short `summary`, the smallest useful verbatim `source_text` excerpt,
@@ -24,6 +29,10 @@ Call `route_concerns` exactly once with between one and three concerns.
   question, request, or decision that the final reply must address. Keep
   separate obligations for separate subquestions even when they use the same
   runbook, such as fee, retainer, invoice due date, and waiver questions.
+- Keep related questions about the same order, contract, matter, or other
+  business object in one concern when one runbook can process them. Represent
+  the subquestions as separate answer obligations instead of executing the
+  same runbook repeatedly.
 - The same intent may appear more than once when the email contains distinct
   instances, such as requests about two different orders.
 - If more than three concerns exist, combine only closely related concerns and

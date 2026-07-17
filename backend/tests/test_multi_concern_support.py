@@ -38,6 +38,64 @@ def test_runbook_actions_remain_scoped_to_concern_instances():
     assert proposals[1]["payload"]["concernId"] == "buy-product"
 
 
+def test_same_runbook_open_ticket_actions_merge_into_one_approval():
+    first = _action("open_ticket")
+    first["initialValue"] = "Verify the return address and authorization."
+    second = _action("open_ticket")
+    second["initialValue"] = "Confirm who controls the refund timing."
+    intent_result = {
+        "concerns": [
+            {
+                "concernId": "return-logistics",
+                "intentName": "warehouse-exception",
+                "outcome": {"actions": [first]},
+            },
+            {
+                "concernId": "refund-timing",
+                "intentName": "warehouse-exception",
+                "outcome": {"actions": [second]},
+            },
+        ]
+    }
+
+    proposals = issues._runbook_action_proposals(intent_result)
+
+    assert len(proposals) == 1
+    assert proposals[0]["concernId"] == "return-logistics"
+    assert proposals[0]["concernIds"] == ["return-logistics", "refund-timing"]
+    assert proposals[0]["payload"]["concernIds"] == ["return-logistics", "refund-timing"]
+    assert proposals[0]["payload"]["open_ticket"] == (
+        "Verify the return address and authorization.\n\n"
+        "Confirm who controls the refund timing."
+    )
+
+
+def test_same_runbook_open_ticket_actions_keep_distinct_business_payloads():
+    first = _action("open_ticket")
+    first["payload"] = {"orderId": "ORDER-1"}
+    second = _action("open_ticket")
+    second["payload"] = {"orderId": "ORDER-2"}
+    intent_result = {
+        "concerns": [
+            {
+                "concernId": "first-order",
+                "intentName": "warehouse-exception",
+                "outcome": {"actions": [first]},
+            },
+            {
+                "concernId": "second-order",
+                "intentName": "warehouse-exception",
+                "outcome": {"actions": [second]},
+            },
+        ]
+    }
+
+    proposals = issues._runbook_action_proposals(intent_result)
+
+    assert len(proposals) == 2
+    assert [item["payload"]["orderId"] for item in proposals] == ["ORDER-1", "ORDER-2"]
+
+
 def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
     issue = {
         "id": "issue1",

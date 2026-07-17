@@ -441,6 +441,36 @@ def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch
     assert result.pending_actions == ("Open delivery investigation",)
 
 
+def test_grounding_preflight_blocks_wrong_reply_language_without_llm(monkeypatch):
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue={"id": "issue1", "subject": "Status for ZF-10482"},
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Please tell me the current shipment status and estimated delivery window.",
+            }
+        ],
+        answer=(
+            "Hallo Lena, Ihre Bestellung ist unterwegs. Die voraussichtliche "
+            "Zustellung erfolgt am nächsten Werktag."
+        ),
+        articles=[],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "language_mismatch"
+    assert "German" in result.error
+    assert "English" in result.error
+
+
 def test_channel_autopilot_auto_send_uses_grounder_derived_citation(monkeypatch):
     reply_calls, grounding_calls = _stub_channel_agent_answer(monkeypatch, verified=True)
 

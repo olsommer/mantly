@@ -66,6 +66,9 @@ SUPPORT_MIGRATIONS: tuple[str, ...] = (
     "56_support_agent_messages.js",
     "57_support_delivery_claims.js",
     "58_intent_learning_proposals.js",
+    "59_support_outbound_idempotency.js",
+    "60_llm_usage_duration.js",
+    "61_email_processing_claims.js",
 )
 
 

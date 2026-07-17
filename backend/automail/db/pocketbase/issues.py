@@ -157,6 +157,7 @@ SMOKE_TARGET_PLACEHOLDERS = {
     "smxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 }
 SUPPORT_SCHEMA_REQUIRED_COLLECTIONS = (
+    "email_processing_claims",
     "support_accounts",
     "support_contacts",
     "support_issues",
@@ -197,6 +198,7 @@ SUPPORT_SCHEMA_REQUIRED_COLLECTIONS = (
     "support_account_insights",
 )
 SUPPORT_SCHEMA_COLLECTION_METADATA = {
+    "email_processing_claims": {"area": "inbound", "migration": "61_email_processing_claims.js"},
     "support_issues": {"area": "ticket spine", "migration": "25_support_issues.js"},
     "support_accounts": {"area": "accounts", "migration": "26_support_accounts_contacts_messages.js"},
     "support_contacts": {"area": "accounts", "migration": "26_support_accounts_contacts_messages.js"},
@@ -1347,7 +1349,83 @@ def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict
                     "runbook": group["runbook"],
                 }
             )
-    return proposals
+    merged: list[dict[str, Any]] = []
+    open_ticket_indexes: dict[tuple[str, ...], int] = {}
+    for proposal in proposals:
+        if _string_from(proposal.get("name")).lower().replace("-", "_") != "open_ticket":
+            merged.append(proposal)
+            continue
+        proposal_payload = _record_from(proposal.get("payload"))
+        action_name = _string_from(proposal.get("name"))
+        action_payload_keys = {
+            action_name,
+            action_name.lower().replace("-", "_"),
+        }
+        static_payload = {
+            key: value
+            for key, value in proposal_payload.items()
+            if key not in {
+                *action_payload_keys,
+                "actionLabel",
+                "actionName",
+                "concernId",
+                "concernIds",
+                "runbook",
+            }
+        }
+        merge_key = (
+            _string_from(proposal.get("runbook")),
+            _string_from(proposal.get("webhook")),
+            _string_from(proposal.get("method")),
+            _string_from(proposal.get("actionType")),
+            json.dumps(static_payload, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(_record_from(proposal.get("query")), ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(_record_from(proposal.get("body")), ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(_record_from(proposal.get("headers")), ensure_ascii=False, sort_keys=True, default=str),
+        )
+        existing_index = open_ticket_indexes.get(merge_key)
+        if existing_index is None:
+            open_ticket_indexes[merge_key] = len(merged)
+            merged.append(proposal)
+            continue
+
+        existing = merged[existing_index]
+        concern_ids = list(
+            dict.fromkeys(
+                [
+                    *(_parse(existing.get("concernIds"), list) or []),
+                    _string_from(existing.get("concernId")),
+                    _string_from(proposal.get("concernId")),
+                ]
+            )
+        )
+        concern_ids = [_string_from(value) for value in concern_ids if _string_from(value)]
+        existing["concernIds"] = concern_ids
+        existing_payload = _record_from(existing.get("payload"))
+        incoming_payload = _record_from(proposal.get("payload"))
+        action_name = _string_from(existing.get("name"))
+        action_payload_key = action_name.lower().replace("-", "_")
+        tasks = list(
+            dict.fromkeys(
+                value
+                for value in (
+                    _string_from(
+                        existing_payload.get(action_name)
+                        or existing_payload.get(action_payload_key)
+                    ),
+                    _string_from(
+                        incoming_payload.get(action_name)
+                        or incoming_payload.get(action_payload_key)
+                    ),
+                )
+                if value
+            )
+        )
+        if tasks:
+            existing_payload[action_payload_key] = "\n\n".join(tasks)[:4_000]
+        existing_payload["concernIds"] = concern_ids
+        existing["payload"] = existing_payload
+    return merged
 
 
 def _prepare_runbook_action_approvals(
@@ -1418,6 +1496,7 @@ def _prepare_runbook_action_approvals(
                 "reviewStatus": "pending",
                 "sourceMessageId": source_message_id,
                 "concernId": concern_id,
+                "concernIds": _parse(proposed_action.get("concernIds"), list),
                 "runbook": runbook,
                 "runbookAction": _string_from(proposed_action.get("name")),
                 "proposedAction": proposed_action,
@@ -2402,6 +2481,19 @@ def _message_attachments(
     return []
 
 
+def _persist_support_message(message: dict[str, Any]) -> bool:
+    """Ignore generated placeholders that carry neither reply text nor files."""
+    user = _string_from(message.get("user")).strip().lower()
+    role = _string_from(message.get("role")).strip().lower()
+    if user not in {"ai", "response"} and role not in {"ai", "response"}:
+        return True
+    content = message.get("content")
+    return bool(
+        _content_body(content).strip()
+        or _message_attachments(content, user=user, role=role)
+    )
+
+
 def _upsert_messages(
     *,
     issue_id: str,
@@ -2419,6 +2511,8 @@ def _upsert_messages(
     extra_metadata = dict(email_metadata or {})
     inbound_attachments = _parse(extra_metadata.pop("attachments", []), list)
     for index, message in enumerate(messages):
+        if not _persist_support_message(message):
+            continue
         user = _string_from(message.get("user"))
         role = _string_from(message.get("role"))
         source_message_id = f"{email_id}:{index}:{user or role or 'message'}"
@@ -6934,6 +7028,7 @@ def upsert_issue_from_chat(
         return None
 
     messages = _parse(chat.get("messages"), list)
+    persisted_message_count = sum(_persist_support_message(message) for message in messages)
     email_metadata = _email_metadata_from_chat(chat)
     subject = _string_from(chat.get("subject"))
     from_address = _string_from(chat.get("from_address"))
@@ -7036,7 +7131,7 @@ def upsert_issue_from_chat(
         "ai_summary": summary,
         "activated_intent": activated_intent,
         "requires_human": requires_human,
-        "message_count": len(messages),
+        "message_count": persisted_message_count,
         "action_log": _action_log(intent_result) if intent_matched else [],
         "latest_message_at": _now_iso(),
     }
@@ -7152,7 +7247,7 @@ def upsert_issue_from_chat(
                 "issueSourceId": issue_source_id,
                 **message_metadata,
                 **resolver_metadata,
-                "messageCount": len(messages),
+                "messageCount": persisted_message_count,
             },
         )
         _notify_customer_message_subscribers(
@@ -7164,7 +7259,7 @@ def upsert_issue_from_chat(
             actor_email=_string_from(chat.get("creator") or from_address),
             tenant_id=tenant_id,
             project_id=project_id,
-            metadata={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
+            metadata={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": persisted_message_count},
         )
         if intent_matched:
             _prepare_runbook_action_approvals(
@@ -7181,7 +7276,7 @@ def upsert_issue_from_chat(
                 actor_email="automation",
                 source=source,
                 message_id=email_id,
-                context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
+                context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": persisted_message_count},
             )
             if not _automation_created_customer_reply(automation_result):
                 prepared = _ensure_email_channel_autopilot_package(
@@ -7193,7 +7288,7 @@ def upsert_issue_from_chat(
                     message_id=email_id,
                     on_update=True,
                     automation_result=automation_result,
-                    context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": len(messages)},
+                    context={"emailId": email_id, "issueSourceId": issue_source_id, **message_metadata, **resolver_metadata, "messageCount": persisted_message_count},
                 )
                 if not prepared:
                     _ensure_email_pipeline_reply_draft(
@@ -7315,7 +7410,7 @@ def upsert_issue_from_chat(
             "issueSourceId": issue_source_id,
             **message_metadata,
             **resolver_metadata,
-            "messageCount": len(messages),
+            "messageCount": persisted_message_count,
         },
     )
     if intent_matched:
@@ -11077,6 +11172,7 @@ def _create_issue_agent_answer(
                 "grounding_evidence_incomplete",
                 "incomplete_answer",
                 "pending_action_claim",
+                "language_mismatch",
             }
             else "confidence_guard"
         )

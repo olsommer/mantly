@@ -71,6 +71,228 @@ _COMPLETED_ACTIONS = (
     r"completed",
     r"finished",
 )
+_FUTURE_ACTIONS = (
+    r"initiate",
+    r"check",
+    r"escalate",
+    r"investigate",
+    r"open",
+    r"submit",
+    r"process",
+    r"review",
+    r"contact",
+    r"arrange",
+    r"schedule",
+    r"issue",
+    r"refund",
+    r"cancel",
+    r"change",
+    r"update",
+    r"dispatch",
+    r"reship",
+    r"replace",
+    r"create",
+    r"start",
+    r"begin",
+    r"activate",
+    r"authorize",
+    r"flag",
+    r"mark",
+    r"work\s+on",
+    r"look\s+into",
+    r"follow\s+up",
+    r"reach\s+out",
+    r"take\s+action",
+)
+_ACTION_STATE_SUBJECTS = (
+    r"request",
+    r"case",
+    r"ticket",
+    r"investigation",
+    r"escalation",
+    r"claim",
+    r"refund",
+    r"cancellation",
+    r"cancelation",
+    r"replacement",
+    r"return",
+    r"review",
+    r"incident",
+    r"issue",
+    r"action",
+    r"task",
+    r"address\s+change",
+    r"order\s+cancell?ation",
+    r"order\s+change",
+    r"contract\s+cancell?ation",
+    r"contract\s+change",
+    r"subscription\s+cancell?ation",
+    r"subscription\s+change",
+    r"carrier\s+redirect",
+    r"warehouse\s+ticket",
+)
+_LIFECYCLE_STATE_SUBJECTS = (
+    r"order",
+    r"contract",
+    r"subscription",
+    r"address",
+    r"billing\s+address",
+    r"delivery\s+address",
+    r"shipping\s+address",
+)
+_LIFECYCLE_COMPLETED_ACTIONS = (
+    r"cancelled",
+    r"canceled",
+    r"changed",
+    r"updated",
+    r"terminated",
+)
+
+_GERMAN_COMPLETED_ACTIONS = (
+    r"eröffnet",
+    r"geöffnet",
+    r"eskaliert",
+    r"storniert",
+    r"gekündigt",
+    r"geändert",
+    r"aktualisiert",
+    r"erstattet",
+    r"rückerstattet",
+    r"zurückerstattet",
+)
+_GERMAN_FUTURE_ACTIONS = (
+    r"eröffnen",
+    r"öffnen",
+    r"eskalieren",
+    r"stornieren",
+    r"kündigen",
+    r"ändern",
+    r"aktualisieren",
+    r"erstatten",
+    r"rückerstatten",
+    r"zurückerstatten",
+)
+_GERMAN_ACTION_SUBJECTS = (
+    r"anfrage",
+    r"fall",
+    r"ticket",
+    r"untersuchung",
+    r"eskalation",
+    r"reklamation",
+    r"rückerstattung",
+    r"stornierung",
+    r"kündigung",
+    r"ersatz",
+    r"retoure",
+    r"auftrag",
+    r"bestellung",
+    r"vertrag",
+    r"abonnement",
+    r"adresse",
+    r"adressänderung",
+)
+
+_FRENCH_COMPLETED_ACTIONS = (
+    r"ouvert(?:e|es|s)?",
+    r"escaladé(?:e|es|s)?",
+    r"annulé(?:e|es|s)?",
+    r"résilié(?:e|es|s)?",
+    r"modifié(?:e|es|s)?",
+    r"mis(?:e|es)?\s+à\s+jour",
+    r"remboursé(?:e|es|s)?",
+)
+_FRENCH_FUTURE_ACTIONS = (
+    r"ouvrir",
+    r"escalader",
+    r"annuler",
+    r"résilier",
+    r"modifier",
+    r"mettre\s+à\s+jour",
+    r"rembourser",
+)
+_FRENCH_ACTION_SUBJECTS = (
+    r"demande",
+    r"dossier",
+    r"ticket",
+    r"enquête",
+    r"escalade",
+    r"remboursement",
+    r"annulation",
+    r"remplacement",
+    r"retour",
+    r"commande",
+    r"contrat",
+    r"abonnement",
+    r"adresse",
+)
+
+_SPANISH_COMPLETED_ACTIONS = (
+    r"abiert[oa]s?",
+    r"escalad[oa]s?",
+    r"cancelad[oa]s?",
+    r"anulad[oa]s?",
+    r"modificad[oa]s?",
+    r"actualizad[oa]s?",
+    r"reembolsad[oa]s?",
+)
+_SPANISH_FUTURE_ACTIONS = (
+    r"abrir",
+    r"escalar",
+    r"cancelar",
+    r"anular",
+    r"modificar",
+    r"actualizar",
+    r"reembolsar",
+)
+_SPANISH_ACTION_SUBJECTS = (
+    r"solicitud",
+    r"caso",
+    r"ticket",
+    r"investigación",
+    r"escalad[oa]",
+    r"reembolso",
+    r"cancelación",
+    r"reemplazo",
+    r"devolución",
+    r"pedido",
+    r"contrato",
+    r"suscripción",
+    r"dirección",
+)
+
+_ITALIAN_COMPLETED_ACTIONS = (
+    r"apert[oa]",
+    r"escalat[oa]",
+    r"annullat[oa]",
+    r"cancellat[oa]",
+    r"modificat[oa]",
+    r"aggiornat[oa]",
+    r"rimborsat[oa]",
+)
+_ITALIAN_FUTURE_ACTIONS = (
+    r"aprire",
+    r"escalare",
+    r"annullare",
+    r"cancellare",
+    r"modificare",
+    r"aggiornare",
+    r"rimborsare",
+)
+_ITALIAN_ACTION_SUBJECTS = (
+    r"richiesta",
+    r"caso",
+    r"ticket",
+    r"indagine",
+    r"escalation",
+    r"rimborso",
+    r"annullamento",
+    r"sostituzione",
+    r"reso",
+    r"ordine",
+    r"contratto",
+    r"abbonamento",
+    r"indirizzo",
+)
 
 _PROGRESSIVE_ACTION_PATTERN = re.compile(
     rf"\b(?:we\s+are|we['’]re|i\s+am|i['’]m)\s+"
@@ -87,14 +309,144 @@ _PAST_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PASSIVE_ACTION_PATTERN = re.compile(
-    rf"\b(?:the|this|your|our)\s+[^.!?\n]{{0,100}}?\b"
+    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    rf"[^.!?\n]{{0,100}}?\b"
     rf"(?:has|have|is|are|was|were)\s+(?:(?:already|successfully|now|currently)\s+)*"
     rf"(?:been\s+|being\s+)?(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_LIFECYCLE_PASSIVE_ACTION_PATTERN = re.compile(
+    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_LIFECYCLE_STATE_SUBJECTS)})\b"
+    rf"[^.!?\n]{{0,100}}?\b"
+    rf"(?:has|have|is|are|was|were)\s+(?:(?:already|successfully|now|currently)\s+)*"
+    rf"(?:been\s+|being\s+)?(?:{'|'.join(_LIFECYCLE_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _ACTIVE_STATE_PATTERN = re.compile(
     r"\b(?:investigation|escalation|claim|refund|cancellation|cancelation|replacement|return|request|case|ticket|review)"
     r"\s+(?:is|are)\s+(?:(?:already|now|currently)\s+)*(?:underway|in\s+progress|ongoing)\b",
+    re.IGNORECASE,
+)
+_ACTION_COMPLETION_STATE_PATTERN = re.compile(
+    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    r"[^.!?\n]{0,80}?\b(?:is|are|was|were)\s+"
+    r"(?:(?:already|successfully|now)\s+)*(?:complete|completed|done)\b",
+    re.IGNORECASE,
+)
+_FUTURE_ACTION_PATTERN = re.compile(
+    rf"\b(?:we\s+will|we['’]ll|i\s+will|i['’]ll)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:{'|'.join(_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_FUTURE_PASSIVE_ACTION_PATTERN = re.compile(
+    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_ACTION_STATE_SUBJECTS)})\b"
+    rf"[^.!?\n]{{0,100}}?\b(?:will|shall)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*be\s+"
+    rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_FUTURE_LIFECYCLE_PASSIVE_ACTION_PATTERN = re.compile(
+    rf"\b(?:a|an|the|this|your|our)\s+(?:{'|'.join(_LIFECYCLE_STATE_SUBJECTS)})\b"
+    rf"[^.!?\n]{{0,100}}?\b(?:will|shall)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*be\s+"
+    rf"(?:{'|'.join(_LIFECYCLE_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+
+_GERMAN_COMPLETED_PATTERN = re.compile(
+    rf"\b(?:wir\s+haben|ich\s+habe)\s+"
+    rf"(?![^.!?\n]{{0,120}}\bnicht\b)[^.!?\n]{{0,120}}?\b"
+    rf"(?:{'|'.join(_GERMAN_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_GERMAN_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_GERMAN_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bnicht\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:wurde|wurden|ist|sind)\s+(?:(?:bereits|schon|erfolgreich)\s+)*"
+    rf"(?:{'|'.join(_GERMAN_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_GERMAN_FUTURE_PATTERN = re.compile(
+    rf"\b(?:wir\s+werden|ich\s+werde)\s+"
+    rf"(?![^.!?\n]{{0,120}}\bnicht\b)[^.!?\n]{{0,120}}?\b"
+    rf"(?:{'|'.join(_GERMAN_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_GERMAN_FUTURE_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_GERMAN_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bnicht\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:wird|werden)\s+(?:(?:bald|kurzfristig|sofort)\s+)*"
+    rf"(?:{'|'.join(_GERMAN_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+
+_FRENCH_COMPLETED_PATTERN = re.compile(
+    rf"\bnous\s+avons\s+(?![^.!?\n]{{0,80}}\bpas\b)[^.!?\n]{{0,80}}?\b"
+    rf"(?:{'|'.join(_FRENCH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_FRENCH_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_FRENCH_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\b(?:ne|pas)\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:(?:a|ont)\s+été|(?:est|sont))\s+"
+    rf"(?:{'|'.join(_FRENCH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_FRENCH_FUTURE_PATTERN = re.compile(
+    rf"\bnous\s+allons\s+(?![^.!?\n]{{0,80}}\bpas\b)[^.!?\n]{{0,60}}?\b"
+    rf"(?:{'|'.join(_FRENCH_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_FRENCH_FUTURE_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_FRENCH_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\b(?:ne|pas)\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:sera|seront)\s+(?:{'|'.join(_FRENCH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+
+_SPANISH_COMPLETED_PATTERN = re.compile(
+    rf"(?<!no\s)\b(?:hemos|he)\s+[^.!?\n]{{0,80}}?\b"
+    rf"(?:{'|'.join(_SPANISH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_SPANISH_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_SPANISH_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bno\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:ha|han)\s+sido\s+(?:{'|'.join(_SPANISH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_SPANISH_FUTURE_PATTERN = re.compile(
+    rf"(?<!no\s)\b(?:vamos\s+a|voy\s+a)\s+[^.!?\n]{{0,60}}?\b"
+    rf"(?:{'|'.join(_SPANISH_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_SPANISH_FUTURE_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_SPANISH_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bno\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:será|serán)\s+(?:{'|'.join(_SPANISH_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+
+_ITALIAN_COMPLETED_PATTERN = re.compile(
+    rf"(?<!non\s)\b(?:abbiamo|ho)\s+[^.!?\n]{{0,80}}?\b"
+    rf"(?:{'|'.join(_ITALIAN_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_ITALIAN_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_ITALIAN_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bnon\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:è\s+stat[oa]|sono\s+stat[ei])\s+(?:{'|'.join(_ITALIAN_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_ITALIAN_FUTURE_PATTERN = re.compile(
+    rf"(?<!non\s)\b(?:stiamo\s+per|sto\s+per)\s+[^.!?\n]{{0,60}}?\b"
+    rf"(?:{'|'.join(_ITALIAN_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_ITALIAN_FUTURE_PASSIVE_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_ITALIAN_ACTION_SUBJECTS)})\b"
+    rf"(?![^.!?\n]{{0,120}}\bnon\b)[^.!?\n]{{0,100}}?\b"
+    rf"(?:sarà|saranno)\s+(?:{'|'.join(_ITALIAN_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _ANSWER_UNIT_PATTERN = re.compile(r"[^.!?\n]+(?:[.!?]+|(?=\n)|$)")
@@ -103,7 +455,103 @@ _CLAIM_PATTERNS = (
     _PERFECT_ACTION_PATTERN,
     _PAST_ACTION_PATTERN,
     _PASSIVE_ACTION_PATTERN,
+    _LIFECYCLE_PASSIVE_ACTION_PATTERN,
     _ACTIVE_STATE_PATTERN,
+    _ACTION_COMPLETION_STATE_PATTERN,
+    _GERMAN_COMPLETED_PATTERN,
+    _GERMAN_PASSIVE_PATTERN,
+    _FRENCH_COMPLETED_PATTERN,
+    _FRENCH_PASSIVE_PATTERN,
+    _SPANISH_COMPLETED_PATTERN,
+    _SPANISH_PASSIVE_PATTERN,
+    _ITALIAN_COMPLETED_PATTERN,
+    _ITALIAN_PASSIVE_PATTERN,
+)
+_FUTURE_CLAIM_PATTERNS = (
+    _FUTURE_ACTION_PATTERN,
+    _FUTURE_PASSIVE_ACTION_PATTERN,
+    _FUTURE_LIFECYCLE_PASSIVE_ACTION_PATTERN,
+    _GERMAN_FUTURE_PATTERN,
+    _GERMAN_FUTURE_PASSIVE_PATTERN,
+    _FRENCH_FUTURE_PATTERN,
+    _FRENCH_FUTURE_PASSIVE_PATTERN,
+    _SPANISH_FUTURE_PATTERN,
+    _SPANISH_FUTURE_PASSIVE_PATTERN,
+    _ITALIAN_FUTURE_PATTERN,
+    _ITALIAN_FUTURE_PASSIVE_PATTERN,
+)
+_CONDITION_MARKERS = (
+    r"after",
+    r"before",
+    r"if",
+    r"once",
+    r"until",
+    r"when",
+    r"nachdem",
+    r"sobald",
+    r"falls",
+    r"wenn",
+    r"après",
+    r"avant",
+    r"si",
+    r"lorsque",
+    r"une\s+fois",
+    r"después\s+de\s+que",
+    r"antes\s+de\s+que",
+    r"cuando",
+    r"una\s+vez",
+    r"dopo\s+che",
+    r"prima\s+che",
+    r"quando",
+    r"una\s+volta",
+)
+_CONTINGENCY_TERMS = (
+    r"approv\w*",
+    r"authoriz\w*",
+    r"confirm\w*",
+    r"review\w*",
+    r"verif\w*",
+    r"genehmig\w*",
+    r"freigegeb\w*",
+    r"bestätig\w*",
+    r"geprüf\w*",
+    r"überprüf\w*",
+    r"approuv\w*",
+    r"autoris\w*",
+    r"confirm\w*",
+    r"vérifi\w*",
+    r"examin\w*",
+    r"aprobad\w*",
+    r"autorizad\w*",
+    r"confirmad\w*",
+    r"revisad\w*",
+    r"verificad\w*",
+    r"approvat\w*",
+    r"autorizzat\w*",
+    r"confermat\w*",
+    r"revisionat\w*",
+    r"verificat\w*",
+)
+_FUTURE_CONDITION_PREFIX_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_CONDITION_MARKERS)})\s*$",
+    re.IGNORECASE,
+)
+_FUTURE_CONTINGENCY_PREFIX_PATTERN = re.compile(
+    rf"(?:\b(?:{'|'.join(_CONDITION_MARKERS)})\b[^.!?\n]{{0,120}}"
+    rf"\b(?:{'|'.join(_CONTINGENCY_TERMS)})\b[^.!?\n]{{0,40}}$|"
+    r"\bsubject\s+to\s+(?:approval|authorization|confirmation|review|verification)"
+    r"[^.!?\n]{0,40}$)",
+    re.IGNORECASE,
+)
+_FUTURE_CONTINGENCY_SUFFIX_PATTERN = re.compile(
+    rf"^\s*(?P<scope>[^.!?\n]{{0,80}}?)"
+    rf"(?P<condition>\b(?:{'|'.join(_CONDITION_MARKERS)})\b)[^.!?\n]{{0,120}}"
+    rf"\b(?:{'|'.join(_CONTINGENCY_TERMS)})\b",
+    re.IGNORECASE,
+)
+_UNRELATED_CLAUSE_PATTERN = re.compile(
+    r"[,;:]|\b(?:and|but|then|while|whereas|und|aber|dann|et|mais|puis|y|pero|entonces|e|ma|poi)\b",
+    re.IGNORECASE,
 )
 
 
@@ -136,6 +584,39 @@ def _answer_units(answer: str) -> tuple[str, ...]:
     return tuple(units or ([answer.strip()] if answer.strip() else []))
 
 
+def _has_scoped_future_contingency(*, prefix: str, suffix: str) -> bool:
+    prefix_match = _FUTURE_CONTINGENCY_PREFIX_PATTERN.search(prefix)
+    if prefix_match is not None:
+        condition_scope = prefix_match.group(0)
+        if not any(pattern.search(condition_scope) for pattern in _FUTURE_CLAIM_PATTERNS):
+            return True
+
+    suffix_match = _FUTURE_CONTINGENCY_SUFFIX_PATTERN.search(suffix)
+    if suffix_match is None:
+        return False
+    action_scope = re.sub(r",\s*$", "", suffix_match.group("scope"))
+    if _UNRELATED_CLAUSE_PATTERN.search(action_scope):
+        return False
+    return not any(pattern.search(action_scope) for pattern in _FUTURE_CLAIM_PATTERNS)
+
+
+def _has_unsafe_claim(unit: str) -> bool:
+    """Ignore completed grammar that belongs to an explicit future condition."""
+    for pattern in _CLAIM_PATTERNS:
+        for match in pattern.finditer(unit):
+            if _FUTURE_CONDITION_PREFIX_PATTERN.search(unit[:match.start()]):
+                continue
+            return True
+    for pattern in _FUTURE_CLAIM_PATTERNS:
+        for match in pattern.finditer(unit):
+            prefix = unit[max(0, match.start() - 180):match.start()]
+            suffix = unit[match.end():match.end() + 180]
+            if _has_scoped_future_contingency(prefix=prefix, suffix=suffix):
+                continue
+            return True
+    return False
+
+
 def check_pending_action_claims(
     *,
     answer: str,
@@ -153,7 +634,7 @@ def check_pending_action_claims(
 
     claims: list[str] = []
     for unit in _answer_units(answer):
-        if any(pattern.search(unit) for pattern in _CLAIM_PATTERNS) and unit not in claims:
+        if _has_unsafe_claim(unit) and unit not in claims:
             claims.append(unit[:500])
     return PendingActionClaimCheck(
         pending_actions=pending_actions,

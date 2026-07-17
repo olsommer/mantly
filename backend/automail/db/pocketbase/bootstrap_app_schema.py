@@ -455,6 +455,46 @@ def ensure_app_collections_schema(
 
         chats = _get_collection(http_client, resolved_pb_url, token, "chats")
 
+        email_processing_claims_payload = _base_collection_payload(
+            "email_processing_claims",
+            [
+                _relation_field("tenant", tenants_id),
+                _relation_field_cascade("project", projects_id, required=True),
+                _text_field("claim_key", required=True),
+                _text_field("email_id", required=True),
+                {"name": "attempt", "type": "number", "required": True},
+                {
+                    "name": "owner_token",
+                    "type": "text",
+                    "required": True,
+                    "hidden": True,
+                },
+                _text_field("status", required=True),
+                {"name": "lease_until", "type": "date", "required": True},
+                _text_field("error"),
+                _created_field(),
+                _updated_field(),
+            ],
+            indexes=[
+                (
+                    "CREATE UNIQUE INDEX idx_email_processing_claim_attempt ON "
+                    "email_processing_claims (project, claim_key, attempt)"
+                ),
+                (
+                    "CREATE INDEX idx_email_processing_claim_status ON "
+                    "email_processing_claims (project, status, lease_until)"
+                ),
+            ],
+        )
+        _, was_created = _ensure_collection(
+            http_client,
+            resolved_pb_url,
+            token,
+            email_processing_claims_payload,
+        )
+        if was_created:
+            created.append("email_processing_claims")
+
         support_accounts_payload = _base_collection_payload(
             "support_accounts",
             [

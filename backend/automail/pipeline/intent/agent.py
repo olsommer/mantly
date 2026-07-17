@@ -437,19 +437,81 @@ def _dedupe_strings(*groups: list[str]) -> list[str]:
     return result
 
 
+_OBLIGATION_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "be",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "or",
+    "please",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "would",
+    "you",
+}
+
+
+def _obligation_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in re.findall(r"[a-z0-9]+", value.casefold()):
+        if raw in _OBLIGATION_STOP_WORDS:
+            continue
+        token = raw
+        if len(token) > 5 and token.endswith("ing"):
+            token = token[:-3]
+        elif len(token) > 4 and token.endswith("ed"):
+            token = token[:-2]
+        elif len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _obligation_covers_question(obligation: str, question: str) -> bool:
+    question_tokens = _obligation_tokens(question)
+    if not question_tokens:
+        return " ".join(question.casefold().split()) in " ".join(obligation.casefold().split())
+    obligation_tokens = _obligation_tokens(obligation)
+    return len(question_tokens & obligation_tokens) / len(question_tokens) >= 0.6
+
+
 def _answer_obligations(
     concern_id: str,
     route: ConcernRoute,
 ) -> list[AnswerObligation]:
     """Bind router-extracted questions to stable runtime IDs."""
-    questions = _dedupe_strings(route.answer_obligations)
+    routed_questions = _dedupe_strings(route.answer_obligations)
     explicit_questions = _dedupe_strings([
-        segment.strip()
-        for segment in re.split(r"(?<=\?)", route.source_text)
-        if "?" in segment and segment.strip()
+        match.group(0).strip()
+        for match in re.finditer(r"[^.!?\n]*\?", route.source_text)
+        if match.group(0).strip()
     ])
-    if len(explicit_questions) > len(questions):
-        questions = explicit_questions
+    questions = list(explicit_questions)
+    for routed_question in routed_questions:
+        if any(_obligation_covers_question(routed_question, question) for question in explicit_questions):
+            continue
+        questions.append(routed_question)
     if not questions:
         fallback = route.summary.strip() or route.source_text.strip()
         questions = [fallback] if fallback else []

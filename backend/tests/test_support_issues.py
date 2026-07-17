@@ -1619,6 +1619,39 @@ def test_update_issue_close_without_reply_requires_resolution_note(monkeypatch):
         )
 
 
+def test_support_message_filter_only_drops_empty_generated_placeholders():
+    assert issues._persist_support_message(
+        {
+            "user": "response",
+            "role": "response",
+            "content": {"emailBody": None, "emailAttachments": []},
+        }
+    ) is False
+    assert issues._persist_support_message(
+        {"user": "ai", "role": "ai", "content": "   "}
+    ) is False
+    assert issues._persist_support_message(
+        {
+            "user": "response",
+            "role": "response",
+            "content": {"emailBody": "Draft reply", "emailAttachments": []},
+        }
+    ) is True
+    assert issues._persist_support_message(
+        {
+            "user": "response",
+            "role": "response",
+            "content": {
+                "emailBody": "",
+                "emailAttachments": [{"filename": "guide.pdf"}],
+            },
+        }
+    ) is True
+    assert issues._persist_support_message(
+        {"user": "email", "role": "email", "content": ""}
+    ) is True
+
+
 def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
@@ -1631,6 +1664,7 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
         "sla456",
         "msg123",
         "msg456",
+        "msg789",
         "insightSummary123",
         "insightRisk123",
         "gap123",
@@ -1676,6 +1710,21 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
                 {
                     "user": "response",
                     "role": "response",
+                    "content": {"emailBody": None, "emailAttachments": []},
+                },
+                {
+                    "user": "response",
+                    "role": "response",
+                    "content": {
+                        "emailBody": "",
+                        "emailAttachments": [
+                            {"filename": "shipment-guide.pdf", "contentType": "application/pdf"},
+                        ],
+                    },
+                },
+                {
+                    "user": "response",
+                    "role": "response",
                     "content": {"emailBody": "We are checking the shipment.", "requiresHuman": True},
                 },
             ],
@@ -1710,6 +1759,7 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     assert issue["queueName"] == "Support"
     assert issue["accountName"] == "Example Co"
     assert issue["contactEmail"] == "ada@example.com"
+    assert issue["messageCount"] == 3
     assert issue["actionLog"] == [
         {
             "label": "Open ticket",
@@ -1736,15 +1786,19 @@ def test_upsert_issue_from_chat_creates_support_issue(monkeypatch):
     assert issue_metadata["resolver"]["provider"] == "email"
     assert issue_metadata["resolver"]["resolverAction"] == "created"
     message_posts = [data for path, data in posted if path == "/api/collections/support_messages/records"]
-    assert [message["direction"] for message in message_posts] == ["customer", "ai"]
+    assert [message["direction"] for message in message_posts] == ["customer", "ai", "ai"]
     assert message_posts[0]["attachments"] == [
         {"filename": "contract.pdf", "contentType": "application/pdf", "size": 204800},
     ]
     assert message_posts[0]["metadata"]["ticketCreationMode"] == "per_message"
     assert message_posts[0]["metadata"]["resolver"]["resolverAction"] == "created"
     assert message_posts[0]["metadata"]["resolver"]["sourceIssueId"] == "email-1"
-    assert message_posts[1]["attachments"] == []
-    assert message_posts[1]["body"] == "We are checking the shipment."
+    assert message_posts[1]["body"] == ""
+    assert message_posts[1]["attachments"] == [
+        {"filename": "shipment-guide.pdf", "contentType": "application/pdf"},
+    ]
+    assert message_posts[2]["attachments"] == []
+    assert message_posts[2]["body"] == "We are checking the shipment."
     sla_posts = [data for path, data in posted if path == "/api/collections/support_sla_events/records"]
     assert [event["event_type"] for event in sla_posts] == ["first_response_due", "resolution_due"]
     insight_posts = [data for path, data in posted if path == "/api/collections/support_account_insights/records"]

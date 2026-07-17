@@ -18,6 +18,13 @@ from automail.db.pocketbase.client import (
     store_email_analysis,
     upsert_issue_from_chat,
 )
+from automail.db.pocketbase.email_processing_claims import (
+    acquire_email_processing_claim,
+    complete_email_processing_claim,
+    fail_email_processing_claim,
+    owns_email_processing_claim,
+    wait_for_email_processing_claim,
+)
 from automail.models import EmailResponse, Message, ProcessEmailRequest, TokenUsage
 from automail.monitoring import (
     RunRecorder,
@@ -43,9 +50,9 @@ def _sync_issue_from_chat(
     tenant_id: str | None,
     project_id: str | None,
     source: str,
-) -> None:
+) -> bool:
     if not project_id:
-        return
+        return False
     try:
         upsert_issue_from_chat(
             chat,
@@ -53,8 +60,41 @@ def _sync_issue_from_chat(
             project_id=project_id,
             source=source,
         )
+        return True
     except Exception:
         logger.warning("Failed to sync support issue for chat %s", chat.get("email_id") or chat.get("id"), exc_info=True)
+        return False
+
+
+def _messages_from_chat_record(record: dict) -> list[Message]:
+    messages: list[Message] = []
+    for msg_data in record["messages"]:
+        try:
+            messages.append(Message(**msg_data))
+        except Exception as exc:
+            logger.error("Error reconstructing message: %s", exc)
+            raise ValueError(f"Failed to reconstruct message from database: {exc}") from exc
+    return messages
+
+
+def _fail_processing_claim_best_effort(
+    claim: dict | None,
+    *,
+    email_id: str,
+    project_id: str | None,
+    error: str,
+) -> None:
+    if not claim or not project_id:
+        return
+    try:
+        fail_email_processing_claim(
+            claim,
+            email_id=email_id,
+            project_id=project_id,
+            error=error,
+        )
+    except Exception:
+        logger.warning("Failed to release email processing claim for %s", email_id, exc_info=True)
 
 
 def _decoded_attachment_size(raw_base64: str) -> int:
@@ -222,11 +262,44 @@ def process_email_for_context(
     """
 
     recorder: RunRecorder | None = None
+    processing_claim: dict | None = None
+    processing_claim_completed = False
+    email_id = body.email.id
     try:
         # Extract email from body
         creator = creator_override or (payload.email if payload and payload.email else body.creator)
         email = body.email
         email_id = email.id
+
+        # Connected-channel webhooks can overlap across API workers. Elect one
+        # durable owner before either worker can observe or persist chat state.
+        if project_id and source.startswith("channel:"):
+            candidate = acquire_email_processing_claim(
+                email_id=email_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            if candidate.get("owned"):
+                processing_claim = candidate
+            else:
+                completed_record = wait_for_email_processing_claim(
+                    email_id=email_id,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+                if completed_record:
+                    logger.info("Email %s completed by another worker, returning stored messages", email_id)
+                    return _messages_from_chat_record(completed_record)
+                candidate = acquire_email_processing_claim(
+                    email_id=email_id,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+                if candidate.get("owned"):
+                    processing_claim = candidate
+            if not processing_claim:
+                raise HTTPException(status_code=409, detail="Email processing is already in progress")
+
         recorder = RunRecorder(
             tenant_id=tenant_id,
             project_id=project_id,
@@ -240,21 +313,24 @@ def process_email_for_context(
 
         if existing_record:
             logger.info("Email %s already analyzed, returning stored messages", email_id)
-            _sync_issue_from_chat(
+            issue_synced = _sync_issue_from_chat(
                 existing_record,
                 tenant_id=tenant_id,
                 project_id=project_id,
                 source=source,
             )
-            # Convert stored messages dict to Message objects
-            messages = []
-            for msg_data in existing_record['messages']:
-                try:
-                    # Pydantic will automatically validate and convert
-                    messages.append(Message(**msg_data))
-                except Exception as e:
-                    logger.error("Error reconstructing message: %s", e)
-                    raise ValueError(f"Failed to reconstruct message from database: {str(e)}")
+            if processing_claim and not issue_synced:
+                raise ValueError("Support issue synchronization failed")
+            messages = _messages_from_chat_record(existing_record)
+
+            if processing_claim:
+                if not complete_email_processing_claim(
+                    processing_claim,
+                    email_id=email_id,
+                    project_id=project_id,
+                ):
+                    raise HTTPException(status_code=409, detail="Email processing ownership changed")
+                processing_claim_completed = True
 
             if recorder:
                 recorder.finish(
@@ -345,6 +421,21 @@ def process_email_for_context(
             ai_message.model_dump()
         ]
 
+        if processing_claim and not owns_email_processing_claim(
+            processing_claim,
+            email_id=email_id,
+            project_id=project_id,
+        ):
+            completed_record = wait_for_email_processing_claim(
+                email_id=email_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            processing_claim = None
+            if completed_record:
+                return _messages_from_chat_record(completed_record)
+            raise HTTPException(status_code=409, detail="Email processing ownership changed")
+
         try:
             pipeline_tools_used = list(getattr(pipeline_result, "tools_used", []) or [])
             email_metadata = _email_thread_metadata(email, parsed_attachments)
@@ -383,7 +474,7 @@ def process_email_for_context(
             except Exception:
                 logger.warning("Failed to store LLM usage events", exc_info=True)
             logger.info("Stored email analysis with ID: %s for email: %s", record_id, email_id)
-            _sync_issue_from_chat(
+            issue_synced = _sync_issue_from_chat(
                 {
                     "record_id": record_id,
                     "email_id": email_id,
@@ -410,9 +501,22 @@ def process_email_for_context(
                 project_id=project_id,
                 source=source,
             )
+            if processing_claim and not issue_synced:
+                raise ValueError("Support issue synchronization failed")
         except Exception as e:
             logger.error("Error storing email analysis: %s", e)
-            # Continue even if storage fails
+            if processing_claim:
+                raise ValueError(f"Email analysis storage failed: {e}") from e
+            # Add-in behavior remains best effort when no durable claim exists.
+
+        if processing_claim:
+            if not complete_email_processing_claim(
+                processing_claim,
+                email_id=email_id,
+                project_id=project_id,
+            ):
+                raise HTTPException(status_code=409, detail="Email processing ownership changed")
+            processing_claim_completed = True
 
         if recorder:
             recorder.finish(
@@ -424,7 +528,24 @@ def process_email_for_context(
         # Return both messages
         return [email_message, ai_message]
 
+    except HTTPException:
+        if not processing_claim_completed:
+            _fail_processing_claim_best_effort(
+                processing_claim,
+                email_id=email_id,
+                project_id=project_id,
+                error="Email processing interrupted",
+            )
+        raise
+
     except ValueError:
+        if not processing_claim_completed:
+            _fail_processing_claim_best_effort(
+                processing_claim,
+                email_id=email_id,
+                project_id=project_id,
+                error="Email processing failed",
+            )
         if recorder:
             try:
                 recorder.finish(status="failed", error="Email processing failed")
@@ -434,6 +555,13 @@ def process_email_for_context(
         raise HTTPException(status_code=500, detail="Email processing failed")
 
     except Exception:
+        if not processing_claim_completed:
+            _fail_processing_claim_best_effort(
+                processing_claim,
+                email_id=email_id,
+                project_id=project_id,
+                error="Email processing failed",
+            )
         if recorder:
             try:
                 recorder.finish(status="failed", error="Email processing failed")

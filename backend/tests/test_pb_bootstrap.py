@@ -223,6 +223,7 @@ class TestEnsureAppCollectionsSchema:
                 "intent_tools",
                 "project_members",
                 "monitor_runs",
+                "email_processing_claims",
                 "support_accounts",
                 "support_contacts",
                 "support_issues",
@@ -281,6 +282,7 @@ class TestEnsureAppCollectionsSchema:
             "intent_tools",
             "project_members",
             "monitor_runs",
+            "email_processing_claims",
             "support_accounts",
             "support_contacts",
             "support_issues",
@@ -333,6 +335,18 @@ class TestEnsureAppCollectionsSchema:
         assert any(field["name"] == "account_key" and field["required"] for field in support_accounts["fields"])
         support_contacts = next(payload for payload in posted_payloads if payload["name"] == "support_contacts")
         assert any(field["name"] == "contact_key" and field["required"] for field in support_contacts["fields"])
+        email_claims = next(
+            payload for payload in posted_payloads
+            if payload["name"] == "email_processing_claims"
+        )
+        assert any(
+            field["name"] == "owner_token" and field["hidden"] is True
+            for field in email_claims["fields"]
+        )
+        assert (
+            "CREATE UNIQUE INDEX idx_email_processing_claim_attempt ON "
+            "email_processing_claims (project, claim_key, attempt)"
+        ) in email_claims["indexes"]
         support_issues = next(payload for payload in posted_payloads if payload["name"] == "support_issues")
         assert any(field["name"] == "source_email_id" and field["required"] for field in support_issues["fields"])
         assert any(field["name"] == "project" and field["collectionId"] == "projects-id" for field in support_issues["fields"])

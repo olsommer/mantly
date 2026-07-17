@@ -763,6 +763,182 @@ def test_automation_draft_uses_structured_selected_citations(
     assert captured["config"]["recursion_limit"] == 6
 
 
+def test_automation_draft_retries_once_in_latest_customer_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    fake_llm = object()
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(llm_module, "resolve_effective_config", lambda config, _tenant, _project: config)
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: fake_llm)
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            answer = (
+                "Hallo, Ihre Bestellung ist unterwegs. Die Zustellung erfolgt morgen."
+                if len(prompts) == 1
+                else "Hello, your order is in transit. The estimated delivery is tomorrow."
+            )
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer=answer,
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-1", "subject": "Order status"},
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Please tell me the current order status and estimated delivery.",
+            }
+        ],
+        question="Prepare the best support answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert len(prompts) == 2
+    assert "## Required Reply Language\nEnglish" in prompts[0]
+    assert "## Correction Required" in prompts[1]
+    assert result.answer.startswith("Hello")
+    assert result.generation_mode == "llm"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Please tell me the current status of my order.", "en"),
+        ("Bitte sagen Sie mir den Status meiner Bestellung.", "de"),
+        ("Bonjour, mon colis est en retard.", "fr"),
+        ("Hola, necesito ayuda con mi pedido.", "es"),
+        ("Ciao, vorrei sapere lo stato del mio ordine.", "it"),
+        ("We have received your request and it is pending review.", "en"),
+        ("Wir haben Ihre Anfrage erhalten und prüfen sie.", "de"),
+        ("Nous examinons votre demande, qui est en cours.", "fr"),
+        ("Estamos revisando su solicitud pendiente.", "es"),
+        ("Stiamo esaminando la sua richiesta, che è in sospeso.", "it"),
+    ],
+)
+def test_supported_language_detection_handles_short_support_messages(
+    message: str,
+    expected: str,
+) -> None:
+    assert issue_agent._detected_supported_language(message) == expected
+
+
+def test_latest_customer_language_does_not_use_identity_metadata() -> None:
+    messages = [
+        {
+            "direction": "customer",
+            "sender": "Hans Mueller <hans@example.de>",
+            "body": "Please help with my current order status.",
+        }
+    ]
+
+    assert issue_agent._latest_customer_language(messages) == "en"
+
+
+def test_automation_draft_retries_once_for_pending_action_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(llm_module, "resolve_effective_config", lambda config, _tenant, _project: config)
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            answer = (
+                "We have opened a delivery investigation."
+                if len(prompts) == 1
+                else "The investigation is pending approval. We can open it after review."
+            )
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer=answer,
+                    confidence="medium",
+                    covered_concern_ids=["delivery"],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+    issue = {
+        "id": "issue-1",
+        "subject": "Missing parcel",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": "message1"},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "delivery",
+                            "matched": True,
+                            "intentName": "delivery-investigation",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "runbook_webhook",
+                "status": "pending",
+                "label": "Open delivery investigation",
+                "metadata": {
+                    "source": "runbook",
+                    "approvalRequired": True,
+                    "sourceMessageId": "message1",
+                    "concernId": "delivery",
+                    "runbook": "delivery-investigation",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "open_ticket",
+                        "label": "Open delivery investigation",
+                    }
+                },
+            }
+        ],
+    }
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Please investigate my missing parcel."}],
+        question="Prepare the best support answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert len(prompts) == 2
+    assert "pending business action" in prompts[1]
+    assert result.answer == "The investigation is pending approval. We can open it after review."
+    assert issue_agent.check_pending_action_claims(
+        answer=result.answer,
+        runbook_actions=[{"label": "Open delivery investigation", "status": "pending_approval"}],
+    ).blocked is False
+
+
 def test_automatic_context_omits_current_workflow_state_but_binds_related_tickets() -> None:
     conversation = {
         "key": "email:thread-1",

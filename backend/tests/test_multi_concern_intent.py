@@ -180,6 +180,44 @@ def test_explicit_questions_fill_router_obligation_omissions(monkeypatch):
     ]
 
 
+def test_explicit_question_is_kept_when_router_returned_more_other_obligations(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Partial shipment",
+        source_text=(
+            "Only one of three units arrived. Are the other two units in separate parcels "
+            "with separate tracking numbers, "
+            "or are they missing? Please provide every confirmed tracking number and "
+            "refund missing units if there is no second parcel."
+        ),
+        answer_obligations=[
+            "Provide every confirmed tracking number.",
+            "Refund the missing units if there is no second parcel.",
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "partial-shipment",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "Are the other two units in separate parcels with separate tracking numbers, or are they missing?",
+        "Provide every confirmed tracking number.",
+        "Refund the missing units if there is no second parcel.",
+    ]
+
+
 def test_duplicate_routes_execute_runbook_only_once(monkeypatch):
     _base_stubs(monkeypatch)
     routes = [

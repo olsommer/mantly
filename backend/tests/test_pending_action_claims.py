@@ -69,6 +69,39 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
     assert result.claims == (answer,)
 
 
+def test_pending_action_guard_blocks_exact_live_b2b_escalation_claim() -> None:
+    answer = (
+        "This urgent B2B SLA incident has been escalated for human operations review."
+    )
+    actions = [
+        {"name": "agent_triage", "label": "Agent triage", "status": "pending_approval"},
+        {"name": "open_ticket", "label": "Open ticket", "status": "pending_approval"},
+    ]
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is True
+    assert result.pending_actions == ("Agent triage", "Open ticket")
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "This urgent B2B SLA incident has not been escalated.",
+        "This urgent B2B SLA incident is pending escalation.",
+        "This urgent B2B SLA incident can be escalated after approval.",
+        "The B2B shipment has been processed at the UPS depot.",
+        "The B2B order was updated by the carrier tracking feed.",
+    ],
+)
+def test_pending_action_guard_allows_safe_b2b_nearby_language(answer: str) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
 @pytest.mark.parametrize(
     "answer",
     [

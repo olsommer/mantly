@@ -137,7 +137,7 @@ _ACTION_STATE_SUBJECTS = (
     r"triage",
 )
 _ACTION_STATE_SUBJECT_PATTERN = (
-    rf"(?:[a-z][a-z-]*\s+){{0,3}}(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
+    rf"(?:[a-z][a-z0-9-]*\s+){{0,3}}(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
 )
 _LIFECYCLE_STATE_SUBJECTS = (
     r"order",

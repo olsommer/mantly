@@ -493,6 +493,7 @@ def test_channel_grounding_reloads_pending_actions_created_during_composition(mo
         "We are initiating the steps to open this investigation.",
         "We have immediately escalated this case to our operations team.",
         "A delivery-exception investigation is being initiated.",
+        "This urgent B2B SLA incident has been escalated for human operations review.",
     ],
 )
 def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch, answer):

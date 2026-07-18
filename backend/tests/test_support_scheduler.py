@@ -7021,6 +7021,75 @@ def test_sms_http_smoke_posts_form_with_twilio_signature(monkeypatch):
     }
 
 
+def test_smoke_http_timeout_uses_email_specific_default_and_config(monkeypatch):
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.delenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", raising=False)
+
+    assert admin_channels._smoke_http_timeout("email") == 180.0
+    assert admin_channels._smoke_http_timeout("slack") == 60.0
+
+    monkeypatch.setenv("SUPPORT_SMOKE_TIMEOUT", "75")
+    assert admin_channels._smoke_http_timeout("email") == 75.0
+    assert admin_channels._smoke_http_timeout("slack") == 75.0
+
+    monkeypatch.setenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", "240")
+    assert admin_channels._smoke_http_timeout("email") == 240.0
+    assert admin_channels._smoke_http_timeout("slack") == 75.0
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("0", 1.0),
+        ("999", 300.0),
+        ("not-a-number", 180.0),
+        ("nan", 180.0),
+    ],
+)
+def test_email_smoke_http_timeout_is_bounded(monkeypatch, configured, expected):
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.setenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", configured)
+
+    assert admin_channels._smoke_http_timeout("email") == expected
+
+
+def test_email_http_smoke_timeout_has_stable_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, timeout: float):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url: str, *, content: bytes, headers: dict[str, str]):
+            raise admin_channels.httpx.ReadTimeout(
+                "The read operation timed out",
+                request=admin_channels.httpx.Request("POST", url),
+            )
+
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.delenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.setattr(admin_channels.httpx, "Client", FakeClient)
+
+    with pytest.raises(
+        admin_channels.SmokeHttpTimeoutError,
+        match="Smoke endpoint timed out after 180 seconds",
+    ):
+        admin_channels._post_smoke_http(
+            "email",
+            {"providerWebhookUrl": "https://support.example.test/api/internal/support/email/email-main"},
+            {"email": {"messageId": "email-message-1", "body": "Need help"}},
+            {"SUPPORT_SYNC_TOKEN": "sync-token"},
+        )
+
+    assert captured["timeout"] == 180.0
+
+
 def test_email_http_smoke_uses_provider_pipeline_url():
     setup = {
         "providerWebhookUrl": "https://support.example.test/api/internal/support/email/email-main",
@@ -7905,6 +7974,34 @@ def test_admin_channel_smoke_uses_slack_native_payload(client, monkeypatch):
         "project_id": "project1",
         "updates": {"status": "done", "workflow_source": "admin-channel-smoke-cleanup"},
     }]
+
+
+def test_admin_channel_smoke_maps_http_timeout_to_gateway_timeout(client, monkeypatch):
+    monkeypatch.setattr(
+        admin_channels,
+        "get_channel",
+        lambda channel_id, **_kwargs: {
+            "id": channel_id,
+            "channelKey": "email-main",
+            "type": "email",
+            "status": "active",
+        },
+    )
+
+    def timeout(*_args, **_kwargs):
+        raise admin_channels.SmokeHttpTimeoutError(
+            "Smoke endpoint timed out after 180 seconds"
+        )
+
+    monkeypatch.setattr(admin_channels, "_run_channel_smoke", timeout)
+
+    resp = client.post(
+        "/api/admin/projects/project1/channels/channel1/smoke",
+        json={"body": "Where is order ZF-1042?", "transport": "http"},
+    )
+
+    assert resp.status_code == 504
+    assert resp.json() == {"detail": "Smoke endpoint timed out after 180 seconds"}
 
 
 def test_admin_channel_smoke_accepts_slack_file_only_payload(client, monkeypatch):

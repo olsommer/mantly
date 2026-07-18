@@ -320,6 +320,46 @@ def test_pending_action_guard_blocks_controlled_support_actor_future_promises(
     assert result.claims == (answer,)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We will provide an update as soon as more information is available.",
+        (
+            "Your request has been forwarded for warehouse verification and a "
+            "potential carrier redirect."
+        ),
+        "We will need to investigate further.",
+        (
+            "Once reviewed, a human agent will be able to provide further "
+            "updates."
+        ),
+    ],
+)
+def test_pending_action_guard_blocks_exact_final_live_residual_phrases(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "This request needs human review.",
+        "The warehouse verification requires human review before any action.",
+    ],
+)
+def test_pending_action_guard_allows_explicit_human_review_requirement(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
 def test_pending_action_guard_blocks_exact_live_coordinated_triage_claims() -> None:
     answer = (
         "We have noted the critical deadline of 20 July 2026 and have escalated "
@@ -571,6 +611,45 @@ def test_pending_action_repair_preserves_safe_units_and_removes_only_unsafe_unit
         f"{PENDING_ACTION_REPAIR_NOTICE}"
     )
     assert unsafe_action not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_repair_removes_final_live_residuals_and_preserves_facts() -> None:
+    safe_status = (
+        "Order ZF-10482 remains in transit after its latest carrier scan."
+    )
+    unsafe_units = (
+        "We will provide an update as soon as more information is available.",
+        (
+            "Your request has been forwarded for warehouse verification and a "
+            "potential carrier redirect."
+        ),
+        "We will need to investigate further.",
+        (
+            "Once reviewed, a human agent will be able to provide further "
+            "updates."
+        ),
+    )
+    safe_review_state = (
+        "The requested warehouse action requires human review before it can be "
+        "confirmed."
+    )
+    answer = "\n\n".join((safe_status, *unsafe_units, safe_review_state))
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == (
+        f"{safe_status}\n\n"
+        f"{safe_review_state}\n\n"
+        f"{PENDING_ACTION_REPAIR_NOTICE}"
+    )
+    assert all(unit not in repaired for unit in unsafe_units)
     assert check_pending_action_claims(
         answer=repaired,
         runbook_actions=_actions(),

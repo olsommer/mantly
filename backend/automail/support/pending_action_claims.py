@@ -44,6 +44,7 @@ _PROGRESSIVE_ACTIONS = (
     r"following\s+up",
     r"reaching\s+out",
     r"taking\s+action",
+    r"forwarding",
 )
 _COMPLETED_ACTIONS = (
     r"initiated",
@@ -76,6 +77,7 @@ _COMPLETED_ACTIONS = (
     r"prioriti[sz]ed",
     r"completed",
     r"finished",
+    r"forwarded",
 )
 _FUTURE_ACTIONS = (
     r"initiate",
@@ -110,6 +112,7 @@ _FUTURE_ACTIONS = (
     r"follow\s+up",
     r"reach\s+out",
     r"take\s+action",
+    r"forward",
 )
 _ACTION_STATE_SUBJECTS = (
     r"request",
@@ -370,9 +373,25 @@ _FUTURE_ACTION_PATTERN = re.compile(
     rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:{'|'.join(_FUTURE_ACTIONS)})\b",
     re.IGNORECASE,
 )
+_FUTURE_NECESSITY_ACTION_PATTERN = re.compile(
+    rf"\b(?:we\s+will|we['’]ll|i\s+will|i['’]ll)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:need|have)\s+to\s+"
+    rf"(?:{'|'.join(_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
 _CONTROLLED_SUPPORT_ACTOR_PATTERN = (
     r"(?:our\s+team|(?:a|the)\s+specialist|(?:a|the)\s+human\s+agent|"
     r"(?:our|the)\s+operations(?:\s+team)?|(?:a|the|our)\s+support\s+representative)"
+)
+_FUTURE_UPDATE_PROMISE_PATTERN = re.compile(
+    rf"\b(?:(?:we|i)\s+will|(?:we|i)['’]ll|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall))\s+"
+    r"(?:be\s+able\s+to\s+)?(?:"
+    r"(?:provide|send|share|give)\s+"
+    r"(?:(?:you|the\s+customer)\s+(?:with\s+)?)?"
+    r"(?:an?\s+)?(?:(?:further|additional)\s+)?updates?|"
+    r"keep\s+(?:you|the\s+customer)\s+(?:updated|informed))\b",
+    re.IGNORECASE,
 )
 _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN = re.compile(
     rf"\b{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall)\s+"
@@ -517,6 +536,7 @@ _CLAIM_PATTERNS = (
 )
 _FUTURE_CLAIM_PATTERNS = (
     _FUTURE_ACTION_PATTERN,
+    _FUTURE_NECESSITY_ACTION_PATTERN,
     _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN,
     _OPERATIONS_FUTURE_ACTION_PATTERN,
     _FUTURE_PASSIVE_ACTION_PATTERN,
@@ -813,6 +833,13 @@ def _has_unsafe_claim(
             ):
                 continue
             return True
+    # A definite promise to provide a later update is itself an unsupported
+    # customer-facing commitment while the underlying action awaits approval.
+    # Keep this distinct from ordinary conditional action grammar: phrases such
+    # as "once reviewed, a human agent will be able to provide updates" must not
+    # survive merely because the promised update has a future condition.
+    if _FUTURE_UPDATE_PROMISE_PATTERN.search(unit):
+        return True
     for pattern in _FUTURE_CLAIM_PATTERNS:
         for match in pattern.finditer(unit):
             prefix = unit[max(0, match.start() - 180):match.start()]

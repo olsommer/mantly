@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import shlex
@@ -138,6 +139,10 @@ class ChannelLifecycleSmokeInput(CamelCaseModel):
 
 class ChannelWebhookRematchInput(CamelCaseModel):
     outbound_message_id: str = ""
+
+
+class SmokeHttpTimeoutError(ValueError):
+    """The provider-facing HTTP smoke did not finish within its bounded wait."""
 
 
 class SlackInstallUrlInput(CamelCaseModel):
@@ -8645,11 +8650,22 @@ def _smoke_twilio_signature(url: str, payload: dict[str, Any], auth_token: str) 
     ).decode("ascii")
 
 
-def _smoke_http_timeout() -> float:
+def _smoke_http_timeout(provider: str = "") -> float:
+    normalized_provider = provider.strip().lower()
+    default = 180.0 if normalized_provider == "email" else 60.0
+    configured = (
+        os.getenv("SUPPORT_EMAIL_SMOKE_TIMEOUT")
+        if normalized_provider == "email"
+        else None
+    )
+    if configured is None:
+        configured = os.getenv("SUPPORT_SMOKE_TIMEOUT")
     try:
-        timeout = float(os.getenv("SUPPORT_SMOKE_TIMEOUT", "60"))
+        timeout = float(configured) if configured is not None else default
     except (TypeError, ValueError):
-        timeout = 60.0
+        timeout = default
+    if not math.isfinite(timeout):
+        timeout = default
     return max(1.0, min(timeout, 300.0))
 
 
@@ -8742,9 +8758,14 @@ def _post_smoke_http(provider: str, setup: dict[str, Any], payload: dict[str, An
     else:
         raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         headers, auth = _smoke_http_headers(provider, setup, secrets, raw_body)
+    timeout = _smoke_http_timeout(provider)
     try:
-        with httpx.Client(timeout=_smoke_http_timeout()) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(url, content=raw_body, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise SmokeHttpTimeoutError(
+            f"Smoke endpoint timed out after {timeout:g} seconds"
+        ) from exc
     except Exception as exc:
         raise ValueError(str(exc)) from exc
     if response.status_code >= 400:
@@ -10087,6 +10108,8 @@ async def smoke_channel(channel_id: str, body: ChannelTestMessageInput, ctx: Pro
     started_at = datetime.now(timezone.utc).isoformat()
     try:
         result = await asyncio.to_thread(_run_channel_smoke, channel, body=body, ctx=ctx, request=request)
+    except SmokeHttpTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     run_id = _record_smoke_run(
@@ -10159,6 +10182,8 @@ async def smoke_channel_lifecycle(
             request=request,
             actor_email=auth.email,
         )
+    except SmokeHttpTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     run_id = _record_smoke_run(

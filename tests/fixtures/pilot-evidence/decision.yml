@@ -1,0 +1,21 @@
+schema_version: "1.0"
+pilot_id: "synthetic-pilot-ci"
+decision_date: "2026-07-15"
+decision: "commercial_trial"
+decided_by:
+  - "synthetic-economic-buyer"
+  - "synthetic-operations-owner"
+rationale: "The fixture selects a positive explicit decision so the evidence pipeline can validate commercial outcome handling."
+conditions:
+  - "synthetic-only"
+commercial_terms_reference: "fixture:commercial-terms"
+next_decision_date: "2026-08-15"
+evidence_refs:
+  - "summary.json"
+  - "summary.md"
+  - "report.md"
+  - "fixture:customer-decision"
+approvals:
+  customer_economic_buyer: "synthetic-economic-buyer"
+  customer_operational_owner: "synthetic-operations-owner"
+  mantly_product_owner: "synthetic-product-owner"

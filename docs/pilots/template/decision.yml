@@ -1,0 +1,22 @@
+schema_version: "1.0"
+pilot_id: "replace-with-pilot-id"
+decision_date: "YYYY-MM-DD"
+decision: "pay_and_continue|commercial_trial|expand|iterate_and_repeat|pause|stop_or_reject"
+decided_by:
+  - "economic-buyer-name-or-approved-role"
+  - "customer-operational-owner"
+rationale: >-
+  Replace with the customer's decision rationale, conditions, commercial or next
+  evaluation gate, and any target that was not met.
+conditions: []
+commercial_terms_reference: null
+next_decision_date: null
+evidence_refs:
+  - "summary.json"
+  - "summary.md"
+  - "report.md"
+  - "customer-decision-evidence-reference"
+approvals:
+  customer_economic_buyer: null
+  customer_operational_owner: null
+  mantly_product_owner: null

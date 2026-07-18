@@ -1,0 +1,58 @@
+name: Finalize branding branch
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'agent/10-naming-cleanup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply and repair canonical branding migration
+        run: python3 scripts/finalize_branding_cleanup.py
+
+      - name: Remove all one-shot branding assets
+        run: |
+          rm -f \
+            .github/workflows/apply-branding-cleanup.yml \
+            scripts/apply_branding_cleanup.py \
+            .github/workflows/finalize-branding-cleanup.yml \
+            scripts/finalize_branding_cleanup.py
+
+      - name: Mark permanent tools executable
+        run: |
+          chmod +x scripts/check_branding.py scripts/migrate-compose-volumes.sh scripts/load_test.py
+
+      - name: Validate final branch state
+        run: |
+          set -euo pipefail
+          python3 scripts/check_branding.py
+          python3 -m py_compile scripts/load_test.py backend/tests/test_load_test_tool.py
+          bash -n scripts/migrate-compose-volumes.sh
+          grep -q '^name = "mantly-backend"$' backend/pyproject.toml
+          grep -q '"name": "@mantly/admin"' admin/package.json
+          grep -q 'mantly_pb_data' docker-compose.yml
+          test ! -e .github/workflows/apply-branding-cleanup.yml
+          test ! -e scripts/apply_branding_cleanup.py
+
+      - name: Commit finalized branch
+        run: |
+          set -euo pipefail
+          git config user.name "mantly-maintenance[bot]"
+          git config user.email "mantly-maintenance[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "chore: finalize canonical Mantly identifiers"
+          git push origin "HEAD:${{ github.head_ref }}"

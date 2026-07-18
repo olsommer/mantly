@@ -226,6 +226,49 @@ def test_pipeline_composer_deterministically_blocks_pending_action_claim():
     assert safe.blocked is False
 
 
+def test_pipeline_composer_allows_exact_readonly_tracking_check_evidence():
+    result = _result()
+    shipment = result.concerns[1]
+    shipment.action_outcomes = [
+        RunbookActionOutcome(
+            name="open_ticket",
+            label="Open ticket",
+            status="proposed",
+        )
+    ]
+    shipment.tool_evidence = [
+        RunbookToolEvidence(
+            tool_name="lookup-zf-e2e-shipment",
+            method="GET",
+            status="success",
+            facts=[
+                VerifiedFact(
+                    path="trackingNumber",
+                    value="UPS1Z999AA10123456784",
+                    source="tool:lookup-zf-e2e-shipment",
+                ),
+                VerifiedFact(
+                    path="status",
+                    value="in_transit",
+                    source="tool:lookup-zf-e2e-shipment",
+                ),
+            ],
+        )
+    ]
+
+    proven = _pending_action_claim_check(
+        result,
+        "I've checked tracking for UPS1Z999AA10123456784; it is in transit.",
+    )
+    mismatched = _pending_action_claim_check(
+        result,
+        "I've checked tracking for UPS1Z999AA10123456785; it is in transit.",
+    )
+
+    assert proven.blocked is False
+    assert mismatched.blocked is True
+
+
 def test_pipeline_composer_blocks_controlled_actor_future_action_claim():
     result = _result()
     result.concerns[0].action_outcomes = [

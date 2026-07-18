@@ -42,6 +42,7 @@ _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
+GROUNDING_MODEL_CALL_LIMIT = 2
 GROUNDING_GATE_VERSION = "automation-grounding-v5"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
@@ -163,7 +164,7 @@ class AutomationGroundingAssessment:
             "checkedAt": self.checked_at,
             "provider": self.provider,
             "model": self.model,
-            "modelCallLimit": 1,
+            "modelCallLimit": GROUNDING_MODEL_CALL_LIMIT,
             "answerSha256": self.answer_sha256,
             "answerUnits": [dict(unit) for unit in self.answer_units],
             "unitAssessments": [dict(assessment) for assessment in self.unit_assessments],
@@ -251,6 +252,64 @@ class AutomationGroundingOutput(BaseModel):
     unit_assessments: list[AutomationGroundingUnitAssessment] = Field(default_factory=list)
     obligation_assessments: list[AutomationGroundingObligationAssessment] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
+
+
+def _grounding_retryable_protocol_errors(
+    structured: Any,
+    *,
+    expected_unit_ids: frozenset[str],
+    expected_obligation_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """Return evaluator-shape errors that justify one identical retry.
+
+    This intentionally excludes semantic grounding failures and unknown evidence
+    IDs. The normal validation path remains authoritative after the final attempt.
+    """
+
+    if not isinstance(structured, AutomationGroundingOutput):
+        return ("Evaluator returned no structured response",)
+
+    errors: list[str] = []
+    if not structured.unit_assessments:
+        errors.append("Evaluator returned no answer-unit assessments")
+    if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:
+        errors.append("Evaluator returned too many answer-unit assessments")
+    unit_ids = [
+        _string_from(assessment.unit_id)
+        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
+    ]
+    if any(not unit_id for unit_id in unit_ids) or len(unit_ids) != len(set(unit_ids)):
+        errors.append("Evaluator returned a missing or duplicate answer-unit ID")
+    if set(unit_ids) != expected_unit_ids:
+        errors.append("Evaluator did not assess every answer unit exactly once")
+
+    if len(structured.obligation_assessments) > 100:
+        errors.append("Evaluator returned too many obligation assessments")
+    obligation_ids = [
+        _string_from(assessment.obligation_id)
+        for assessment in structured.obligation_assessments[:100]
+    ]
+    if (
+        any(not obligation_id for obligation_id in obligation_ids)
+        or len(obligation_ids) != len(set(obligation_ids))
+    ):
+        errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
+    if set(obligation_ids) != expected_obligation_ids:
+        errors.append("Evaluator did not assess every answer obligation exactly once")
+    for assessment in structured.obligation_assessments[:100]:
+        answer_unit_ids = {
+            unit_id
+            for value in assessment.answer_unit_ids
+            if (unit_id := _string_from(value))
+        }
+        if not answer_unit_ids.issubset(expected_unit_ids):
+            errors.append("Answer obligation uses unknown answer-unit IDs")
+        if (
+            assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+            and not answer_unit_ids
+        ):
+            errors.append("Addressed obligation has no answer-unit IDs")
+    return tuple(dict.fromkeys(errors))
 
 
 def _string_from(value: Any) -> str:
@@ -1390,8 +1449,8 @@ def _unsupported_business_identifiers(
     )
 
 
-def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
-    """Return only exact, successful tool evidence IDs surfaced in ticket context."""
+def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Flatten the exact ticket and per-concern tool evidence visible to agents."""
     records: list[Any] = []
     raw_ticket_evidence = ticket.get("toolEvidence")
     if isinstance(raw_ticket_evidence, list):
@@ -1403,10 +1462,18 @@ def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
             raw_concern_evidence = concern.get("toolEvidence")
             if isinstance(raw_concern_evidence, list):
                 records.extend(raw_concern_evidence)
+    return tuple(
+        record
+        for raw_record in records
+        if (record := _record_from(raw_record))
+    )
+
+
+def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
+    """Return only exact, successful tool evidence IDs surfaced in ticket context."""
 
     evidence_ids: list[str] = []
-    for raw_record in records:
-        record = _record_from(raw_record)
+    for record in _automatic_tool_evidence_records(ticket):
         name = _string_from(record.get("name"))
         evidence_id = _string_from(record.get("evidenceId"))
         if (
@@ -1882,6 +1949,7 @@ def draft_issue_automation_answer(
                 pending_action_check = check_pending_action_claims(
                     answer=first_answer,
                     runbook_actions=ticket_context.get("runbookActions", []),
+                    tool_evidence=_automatic_tool_evidence_records(ticket_context),
                 )
                 if pending_action_check.blocked:
                     correction_reasons.append(
@@ -2161,6 +2229,7 @@ def assess_issue_automation_grounding(
     pending_action_check = check_pending_action_claims(
         answer=answer,
         runbook_actions=ticket_evidence.get("runbookActions", []),
+        tool_evidence=_automatic_tool_evidence_records(ticket_evidence),
     )
     if pending_action_check.blocked:
         return AutomationGroundingAssessment(
@@ -2317,13 +2386,42 @@ def assess_issue_automation_grounding(
             },
         }
 
-        def invoke_agent() -> dict[str, Any]:
+        expected_unit_ids_for_retry = frozenset(
+            _string_from(unit.get("id"))
+            for unit in answer_units
+            if _string_from(unit.get("id"))
+        )
+        expected_obligation_ids_for_retry = frozenset(
+            _string_from(obligation.get("id"))
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        )
+
+        def invoke_once() -> dict[str, Any]:
             with llm_stage("issue_automation_grounding"):
                 response = agent.invoke(
                     {"messages": [{"role": "user", "content": prompt}]},
                     config=invoke_config,
                 )
                 record_usage_from_result(response, usage_context)
+            return response
+
+        def invoke_agent() -> dict[str, Any]:
+            response: dict[str, Any] = {}
+            for attempt in range(GROUNDING_MODEL_CALL_LIMIT):
+                response = invoke_once()
+                structured = response.get("structured_response") if isinstance(response, dict) else None
+                retryable_errors = _grounding_retryable_protocol_errors(
+                    structured,
+                    expected_unit_ids=expected_unit_ids_for_retry,
+                    expected_obligation_ids=expected_obligation_ids_for_retry,
+                )
+                if not retryable_errors or attempt + 1 >= GROUNDING_MODEL_CALL_LIMIT:
+                    break
+                logger.warning(
+                    "Grounding evaluator returned malformed protocol output; retrying once: %s",
+                    "; ".join(retryable_errors),
+                )
             return response
 
         parent_usage_collector = current_collector()

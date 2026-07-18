@@ -16,6 +16,33 @@ def _actions(status: str = "pending_approval") -> list[dict[str, str]]:
     ]
 
 
+def _tracking_evidence(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    include_tracking_id: bool = True,
+) -> list[dict[str, object]]:
+    facts: list[dict[str, object]] = [
+        {"path": "orderNumber", "value": "ZF-10482"},
+        {"path": "status", "value": "in_transit"},
+    ]
+    if include_tracking_id:
+        facts.append(
+            {
+                "path": "trackingNumber",
+                "value": "UPS1Z999AA10123456784",
+            }
+        )
+    return [
+        {
+            "name": "lookup-zf-e2e-shipment",
+            "method": method,
+            "status": status,
+            "responseFacts": facts,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -82,6 +109,141 @@ def test_pending_action_guard_blocks_exact_live_b2b_escalation_claim() -> None:
 
     assert result.blocked is True
     assert result.pending_actions == ("Agent triage", "Open ticket")
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "I've checked tracking for UPS1Z999AA10123456784, and it is in transit.",
+        "We have checked the tracking status for UPS1Z999AA10123456784.",
+        "I checked the shipment status for UPS1Z999AA10123456784.",
+    ],
+)
+def test_pending_action_guard_allows_proven_readonly_tracking_check(
+    answer: str,
+) -> None:
+    actions = [
+        {"name": "agent_triage", "label": "Agent triage", "status": "pending_approval"},
+        {"name": "open_ticket", "label": "Open ticket", "status": "pending_approval"},
+    ]
+
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+        tool_evidence=_tracking_evidence(),
+    )
+
+    assert result.blocked is False
+    assert result.pending_actions == ("Agent triage", "Open ticket")
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence", "actions"),
+    [
+        (
+            "I've checked tracking for UPS1Z999AA10123456784.",
+            [],
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456784.",
+            _tracking_evidence(method="POST"),
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456784.",
+            _tracking_evidence(status="http_500"),
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456784.",
+            _tracking_evidence(include_tracking_id=False),
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456785.",
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456784-EXTRA.",
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            "I've checked the tracking status.",
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            "I've checked your refund request.",
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            "I've checked your cancellation request.",
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            "I've checked tracking for UPS1Z999AA10123456784.",
+            _tracking_evidence(),
+            [
+                {
+                    "name": "check_shipment_tracking",
+                    "label": "Check shipment tracking",
+                    "status": "pending_approval",
+                }
+            ],
+        ),
+        (
+            (
+                "I've checked tracking for UPS1Z999AA10123456784, and I've "
+                "opened a ticket."
+            ),
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            (
+                "I've checked tracking for UPS1Z999AA10123456784 and escalated "
+                "your case."
+            ),
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            (
+                "I've checked tracking for UPS1Z999AA10123456784 and opened "
+                "a ticket."
+            ),
+            _tracking_evidence(),
+            _actions(),
+        ),
+        (
+            (
+                "I've checked tracking for UPS1Z999AA10123456784, then escalated "
+                "your case."
+            ),
+            _tracking_evidence(),
+            _actions(),
+        ),
+    ],
+)
+def test_pending_action_guard_keeps_unproven_mutating_or_related_checks_blocked(
+    answer: str,
+    evidence: list[dict[str, object]],
+    actions: list[dict[str, str]],
+) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+        tool_evidence=evidence,
+    )
+
+    assert result.blocked is True
     assert result.claims == (answer,)
 
 

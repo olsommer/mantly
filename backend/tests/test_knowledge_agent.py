@@ -155,6 +155,50 @@ def _shipment_tool_issue() -> dict[str, Any]:
     }
 
 
+def _shipment_tool_issue_with_pending_actions() -> dict[str, Any]:
+    issue = _shipment_tool_issue()
+    issue["aiRuns"][0]["metadata"] = {"emailId": "message1"}
+    issue["actionExecutions"] = [
+        {
+            "type": "agent_triage",
+            "actionKey": "agent_triage",
+            "label": "Agent triage",
+            "status": "pending",
+            "metadata": {
+                "source": "agent_triage",
+                "approvalRequired": True,
+                "automationContext": {"messageId": "message1"},
+            },
+            "result": {
+                "proposedAction": {
+                    "type": "triage_ticket",
+                    "priority": "urgent",
+                }
+            },
+        },
+        {
+            "type": "runbook_webhook",
+            "actionKey": "open_ticket",
+            "label": "Open ticket",
+            "status": "pending",
+            "metadata": {
+                "source": "runbook",
+                "approvalRequired": True,
+                "sourceMessageId": "message1",
+                "concernId": "shipment-status",
+                "runbook": "shipment-status",
+            },
+            "result": {
+                "proposedAction": {
+                    "name": "open_ticket",
+                    "label": "Open ticket",
+                }
+            },
+        },
+    ]
+    return issue
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
@@ -972,6 +1016,59 @@ def test_automation_draft_retries_once_for_pending_action_claim(
     ).blocked is False
 
 
+def test_automation_draft_accepts_exact_readonly_tracking_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    answer = (
+        "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
+    )
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer=answer,
+                    confidence="high",
+                    covered_concern_ids=["shipment-status"],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue=_shipment_tool_issue_with_pending_actions(),
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Where is UPS1Z999AA10123456784?",
+            }
+        ],
+        question="Prepare the best support answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert len(prompts) == 1
+    assert result.answer == answer
+    assert result.generation_mode == "llm"
+
+
 def test_automation_draft_retries_once_for_mutated_business_identifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1362,6 +1459,90 @@ def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
     else:
         assert result.status == "error"
         assert "unknown evidence IDs" in result.error
+
+
+def test_grounding_allows_proven_tracking_check_with_unrelated_pending_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = (
+        "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
+    )
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeGroundingAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            return {
+                "structured_response": AutomationGroundingOutput(
+                    verdict="grounded",
+                    answer_sha256=issue_agent.grounding_text_sha256(answer),
+                    unit_assessments=[
+                        AutomationGroundingUnitAssessment(
+                            unit_id="u001",
+                            unit_sha256=issue_agent.grounding_text_sha256(answer),
+                            supported=True,
+                            evidence_ids=["tool:lookup-zf-e2e-shipment"],
+                        )
+                    ],
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeGroundingAgent())
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=_shipment_tool_issue_with_pending_actions(),
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Where is UPS1Z999AA10123456784?",
+            }
+        ],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.pending_action_claims == ()
+
+
+def test_grounding_blocks_tracking_check_with_mismatched_evidence_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = "I've checked tracking for UPS1Z999AA10123456785."
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=_shipment_tool_issue_with_pending_actions(),
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Where is UPS1Z999AA10123456784?",
+            }
+        ],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "pending_action_claim"
+    assert result.pending_action_claims == (answer,)
 
 
 def test_grounding_preflight_rejects_mutated_business_identifier_without_model(
@@ -1850,6 +2031,162 @@ def test_grounding_missing_obligation_assessment_is_reported_as_uncovered(
     assert result.verified is False
     assert result.status == "error"
     assert result.uncovered_obligations == ("Run the conflict check.",)
+
+
+@pytest.mark.parametrize("second_attempt_valid", [True, False])
+def test_grounding_retries_unknown_obligation_protocol_once_with_identical_input(
+    monkeypatch: pytest.MonkeyPatch,
+    second_attempt_valid: bool,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="delivery",
+        questions=[("delivery:status", "What is the current delivery status?")],
+    )
+    answer = "The delivery is pending carrier confirmation."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+
+    def output(obligation_id: str) -> AutomationGroundingOutput:
+        return AutomationGroundingOutput(
+            verdict="grounded",
+            answer_sha256=issue_agent.grounding_text_sha256(answer),
+            unit_assessments=[
+                AutomationGroundingUnitAssessment(
+                    unit_id=unit["id"],
+                    unit_sha256=unit["sha256"],
+                    supported=True,
+                    evidence_ids=["ticket"],
+                )
+            ],
+            obligation_assessments=[
+                AutomationGroundingObligationAssessment(
+                    obligation_id=obligation_id,
+                    resolution="pending_or_unavailable",
+                    answer_unit_ids=[unit["id"]],
+                )
+            ],
+        )
+
+    malformed = output("delivery:invented")
+    responses = [
+        malformed,
+        output("delivery:status") if second_attempt_valid else malformed,
+    ]
+    invocations: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    captured_agent_kwargs: dict[str, Any] = {}
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(
+        usage_module,
+        "record_usage_from_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeGroundingAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            invocations.append((inputs, config))
+            return {"structured_response": responses[len(invocations) - 1]}
+
+    def fake_create_agent(**kwargs: Any) -> FakeGroundingAgent:
+        captured_agent_kwargs.update(kwargs)
+        return FakeGroundingAgent()
+
+    monkeypatch.setattr(issue_agent, "create_agent", fake_create_agent)
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert len(invocations) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert invocations[0] == invocations[1]
+    assert captured_agent_kwargs["middleware"][0].run_limit == 1
+    assert result.as_metadata()["modelCallLimit"] == 2
+    assert result.verified is second_attempt_valid
+    if second_attempt_valid:
+        assert result.status == "passed"
+    else:
+        assert result.status == "error"
+        assert "unknown answer-obligation ID" in result.error
+
+
+@pytest.mark.parametrize("failure_kind", ["unsupported", "unknown_evidence"])
+def test_grounding_does_not_retry_semantic_or_unknown_evidence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    answer = "The parcel is delayed."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded" if failure_kind == "unsupported" else "grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=failure_kind != "unsupported",
+                evidence_ids=(
+                    []
+                    if failure_kind == "unsupported"
+                    else ["invented-evidence"]
+                ),
+            )
+        ],
+    )
+    invocations = 0
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(
+        usage_module,
+        "record_usage_from_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeGroundingAgent:
+        def invoke(self, _inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            nonlocal invocations
+            invocations += 1
+            assert config["run_name"] == "issue_automation_grounding"
+            return {"structured_response": output}
+
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: FakeGroundingAgent(),
+    )
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue={"id": "issue-1", "subject": "Parcel delayed"},
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert invocations == 1
+    assert result.verified is False
+    if failure_kind == "unsupported":
+        assert result.status == "failed"
+        assert result.reason_code == "ungrounded_answer"
+    else:
+        assert result.status == "error"
+        assert "unknown evidence IDs" in result.error
 
 
 def test_grounding_gate_rejects_incomplete_unit_protocol(

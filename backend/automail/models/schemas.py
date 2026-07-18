@@ -126,6 +126,7 @@ class RunbookToolEvidence(CamelCaseModel):
     """Safe, structured facts derived from one runbook tool call."""
 
     tool_name: str
+    method: str = ""
     facts: list[VerifiedFact] = Field(default_factory=list)
     status: str = "success"
 

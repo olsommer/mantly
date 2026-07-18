@@ -607,4 +607,5 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
         ("contract.status", "active"),
     ]
     assert [item.tool_name for item in outcome.tool_evidence] == ["contract_lookup"]
+    assert [item.method for item in outcome.tool_evidence] == ["GET"]
     assert "Invented" not in outcome.model_dump_json()

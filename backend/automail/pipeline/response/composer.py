@@ -141,9 +141,20 @@ def _pending_action_claim_check(
         for action in concern.action_outcomes
         if action.status in {"proposed", "pending_input"}
     ]
+    tool_evidence = [
+        {
+            "name": evidence.tool_name,
+            "method": evidence.method,
+            "status": evidence.status,
+            "facts": [fact.model_dump() for fact in evidence.facts],
+        }
+        for concern in intent_result.concerns
+        for evidence in concern.tool_evidence
+    ]
     return check_pending_action_claims(
         answer=answer,
         runbook_actions=pending_actions,
+        tool_evidence=tool_evidence,
     )
 
 

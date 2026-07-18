@@ -26,6 +26,7 @@ from automail.support.delivery import send_support_channel_reply, send_support_e
 from automail.support.issue_agent import (
     GROUNDING_GATE_MAX_AGE_SECONDS,
     GROUNDING_GATE_VERSION,
+    GROUNDING_MODEL_CALL_LIMIT,
     assess_issue_automation_grounding,
     draft_issue_agent_answer,
     draft_issue_automation_answer,
@@ -11205,7 +11206,7 @@ def _create_issue_agent_answer(
                 "checkedAt": _now_iso(),
                 "provider": "",
                 "model": "",
-                "modelCallLimit": 1,
+                "modelCallLimit": GROUNDING_MODEL_CALL_LIMIT,
                 "answerSha256": grounding_text_sha256(answer),
                 "answerUnits": [],
                 "unitAssessments": [],

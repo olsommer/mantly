@@ -776,6 +776,7 @@ def _new_tool_evidence(start_index: int) -> list[RunbookToolEvidence]:
             ))
         evidence.append(RunbookToolEvidence(
             tool_name=tool_name,
+            method=str(call.get("method") or ""),
             facts=facts,
             status=str(call.get("status") or "unknown"),
         ))

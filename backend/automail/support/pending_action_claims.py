@@ -599,6 +599,41 @@ _NEGATIVE_PROMISE_PREFIX_PATTERN = re.compile(
     r"(?:promise|guarantee|confirm)\s*$",
     re.IGNORECASE,
 )
+_TRACKING_TOOL_DOMAIN_PATTERN = re.compile(
+    r"(?:tracking|shipment|parcel|delivery)",
+    re.IGNORECASE,
+)
+_TRACKING_TOOL_READ_PATTERN = re.compile(
+    r"(?:lookup|look[_ -]?up|status|track)",
+    re.IGNORECASE,
+)
+_TRACKING_ID_FACT_PATHS = frozenset({
+    "tracking",
+    "trackingid",
+    "trackingnumber",
+    "trackingcode",
+})
+_TRACKING_CHECK_OBJECT_PATTERN = re.compile(
+    r"^\s+(?:(?:the|your|this|our)\s+)?"
+    r"(?:(?:order|shipment|parcel|delivery|carrier)\s+)?"
+    r"(?:tracking(?:\s+(?:status|details|information|record|number))?|"
+    r"shipment\s+status|parcel\s+status|delivery\s+status)\b",
+    re.IGNORECASE,
+)
+_PENDING_TRACKING_READ_PATTERN = re.compile(
+    r"(?:\b(?:check|lookup|look\s+up|track|fetch|retrieve)\b[^.!?\n]{0,80}"
+    r"\b(?:tracking|shipment\s+status|parcel\s+status|delivery\s+status)\b|"
+    r"\b(?:tracking|shipment\s+status|parcel\s+status|delivery\s+status)\b"
+    r"[^.!?\n]{0,80}\b(?:check|lookup|look\s+up|track|fetch|retrieve)\b)",
+    re.IGNORECASE,
+)
+_COORDINATED_ACTION_TAIL_PATTERN = re.compile(
+    rf"(?:[,;:]?\s*\b(?:and|but|then)\b|[,;:])\s*"
+    rf"(?:(?:we|i)(?:['’](?:ve|re))?\s+)?"
+    rf"(?:(?:have|are|will)\s+)?{_ACTION_MODIFIER_PATTERN}"
+    rf"(?:{'|'.join((*_PROGRESSIVE_ACTIONS, *_COMPLETED_ACTIONS, *_FUTURE_ACTIONS))})\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -625,6 +660,104 @@ def _pending_action_names(runbook_actions: Iterable[Mapping[str, Any]]) -> tuple
     return tuple(names[:20])
 
 
+def _normalized_fact_path(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower().rsplit(".", 1)[-1])
+
+
+def _tool_fact_items(tool: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    raw_facts = tool.get("responseFacts") or tool.get("response_facts") or tool.get("facts")
+    if isinstance(raw_facts, Mapping):
+        return tuple((str(path), value) for path, value in raw_facts.items())
+    if not isinstance(raw_facts, Iterable) or isinstance(raw_facts, (str, bytes)):
+        return ()
+    facts: list[tuple[str, Any]] = []
+    for raw_fact in raw_facts:
+        if not isinstance(raw_fact, Mapping):
+            continue
+        path = str(raw_fact.get("path") or "").strip()
+        value = raw_fact.get("value")
+        if path:
+            facts.append((path, value))
+    return tuple(facts)
+
+
+def _successful_readonly_tracking_identifiers(
+    tool_evidence: Iterable[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Require an exact successful GET audit with a tracking identifier fact."""
+    identifiers: list[str] = []
+    for tool in tool_evidence:
+        name = str(
+            tool.get("name") or tool.get("toolName") or tool.get("tool_name") or ""
+        ).strip()
+        method = str(tool.get("method") or "").strip().upper()
+        status = str(tool.get("status") or "").strip().lower()
+        if (
+            method != "GET"
+            or status != "success"
+            or not _TRACKING_TOOL_DOMAIN_PATTERN.search(name)
+            or not _TRACKING_TOOL_READ_PATTERN.search(name)
+        ):
+            continue
+        for path, value in _tool_fact_items(tool):
+            identifier = (
+                str(value).strip()
+                if isinstance(value, (str, int)) and not isinstance(value, bool)
+                else ""
+            )
+            if (
+                _normalized_fact_path(path) in _TRACKING_ID_FACT_PATHS
+                and identifier
+                and identifier not in identifiers
+            ):
+                identifiers.append(identifier[:240])
+    return tuple(identifiers[:20])
+
+
+def _has_pending_tracking_read(
+    runbook_actions: Iterable[Mapping[str, Any]],
+) -> bool:
+    for action in runbook_actions:
+        status = str(action.get("status") or "").strip().lower().replace("-", "_")
+        if status != "pending_approval":
+            continue
+        action_text = " ".join(
+            str(action.get(key) or "") for key in ("name", "label")
+        ).replace("_", " ").replace("-", " ")
+        if _PENDING_TRACKING_READ_PATTERN.search(action_text):
+            return True
+    return False
+
+
+def _is_evidence_backed_tracking_check(
+    *,
+    pattern: re.Pattern[str],
+    match: re.Match[str],
+    unit: str,
+    tracking_identifiers: tuple[str, ...],
+) -> bool:
+    if not tracking_identifiers or pattern not in {
+        _PERFECT_ACTION_PATTERN,
+        _PAST_ACTION_PATTERN,
+    }:
+        return False
+    if not re.search(r"\bchecked\s*$", match.group(0), re.IGNORECASE):
+        return False
+    if _TRACKING_CHECK_OBJECT_PATTERN.search(unit[match.end():]) is None:
+        return False
+    if _COORDINATED_ACTION_TAIL_PATTERN.search(unit[match.end():]):
+        return False
+    return any(
+        re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])",
+            unit,
+            re.IGNORECASE,
+        )
+        is not None
+        for identifier in tracking_identifiers
+    )
+
+
 def _answer_units(answer: str) -> tuple[str, ...]:
     units = [match.group(0).strip() for match in _ANSWER_UNIT_PATTERN.finditer(answer) if match.group(0).strip()]
     return tuple(units or ([answer.strip()] if answer.strip() else []))
@@ -646,7 +779,11 @@ def _has_scoped_future_contingency(*, prefix: str, suffix: str) -> bool:
     return not any(pattern.search(action_scope) for pattern in _FUTURE_CLAIM_PATTERNS)
 
 
-def _has_unsafe_claim(unit: str) -> bool:
+def _has_unsafe_claim(
+    unit: str,
+    *,
+    tracking_identifiers: tuple[str, ...] = (),
+) -> bool:
     """Ignore completed grammar that belongs to an explicit future condition."""
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(unit):
@@ -655,6 +792,13 @@ def _has_unsafe_claim(unit: str) -> bool:
             if (
                 pattern is _ACTION_COMPLETION_STATE_PATTERN
                 and _NEGATIVE_PROMISE_PREFIX_PATTERN.search(unit[:match.start()])
+            ):
+                continue
+            if _is_evidence_backed_tracking_check(
+                pattern=pattern,
+                match=match,
+                unit=unit,
+                tracking_identifiers=tracking_identifiers,
             ):
                 continue
             return True
@@ -672,19 +816,30 @@ def check_pending_action_claims(
     *,
     answer: str,
     runbook_actions: Iterable[Mapping[str, Any]],
+    tool_evidence: Iterable[Mapping[str, Any]] = (),
 ) -> PendingActionClaimCheck:
     """Block definite active, completed, or future action claims awaiting approval.
 
     Conditional, contingent, negative, and explicit pending wording remains safe.
     """
 
-    pending_actions = _pending_action_names(runbook_actions)
+    action_records = tuple(runbook_actions)
+    pending_actions = _pending_action_names(action_records)
     if not pending_actions:
         return PendingActionClaimCheck()
 
+    tracking_identifiers = (
+        ()
+        if _has_pending_tracking_read(action_records)
+        else _successful_readonly_tracking_identifiers(tool_evidence)
+    )
+
     claims: list[str] = []
     for unit in _answer_units(answer):
-        if _has_unsafe_claim(unit) and unit not in claims:
+        if (
+            _has_unsafe_claim(unit, tracking_identifiers=tracking_identifiers)
+            and unit not in claims
+        ):
             claims.append(unit[:500])
     return PendingActionClaimCheck(
         pending_actions=pending_actions,

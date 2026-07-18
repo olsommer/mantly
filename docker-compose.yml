@@ -13,7 +13,7 @@ services:
       - caddy_config:/config
     depends_on:
       app:
-        condition: service_started
+        condition: service_healthy
       pocketbase:
         condition: service_healthy
     expose:
@@ -102,9 +102,13 @@ services:
       SETUP_ADMIN_PASSWORD: "${SETUP_ADMIN_PASSWORD:-}"
       COMPANY_NAME: "${COMPANY_NAME:-}"
 
-      # ── Observability (optional) ───────────────────────────────────────
+      # ── Observability ──────────────────────────────────────────────────
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      LOG_REDACT_EMAILS: "${LOG_REDACT_EMAILS:-true}"
+      OBSERVABILITY_SLOW_REQUEST_MS: "${OBSERVABILITY_SLOW_REQUEST_MS:-2000}"
+      OBSERVABILITY_TOKEN: "${OBSERVABILITY_TOKEN:-}"
+      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-false}"
       LANGSMITH_ENDPOINT: "${LANGSMITH_ENDPOINT:-}"
       LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:-}"
       LANGSMITH_PROJECT: "${LANGSMITH_PROJECT:-}"
@@ -120,6 +124,18 @@ services:
     volumes:
       - isarai_app_data:/app/data
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 7s
+      start_period: 90s
+      retries: 5
 
 volumes:
   caddy_data:

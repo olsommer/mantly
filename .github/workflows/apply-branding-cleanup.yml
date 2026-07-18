@@ -1,0 +1,43 @@
+name: Apply canonical branding cleanup
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'agent/10-naming-cleanup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply canonical metadata and identifier migration
+        run: python3 scripts/apply_branding_cleanup.py
+
+      - name: Validate canonical branding
+        run: python3 scripts/check_branding.py
+
+      - name: Remove one-shot migration assets
+        run: rm -f .github/workflows/apply-branding-cleanup.yml scripts/apply-branding_cleanup.py scripts/apply_branding_cleanup.py
+
+      - name: Commit normalized repository state
+        run: |
+          set -euo pipefail
+          git config user.name "mantly-maintenance[bot]"
+          git config user.email "mantly-maintenance[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No branding changes remain"
+            exit 0
+          fi
+          git commit -m "chore: normalize Mantly package and deployment identifiers"
+          git push origin "HEAD:${{ github.head_ref }}"

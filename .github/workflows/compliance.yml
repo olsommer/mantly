@@ -1,0 +1,46 @@
+name: Compliance package
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compliance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-evidence-package:
+    name: Validate DACH evidence package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Python and provider inventory
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/validate-compliance-package.py
+          python3 scripts/validate-compliance-package.py --root .
+
+      - name: Verify legal-review and lifecycle gates remain explicit
+        run: |
+          set -euo pipefail
+          grep -q "legal review required" docs/compliance/data-processing-overview.md
+          grep -q "synthetic data" docs/compliance/lifecycle-exercise-template.md
+          grep -q "restore" docs/compliance/data-export-and-tenant-deletion.md
+          grep -q "Do not claim certification" docs/compliance/customer-security-privacy-evidence-index.md
+
+      - name: Upload structural validation report
+        run: python3 scripts/validate-compliance-package.py --root . > compliance-package-validation.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compliance-package-validation
+          path: compliance-package-validation.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1414,8 +1414,8 @@ def test_automation_draft_requires_independent_grounding_for_auto_send(
 @pytest.mark.parametrize(
     ("model_evidence_id", "expected_verified"),
     [
-        ("tool:lookup-zf-e2e-shipment", True),
-        ("tool:lookup-zf-e2e-shipmen", False),
+        ("tool:shipment-status:lookup-zf-e2e-shipment", True),
+        ("tool:shipment-status:lookup-zf-e2e-shipmen", False),
     ],
 )
 def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
@@ -1471,7 +1471,7 @@ def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
         project_id="project-1",
     )
 
-    assert '"tool:lookup-zf-e2e-shipment"' in prompts[0]
+    assert '"tool:shipment-status:lookup-zf-e2e-shipment"' in prompts[0]
     assert result.verified is expected_verified
     if expected_verified:
         assert result.status == "passed"
@@ -1508,7 +1508,7 @@ def test_grounding_allows_proven_tracking_check_with_unrelated_pending_actions(
                             unit_id="u001",
                             unit_sha256=issue_agent.grounding_text_sha256(answer),
                             supported=True,
-                            evidence_ids=["tool:lookup-zf-e2e-shipment"],
+                            evidence_ids=["tool:shipment-status:lookup-zf-e2e-shipment"],
                         )
                     ],
                 )
@@ -1922,9 +1922,9 @@ def test_grounding_explicit_pending_state_with_next_step_addresses_obligation(
     ("evidence_id", "expected_verified", "expected_resolution"),
     [
         ("action:execution-conflict", True, "fulfilled_action"),
-        ("tool:conflict-check-tool", True, "fulfilled_action"),
+        ("tool:conflict-check:conflict-check-tool", True, "fulfilled_action"),
         ("ticket", False, "not_covered"),
-        ("tool:other-concern-check", False, "not_covered"),
+        ("tool:other-concern:conflict-check-tool", False, "not_covered"),
     ],
 )
 def test_grounding_fulfilled_action_requires_exact_success_evidence_from_same_concern(
@@ -1977,7 +1977,7 @@ def test_grounding_fulfilled_action_requires_exact_success_evidence_from_same_co
             "outcome": {
                 "toolEvidence": [
                     {
-                        "name": "other-concern-check",
+                        "name": "conflict-check-tool",
                         "status": "success",
                         "responseFacts": {"status": "complete"},
                     }
@@ -2004,6 +2004,262 @@ def test_grounding_fulfilled_action_requires_exact_success_evidence_from_same_co
     else:
         assert result.reason_code == "incomplete_answer"
         assert result.uncovered_obligations == ("Run the conflict check.",)
+
+
+def _two_concern_shared_tool_grounding_issue() -> dict[str, Any]:
+    issue = _issue_with_grounding_obligations(
+        concern_id="first-concern",
+        questions=[("first:status", "What is the first concern status?")],
+        tool_evidence=[
+            {
+                "name": "shared-status",
+                "status": "success",
+                "responseFacts": {"status": "inactive"},
+            }
+        ],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": "second-concern",
+            "matched": True,
+            "intentName": "second-runbook",
+            "outcome": {
+                "toolEvidence": [
+                    {
+                        "name": "shared-status",
+                        "status": "success",
+                        "responseFacts": {"status": "active"},
+                    }
+                ]
+            },
+        }
+    )
+    return issue
+
+
+def _successful_grounding_action(
+    execution_id: str,
+    concern_id: str,
+) -> dict[str, Any]:
+    return {
+        "id": execution_id,
+        "type": "runbook_webhook",
+        "status": "success",
+        "completedAt": "2026-07-18T10:00:00Z",
+        "metadata": {
+            "source": "runbook",
+            "concernId": concern_id,
+        },
+        "result": {
+            "proposedAction": {
+                "name": "set_status",
+                "label": "Set status",
+            },
+            "application": {
+                "applied": True,
+                "webhookResult": {
+                    "status": "ok",
+                    "response": {"status": "active"},
+                },
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("resolution", ["answered", "pending_or_unavailable"])
+def test_grounding_rejects_other_concern_tool_for_every_addressed_obligation(
+    monkeypatch: pytest.MonkeyPatch,
+    resolution: str,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+    answer = "The first concern status is active."
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("first:status", resolution, ["u001"])],
+        unit_evidence_ids=["tool:second-concern:shared-status"],
+    )
+
+    assert '"tool:first-concern:shared-status"' in prompt
+    assert '"tool:second-concern:shared-status"' in prompt
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+    assert result.uncovered_obligations == ("What is the first concern status?",)
+
+
+@pytest.mark.parametrize("resolution", ["answered", "pending_or_unavailable"])
+def test_grounding_rejects_other_concern_action_for_every_addressed_obligation(
+    monkeypatch: pytest.MonkeyPatch,
+    resolution: str,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+    issue["actionExecutions"] = [
+        _successful_grounding_action("execution-first", "first-concern"),
+        _successful_grounding_action("execution-second", "second-concern"),
+    ]
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The first concern status is active.",
+        resolutions=[("first:status", resolution, ["u001"])],
+        unit_evidence_ids=["action:execution-second"],
+    )
+
+    assert '"action:execution-first"' in prompt
+    assert '"action:execution-second"' in prompt
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+    assert result.uncovered_obligations == ("What is the first concern status?",)
+
+
+@pytest.mark.parametrize("resolution", ["answered", "pending_or_unavailable"])
+def test_grounding_rejects_other_concern_container_for_addressed_obligation(
+    monkeypatch: pytest.MonkeyPatch,
+    resolution: str,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The first concern status is active.",
+        resolutions=[("first:status", resolution, ["u001"])],
+        unit_evidence_ids=["concern:second-concern"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "evidence_id",
+    ["tool:first-concern:shared-status", "concern:first-concern"],
+)
+def test_grounding_accepts_same_concern_tool_or_container_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_id: str,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The first concern status was checked.",
+        resolutions=[("first:status", "answered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+def test_grounding_ticket_id_contains_only_global_safe_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+    issue["actionExecutions"] = [
+        _successful_grounding_action("execution-first", "first-concern"),
+        _successful_grounding_action("execution-second", "second-concern"),
+    ]
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["answerObligations"] = [
+        {
+            "obligationId": "first:subject",
+            "question": "What is this ticket's subject?",
+        }
+    ]
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The ticket subject is Grounding obligation regression.",
+        resolutions=[("first:subject", "answered", ["u001"])],
+        unit_evidence_ids=["ticket"],
+    )
+
+    global_ticket = prompt.split(
+        "## Global Ticket Evidence (`ticket`)\n",
+        1,
+    )[1].split("\n\n## Concern-Scoped Runbook Evidence\n", 1)[0]
+    scoped_ticket = prompt.split(
+        "## Concern-Scoped Runbook Evidence\n",
+        1,
+    )[1].split("\n\n## Account Intelligence\n", 1)[0]
+
+    assert '"subject": "Grounding obligation regression"' in global_ticket
+    assert '"concerns"' not in global_ticket
+    assert '"toolEvidence"' not in global_ticket
+    assert '"runbookActions"' not in global_ticket
+    assert "shared-status" not in global_ticket
+    assert "execution-second" not in global_ticket
+    assert '"evidenceId": "concern:first-concern"' in scoped_ticket
+    assert '"evidenceId": "tool:second-concern:shared-status"' in scoped_ticket
+    assert '"evidenceId": "action:execution-second"' in scoped_ticket
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+def test_grounding_context_hashes_global_and_scoped_ticket_evidence_separately() -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+    initial = {
+        snapshot["id"]: snapshot["contextSha256"]
+        for snapshot in issue_agent.grounding_context_snapshots(
+            issue=issue,
+            messages=[],
+        )
+    }
+    issue["aiRuns"][0]["intentResult"]["concerns"][1]["outcome"][
+        "toolEvidence"
+    ][0]["responseFacts"]["status"] = "paused"
+    changed = {
+        snapshot["id"]: snapshot["contextSha256"]
+        for snapshot in issue_agent.grounding_context_snapshots(
+            issue=issue,
+            messages=[],
+        )
+    }
+
+    assert initial["ticket"] == changed["ticket"]
+    assert initial["ticket:scoped"] != changed["ticket:scoped"]
+
+
+def test_grounding_allows_legacy_tool_id_only_from_explicit_flat_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="legacy-concern",
+        questions=[("legacy:status", "What is the legacy status?")],
+    )
+    legacy_ticket = issue_agent._automatic_ticket_context(issue)
+    legacy_ticket["toolEvidence"] = [
+        {
+            "name": "legacy-status",
+            "status": "success",
+            "evidenceId": "tool:legacy-status",
+            "responseFacts": {"status": "active"},
+        }
+    ]
+    monkeypatch.setattr(
+        issue_agent,
+        "_automatic_ticket_context",
+        lambda _issue: legacy_ticket,
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The legacy status is active.",
+        resolutions=[("legacy:status", "answered", ["u001"])],
+        unit_evidence_ids=["tool:legacy-status"],
+    )
+
+    assert result.verified is True
+    assert issue_agent._scoped_tool_evidence_concerns(legacy_ticket) == {}
 
 
 def test_grounding_prompt_defines_strict_obligation_resolution_contract() -> None:

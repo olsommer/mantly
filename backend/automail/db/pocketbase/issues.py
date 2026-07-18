@@ -36,6 +36,11 @@ from automail.support.issue_agent import (
 )
 from automail.support.issue_fields import draft_issue_field_values
 from automail.support.issue_triage import IssueTriageSuggestion, draft_issue_triage
+from automail.support.safety_guidance import (
+    SAFETY_HUMAN_APPROVAL_REQUIRED_REASON_CODE,
+    assess_lithium_battery_safety,
+    lithium_battery_reply_safety_blocked_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,9 @@ ISSUE_PRIORITIES = {"low", "normal", "high", "urgent"}
 OUTBOUND_STATUSES = {"draft", "queued", "sent", "failed"}
 AUTOMATIC_REPLY_SOURCES = {"agent_answer", "automation", "email_pipeline"}
 DELIVERY_CLAIM_LEASE_SECONDS = 900
+# Router + up to three concerns may each consume all configured LLM retries.
+# One hour stays above that bounded worst case without requiring a heartbeat.
+DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS = 3_600
 AUTOMATIC_REPLY_TERMINAL_ERROR = "Automatic reply requires an active unmerged ticket"
 ACTION_EXECUTION_STATUSES = {"pending", "running", "success", "failed", "skipped"}
 _ISSUE_ID_FILTER_CHUNK_SIZE = 50
@@ -2403,6 +2411,219 @@ def _normalize_ai_run(rec: dict[str, Any]) -> dict[str, Any]:
         "created": rec.get("created", ""),
         "updated": rec.get("updated", ""),
     }
+
+
+def _processing_progress_metadata(
+    run: dict[str, Any],
+    *,
+    stage: str,
+    label: str,
+    status: str = "processing",
+    detail: str = "",
+    terminal_status: str = "",
+) -> dict[str, Any]:
+    """Advance durable UI progress while preserving completed stage history."""
+    now = _now_iso()
+    metadata = _parse(run.get("metadata"), dict)
+    previous = _parse(metadata.get("processingProgress"), dict)
+    started_at = _string_from(previous.get("startedAt")) or _string_from(run.get("started_at")) or now
+    stages = [dict(item) for item in _parse(previous.get("stages"), list) if isinstance(item, dict)]
+    previous_stage = _string_from(previous.get("stage"))
+    previous_status = _string_from(previous.get("status"))
+    if previous_stage and previous_stage != stage and previous_status == "processing":
+        for item in reversed(stages):
+            if _string_from(item.get("key")) == previous_stage and _string_from(item.get("status")) == "processing":
+                item["status"] = "completed"
+                item["completedAt"] = now
+                break
+    current = next(
+        (item for item in reversed(stages) if _string_from(item.get("key")) == stage),
+        None,
+    )
+    if current is None:
+        current = {"key": stage, "label": label, "status": status, "startedAt": now}
+        stages.append(current)
+    else:
+        current.update({"label": label, "status": status})
+    if detail:
+        current["detail"] = _clip(detail, 500)
+    if status in {"completed", "failed"}:
+        current["completedAt"] = now
+    progress = {
+        "version": 1,
+        "status": status,
+        "stage": stage,
+        "label": label,
+        "detail": _clip(detail, 500),
+        "startedAt": started_at,
+        "updatedAt": now,
+        "completedAt": now if status in {"completed", "failed"} else "",
+        "terminalStatus": terminal_status or _string_from(previous.get("terminalStatus")),
+        "stages": stages[-12:],
+    }
+    return {**metadata, "processingProgress": progress}
+
+
+class ProcessingClaimExpired(RuntimeError):
+    """A durable processing owner lost its claim before a side effect."""
+
+
+def _processing_claim_token(run: dict[str, Any] | None) -> str:
+    metadata = _parse((run or {}).get("metadata"), dict)
+    claim = _parse(metadata.get("processingClaim"), dict)
+    return _string_from(claim.get("token"))
+
+
+def _processing_claim_is_active(run: dict[str, Any] | None) -> bool:
+    """Fail closed for claimed work when ownership cannot be confirmed."""
+    claim_token = _processing_claim_token(run)
+    if not claim_token:
+        return True
+    run_id = _string_from((run or {}).get("id"))
+    if not run_id:
+        return False
+    tenant_id = _string_from((run or {}).get("tenant") or (run or {}).get("tenantId")) or None
+    project_id = _string_from((run or {}).get("project") or (run or {}).get("projectId"))
+    try:
+        latest = _first(
+            "support_ai_runs",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"id='{_escape_pb(run_id)}'",
+            ),
+        )
+    except Exception:
+        logger.warning("Could not verify processing claim for run %s", run_id, exc_info=True)
+        return False
+    return bool(
+        latest
+        and _string_from(latest.get("status")).lower() == "processing"
+        and _processing_claim_token(latest) == claim_token
+    )
+
+
+def _require_processing_claim(run: dict[str, Any] | None) -> None:
+    if not _processing_claim_is_active(run):
+        raise ProcessingClaimExpired("Processing claim expired")
+
+
+def _advance_processing_run(
+    run: dict[str, Any] | None,
+    *,
+    stage: str,
+    label: str,
+    detail: str = "",
+) -> dict[str, Any] | None:
+    run_id = _string_from((run or {}).get("id"))
+    if not run_id:
+        return run
+    if not _processing_claim_is_active(run):
+        logger.warning("Skipping progress update after claim expiry for run %s", run_id)
+        return run
+    metadata = _processing_progress_metadata(
+        run or {},
+        stage=stage,
+        label=label,
+        detail=detail,
+    )
+    try:
+        patched = _patch(
+            f"/api/collections/support_ai_runs/records/{run_id}",
+            {"status": "processing", "metadata": metadata, "completed_at": ""},
+        )
+    except Exception:
+        logger.exception("Could not advance processing progress for run %s", run_id)
+        return run
+    run.update({"status": "processing", "metadata": metadata, "completed_at": "", **patched})
+    return run
+
+
+def _start_processing_run(
+    *,
+    issue_id: str,
+    tenant_id: str | None,
+    project_id: str,
+    run_key: str,
+    source: str,
+    kind: str,
+    stage: str,
+    label: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    now = _now_iso()
+    run: dict[str, Any] = {
+        "id": generate_id(),
+        "issue": issue_id,
+        "run_key": run_key,
+        "source": source,
+        "status": "processing",
+        "activated_intent": "",
+        "requires_human": False,
+        "summary": label,
+        "identity_result": {},
+        "intent_result": {},
+        "security_result": {},
+        "token_usage": {},
+        "tool_calls": [],
+        "metadata": {"kind": kind, **_record_from(metadata)},
+        "started_at": now,
+        "completed_at": "",
+        "project": project_id,
+    }
+    if tenant_id:
+        run["tenant"] = tenant_id
+    run["metadata"] = _processing_progress_metadata(
+        run,
+        stage=stage,
+        label=label,
+    )
+    try:
+        persisted = _post("/api/collections/support_ai_runs/records", run)
+    except Exception:
+        logger.exception("Could not persist processing progress for issue %s", issue_id)
+        return None
+    run.update(persisted)
+    return run
+
+
+def _finish_processing_run(
+    run: dict[str, Any] | None,
+    *,
+    failed: bool = False,
+    detail: str = "",
+) -> dict[str, Any] | None:
+    run_id = _string_from((run or {}).get("id"))
+    if not run_id:
+        return run
+    if not _processing_claim_is_active(run):
+        logger.warning("Skipping progress completion after claim expiry for run %s", run_id)
+        return run
+    prior_progress = _parse(_parse((run or {}).get("metadata"), dict).get("processingProgress"), dict)
+    terminal_status = "failed" if failed else _string_from(prior_progress.get("terminalStatus")) or "success"
+    label = "Processing failed" if failed else "Processing complete"
+    now = _now_iso()
+    metadata = _processing_progress_metadata(
+        run or {},
+        stage="failed" if failed else "completed",
+        label=label,
+        status="failed" if failed else "completed",
+        detail=detail,
+        terminal_status=terminal_status,
+    )
+    payload = {
+        "status": terminal_status,
+        "metadata": metadata,
+        "completed_at": now,
+        **({"summary": _clip(detail, 1_000), "requires_human": True} if failed and detail else {}),
+    }
+    try:
+        patched = _patch(f"/api/collections/support_ai_runs/records/{run_id}", payload)
+    except Exception:
+        logger.exception("Could not finish processing progress for run %s", run_id)
+        return run
+    run.update({**payload, **patched})
+    return run
 
 
 def _normalize_agent_message(rec: dict[str, Any]) -> dict[str, Any]:
@@ -6755,6 +6976,177 @@ def _direct_channel_run_key(*, source: str, source_message_id: str) -> str:
     return _key_from(f"{source}:{source_message_id}:runbooks")
 
 
+class DirectChannelProcessingInProgress(RuntimeError):
+    """A live source-message worker still owns the direct-channel run."""
+
+
+def _direct_processing_is_stale(
+    run: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    lease_seconds: int = DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS,
+) -> bool:
+    metadata = _parse(run.get("metadata"), dict)
+    progress = _parse(metadata.get("processingProgress"), dict)
+    last_update = _parse_iso_datetime(
+        progress.get("updatedAt")
+        or progress.get("updated_at")
+        or run.get("updated")
+        or run.get("started_at")
+        or run.get("created")
+    )
+    if last_update is None:
+        return True
+    return ((now or _now_utc()) - last_update).total_seconds() >= max(1, lease_seconds)
+
+
+def expire_stale_direct_channel_processing_runs_for_scope(
+    *,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    limit: int = 200,
+    lease_seconds: int = DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS,
+    source: str = "scheduler",
+) -> dict[str, Any]:
+    """Terminalize abandoned direct-channel work without replaying its tools."""
+    clean_limit = max(1, min(int(limit or 200), 500))
+    now = _now_utc()
+    now_iso = now.isoformat()
+    scope_filters = ["status='processing'"]
+    if project_id:
+        scope_filters.append(f"project='{_escape_pb(project_id)}'")
+    if tenant_id:
+        scope_filters.append(f"tenant='{_escape_pb(tenant_id)}'")
+    records = _list_all(
+        "support_ai_runs",
+        " && ".join(scope_filters),
+        sort="started_at",
+        per_page=clean_limit,
+    )
+    inspected = 0
+    expired = 0
+    skipped = 0
+    failed = 0
+    items: list[dict[str, Any]] = []
+    for candidate in records:
+        metadata = _parse(candidate.get("metadata"), dict)
+        if _string_from(metadata.get("kind")) != "direct_channel_runbooks":
+            continue
+        if inspected >= clean_limit:
+            break
+        inspected += 1
+        run_id = _string_from(candidate.get("id"))
+        if not run_id or not _direct_processing_is_stale(
+            candidate,
+            now=now,
+            lease_seconds=lease_seconds,
+        ):
+            skipped += 1
+            continue
+        run_tenant_id = _string_from(candidate.get("tenant")) or tenant_id
+        run_project_id = _string_from(candidate.get("project")) or project_id or ""
+        try:
+            latest = _first(
+                "support_ai_runs",
+                _issue_filter(
+                    tenant_id=run_tenant_id,
+                    project_id=run_project_id,
+                    extra=f"id='{_escape_pb(run_id)}'",
+                ),
+            )
+            latest_metadata = _parse((latest or {}).get("metadata"), dict)
+            if (
+                not latest
+                or _string_from(latest.get("status")).lower() != "processing"
+                or _string_from(latest_metadata.get("kind")) != "direct_channel_runbooks"
+                or not _direct_processing_is_stale(
+                    latest,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
+            ):
+                skipped += 1
+                continue
+            expired_metadata = _processing_progress_metadata(
+                latest,
+                stage="failed",
+                label="Processing lease expired",
+                status="failed",
+                detail="Automatic processing stopped and requires manual review.",
+                terminal_status="failed",
+            )
+            claim = _parse(expired_metadata.get("processingClaim"), dict)
+            if claim:
+                expired_metadata["processingClaim"] = {
+                    **claim,
+                    "expiredAt": now_iso,
+                }
+            expired_metadata["processingExpiry"] = {
+                "version": 1,
+                "expiredAt": now_iso,
+                "leaseSeconds": max(1, int(lease_seconds)),
+                "source": _string_from(source) or "scheduler",
+                "replayed": False,
+            }
+            _patch(
+                f"/api/collections/support_ai_runs/records/{run_id}",
+                {
+                    "status": "failed",
+                    "requires_human": True,
+                    "summary": "Processing lease expired; manual review required",
+                    "metadata": expired_metadata,
+                    "completed_at": now_iso,
+                },
+            )
+            issue_id = _string_from(latest.get("issue"))
+            if issue_id:
+                _patch(
+                    f"/api/collections/support_issues/records/{issue_id}",
+                    {"requires_human": True},
+                )
+                _record_issue_event(
+                    issue_id=issue_id,
+                    event_type="direct_processing_expired",
+                    tenant_id=run_tenant_id,
+                    project_id=run_project_id,
+                    actor_email="processing-sweeper",
+                    title="Automatic processing expired",
+                    body="No tools were replayed. Manual review is required.",
+                    metadata={
+                        "aiRunId": run_id,
+                        "leaseSeconds": max(1, int(lease_seconds)),
+                        "source": _string_from(source) or "scheduler",
+                        "replayed": False,
+                    },
+                    record_id=_stable_record_id(
+                        "support_issue_event",
+                        run_project_id,
+                        issue_id,
+                        run_id,
+                        "direct_processing_expired",
+                    ),
+                )
+            expired += 1
+            items.append({"runId": run_id, "issueId": issue_id, "status": "failed"})
+        except Exception as exc:
+            failed += 1
+            items.append({"runId": run_id, "issueId": "", "status": "failed", "error": str(exc)})
+            logger.warning("Could not expire stale direct-channel run %s", run_id, exc_info=True)
+    return {
+        "inspected": inspected,
+        "expired": expired,
+        "skipped": skipped,
+        "failed": failed,
+        "items": items,
+        "leaseSeconds": max(1, int(lease_seconds)),
+    }
+
+
+def _processing_run_from_issue(issue: dict[str, Any] | None) -> dict[str, Any] | None:
+    run = (issue or {}).get("_processingRun")
+    return run if isinstance(run, dict) and _string_from(run.get("id")) else None
+
+
 def _apply_direct_channel_runbooks(
     *,
     issue: dict[str, Any],
@@ -6768,6 +7160,7 @@ def _apply_direct_channel_runbooks(
     project_id: str,
 ) -> dict[str, Any]:
     """Persist one direct message's runbook result before ticket automation."""
+    from automail.integrations.http_tool import fence_http_tool_execution
     from automail.pipeline.drafts import get_live_source
     from automail.support.channel_runbooks import run_direct_channel_runbooks
 
@@ -6787,6 +7180,10 @@ def _apply_direct_channel_runbooks(
         ),
     )
     now = _now_iso()
+    if existing and _string_from(existing.get("status")).lower() == "processing":
+        raise DirectChannelProcessingInProgress(
+            "Direct-channel runbook processing is already in progress"
+        )
     if existing:
         intent_result = _parse(existing.get("intent_result"), dict)
         issue_updates = {
@@ -6821,20 +7218,66 @@ def _apply_direct_channel_runbooks(
                 logger.error("Could not persist direct-channel resume fallback", exc_info=True)
         return {**issue, **issue_updates}
 
+    processing_claim_token = secrets.token_hex(16)
+    processing_run = _start_processing_run(
+        issue_id=issue_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        run_key=run_key,
+        source=source,
+        kind="direct_channel_runbooks",
+        stage="runbooks",
+        label="Matching concerns and runbooks",
+        metadata={
+            "channel": source,
+            "messageId": source_message_id,
+            "sourceMessageId": source_message_id,
+            "processingClaim": {
+                "version": 1,
+                "token": processing_claim_token,
+                "claimedAt": now,
+            },
+        },
+    )
+    if processing_run is None:
+        try:
+            competing_run = _first(
+                "support_ai_runs",
+                _issue_filter(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    extra=(
+                        f"issue='{_escape_pb(issue_id)}' && "
+                        f"run_key='{_escape_pb(run_key)}'"
+                    ),
+                ),
+            )
+        except Exception:
+            competing_run = None
+        if competing_run:
+            raise DirectChannelProcessingInProgress(
+                "Direct-channel runbook processing was claimed by another worker"
+            )
+        raise DirectChannelProcessingInProgress(
+            "Direct-channel runbook processing could not acquire a durable claim"
+        )
     result = None
     error = ""
     try:
-        result = run_direct_channel_runbooks(
-            source_message_id=source_message_id,
-            subject=subject,
-            body=body,
-            from_address=identity.get("contact_email", ""),
-            identity=identity,
-            identity_data=identity_data,
-            config_source=get_live_source(project_id, tenant_id=tenant_id),
-            tenant_id=tenant_id,
-            project_id=project_id,
-        )
+        with fence_http_tool_execution(
+            lambda: _processing_claim_is_active(processing_run)
+        ):
+            result = run_direct_channel_runbooks(
+                source_message_id=source_message_id,
+                subject=subject,
+                body=body,
+                from_address=identity.get("contact_email", ""),
+                identity=identity,
+                identity_data=identity_data,
+                config_source=get_live_source(project_id, tenant_id=tenant_id),
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
     except Exception as exc:
         error = _clip(str(exc) or exc.__class__.__name__, 1_000)
         logger.error(
@@ -6844,6 +7287,10 @@ def _apply_direct_channel_runbooks(
             error,
             exc_info=True,
         )
+
+    # The expiry sweeper never replays runbooks. If it fenced this owner while
+    # the LLM was still returning, refuse every subsequent durable write.
+    _require_processing_claim(processing_run)
 
     requires_human = bool(error or result is None or result.requires_human)
     intent_result = result.intent_result if result else {"concerns": [], "error": error}
@@ -6857,12 +7304,21 @@ def _apply_direct_channel_runbooks(
     }
     if result and result.generated_attachments:
         metadata["generatedAttachments"] = result.generated_attachments
+    terminal_status = "failed" if error else "needs_human" if requires_human else "success"
+    progress_metadata = _processing_progress_metadata(
+        processing_run or {"metadata": metadata, "started_at": now},
+        stage="automation",
+        label="Applying ticket automation",
+        detail=summary,
+        terminal_status=terminal_status,
+    )
+    metadata = {**metadata, **progress_metadata}
     run_data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": _string_from((processing_run or {}).get("id")) or generate_id(),
         "issue": issue_id,
         "run_key": run_key,
         "source": source,
-        "status": "failed" if error else "needs_human" if requires_human else "success",
+        "status": "processing" if processing_run else terminal_status,
         "activated_intent": activated_intent,
         "requires_human": requires_human,
         "summary": summary,
@@ -6873,35 +7329,62 @@ def _apply_direct_channel_runbooks(
         "tool_calls": result.tool_calls if result else [],
         "metadata": metadata,
         "started_at": now,
-        "completed_at": now,
+        "completed_at": "" if processing_run else now,
     }
     if tenant_id:
         run_data["tenant"] = tenant_id
     run_data["project"] = project_id
-    run_persisted = False
+    run_persisted = processing_run is not None
+    persisted_run = processing_run or {}
     try:
-        persisted_run = _post("/api/collections/support_ai_runs/records", run_data)
-        run_persisted = True
-        usage_calls = _parse(run_data.get("token_usage"), dict).get("calls")
-        if isinstance(usage_calls, list) and usage_calls:
-            try:
-                from automail.db.pocketbase.client import store_llm_usage_events
+        _require_processing_claim(processing_run)
+        if processing_run:
+            patched_run = _patch(
+                f"/api/collections/support_ai_runs/records/{run_data['id']}",
+                {
+                    key: value
+                    for key, value in run_data.items()
+                    if key not in {"id", "issue", "run_key", "source", "started_at", "tenant", "project"}
+                },
+            )
+            processing_run.update({**run_data, **patched_run})
+            persisted_run = processing_run
+        else:
+            persisted_run = _post("/api/collections/support_ai_runs/records", run_data)
+            run_persisted = True
+        if run_persisted:
+            usage_calls = _parse(run_data.get("token_usage"), dict).get("calls")
+            if isinstance(usage_calls, list) and usage_calls:
+                try:
+                    from automail.db.pocketbase.client import store_llm_usage_events
 
-                store_llm_usage_events(
-                    usage_calls,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    run_id=_string_from(persisted_run.get("id")) or _string_from(run_data.get("id")),
-                )
-            except Exception:
-                logger.warning("Failed to store direct-channel LLM usage events", exc_info=True)
+                    store_llm_usage_events(
+                        usage_calls,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        run_id=_string_from(persisted_run.get("id")) or _string_from(run_data.get("id")),
+                    )
+                except Exception:
+                    logger.warning("Failed to store direct-channel LLM usage events", exc_info=True)
+    except ProcessingClaimExpired:
+        raise
     except Exception:
+        run_persisted = False
         logger.error(
             "Could not persist direct-channel runbook result: source=%s message=%s",
             source,
             source_message_id,
             exc_info=True,
         )
+        if processing_run:
+            try:
+                _finish_processing_run(
+                    processing_run,
+                    failed=True,
+                    detail="Could not persist direct-channel runbook result",
+                )
+            except Exception:
+                logger.exception("Could not mark direct-channel progress failed")
     if not run_persisted:
         requires_human = True
 
@@ -6911,6 +7394,7 @@ def _apply_direct_channel_runbooks(
         "action_log": _action_log(intent_result),
     }
     try:
+        _require_processing_claim(processing_run)
         _patch(f"/api/collections/support_issues/records/{issue_id}", issue_updates)
         if result and result.intent_result.get("matched"):
             _prepare_runbook_action_approvals(
@@ -6920,6 +7404,8 @@ def _apply_direct_channel_runbooks(
                 tenant_id=tenant_id,
                 project_id=project_id,
             )
+    except ProcessingClaimExpired:
+        raise
     except Exception:
         issue_updates["requires_human"] = True
         logger.error(
@@ -6935,7 +7421,11 @@ def _apply_direct_channel_runbooks(
             )
         except Exception:
             logger.error("Could not persist direct-channel human-review fallback", exc_info=True)
-    return {**issue, **issue_updates}
+    return {
+        **issue,
+        **issue_updates,
+        **({"_processingRun": processing_run} if processing_run else {}),
+    }
 
 
 def _email_metadata_from_chat(chat: dict[str, Any]) -> dict[str, Any]:
@@ -10101,6 +10591,8 @@ def _agent_answer_runs_for_context(issue: dict[str, Any], limit: int = 6) -> lis
     for run in _parse(issue.get("aiRuns"), list):
         if not isinstance(run, dict):
             continue
+        if _string_from(run.get("status")).lower() == "processing":
+            continue
         metadata = _parse(run.get("metadata"), dict)
         if _string_from(run.get("source")) == "agent_answer" or metadata.get("kind") == "agent_answer":
             runs.append(run)
@@ -10303,9 +10795,12 @@ def _record_agent_answer_ai_run(
     token_usage: dict[str, Any] | None = None,
     response_attachments: tuple[str, ...] | None = None,
     unresolved_response_attachments: tuple[str, ...] | None = None,
+    existing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now_iso()
-    run_key = _key_from(f"agent-answer:{now}:{question or issue_id}")
+    run_key = _string_from((existing_run or {}).get("run_key")) or _key_from(
+        f"agent-answer:{now}:{question or issue_id}"
+    )
     knowledge_article_ids = [_string_from(article.get("id")) for article in articles]
     clean_citation_evidence = tuple(
         dict(item)
@@ -10343,7 +10838,7 @@ def _record_agent_answer_ai_run(
         if item
     ]
     data: dict[str, Any] = {
-        "id": generate_id(),
+        "id": _string_from((existing_run or {}).get("id")) or generate_id(),
         "issue": issue_id,
         "run_key": run_key,
         "source": "agent_answer",
@@ -10424,7 +10919,7 @@ def _record_agent_answer_ai_run(
             "responseAttachments": clean_response_attachments,
             "unresolvedResponseAttachments": clean_unresolved_response_attachments,
         },
-        "started_at": now,
+        "started_at": _string_from((existing_run or {}).get("started_at")) or now,
         "completed_at": now,
     }
     if clean_automation_context:
@@ -10436,6 +10931,29 @@ def _record_agent_answer_ai_run(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
+    if existing_run:
+        data["metadata"] = _processing_progress_metadata(
+            {
+                **existing_run,
+                "metadata": {
+                    **_parse(existing_run.get("metadata"), dict),
+                    **_parse(data.get("metadata"), dict),
+                },
+            },
+            stage="completed",
+            label="Answer ready for review",
+            status="completed",
+            terminal_status=_string_from(data.get("status")) or "success",
+        )
+        patched = _patch(
+            f"/api/collections/support_ai_runs/records/{data['id']}",
+            {
+                key: value
+                for key, value in data.items()
+                if key not in {"id", "issue", "tenant", "project"}
+            },
+        )
+        return _normalize_ai_run({**existing_run, **data, **patched})
     return _normalize_ai_run(_post("/api/collections/support_ai_runs/records", data))
 
 
@@ -10453,6 +10971,24 @@ def _agent_answer_token_usage(collector: Any, *, event_start: int) -> dict[str, 
     return aggregate_usage_calls(captured) if captured else {}
 
 
+def _is_runbook_ai_run(
+    run: dict[str, Any],
+    intent_result: dict[str, Any],
+) -> bool:
+    """Identify modern and legacy runbook runs without claiming unrelated AI work."""
+    metadata = _record_from(run.get("metadata"))
+    if _string_from(metadata.get("kind")) == "direct_channel_runbooks":
+        return True
+    if _string_from(run.get("source")).startswith("channel:"):
+        return True
+    if isinstance(intent_result.get("concerns"), list):
+        return True
+    return any(
+        key in intent_result
+        for key in ("matched", "intentName", "intent_name")
+    )
+
+
 def _latest_runbook_ai_run(issue: dict[str, Any]) -> dict[str, Any]:
     for run in issue.get("aiRuns", []):
         if not isinstance(run, dict):
@@ -10460,7 +10996,7 @@ def _latest_runbook_ai_run(issue: dict[str, Any]) -> dict[str, Any]:
         if _string_from(run.get("source")) in {"agent_answer", "triage", "custom_fields"}:
             continue
         intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
-        if isinstance(intent_result.get("concerns"), list):
+        if _is_runbook_ai_run(run, intent_result):
             return run
     return {}
 
@@ -10800,47 +11336,65 @@ def create_issue_agent_answer(
     auto_send: bool = False,
     use_knowledge_agent: bool = False,
     knowledge_actor_role: str = "automation",
+    processing_run: dict[str, Any] | None = None,
+    persist_progress: bool = False,
 ) -> dict[str, Any] | None:
     """Create an answer while collecting support-agent LLM usage for its audit run."""
     from automail.llm.usage import collect_llm_usage, current_collector
 
-    existing_collector = current_collector()
-    if existing_collector is not None:
-        return _create_issue_agent_answer(
-            issue_id,
+    own_processing_run = persist_progress and processing_run is None
+    if own_processing_run:
+        processing_run = _start_processing_run(
+            issue_id=issue_id,
             tenant_id=tenant_id,
             project_id=project_id,
-            author_email=author_email,
-            question=question,
-            create_draft=create_draft,
-            include_feedback_link=include_feedback_link,
-            automation_context=automation_context,
-            approval_required=approval_required,
-            revision_context=revision_context,
-            auto_send=auto_send,
-            use_knowledge_agent=use_knowledge_agent,
-            knowledge_actor_role=knowledge_actor_role,
-            usage_collector=existing_collector,
-            usage_event_start=len(existing_collector.events),
+            run_key=_key_from(f"agent-answer-progress:{_now_iso()}:{issue_id}:{question}"),
+            source="agent_progress",
+            kind="agent_answer_progress",
+            stage="context",
+            label="Loading ticket context",
+            metadata={"question": _clip(_string_from(question), 4_000), "createdBy": author_email},
         )
-    with collect_llm_usage() as collector:
-        return _create_issue_agent_answer(
-            issue_id,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            author_email=author_email,
-            question=question,
-            create_draft=create_draft,
-            include_feedback_link=include_feedback_link,
-            automation_context=automation_context,
-            approval_required=approval_required,
-            revision_context=revision_context,
-            auto_send=auto_send,
-            use_knowledge_agent=use_knowledge_agent,
-            knowledge_actor_role=knowledge_actor_role,
-            usage_collector=collector,
-            usage_event_start=0,
-        )
+    kwargs = {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "author_email": author_email,
+        "question": question,
+        "create_draft": create_draft,
+        "include_feedback_link": include_feedback_link,
+        "automation_context": automation_context,
+        "approval_required": approval_required,
+        "revision_context": revision_context,
+        "auto_send": auto_send,
+        "use_knowledge_agent": use_knowledge_agent,
+        "knowledge_actor_role": knowledge_actor_role,
+        "processing_run": processing_run,
+        "reuse_processing_run": bool(own_processing_run and processing_run),
+    }
+    try:
+        existing_collector = current_collector()
+        if existing_collector is not None:
+            result = _create_issue_agent_answer(
+                issue_id,
+                usage_collector=existing_collector,
+                usage_event_start=len(existing_collector.events),
+                **kwargs,
+            )
+        else:
+            with collect_llm_usage() as collector:
+                result = _create_issue_agent_answer(
+                    issue_id,
+                    usage_collector=collector,
+                    usage_event_start=0,
+                    **kwargs,
+                )
+    except Exception as exc:
+        if own_processing_run:
+            _finish_processing_run(processing_run, failed=True, detail=str(exc))
+        raise
+    if result is None and own_processing_run:
+        _finish_processing_run(processing_run, failed=True, detail="Ticket unavailable")
+    return result
 
 
 def _create_issue_agent_answer(
@@ -10860,7 +11414,10 @@ def _create_issue_agent_answer(
     knowledge_actor_role: str = "automation",
     usage_collector: Any,
     usage_event_start: int,
+    processing_run: dict[str, Any] | None = None,
+    reuse_processing_run: bool = False,
 ) -> dict[str, Any] | None:
+    _require_processing_claim(processing_run)
     issue = get_issue(
         issue_id,
         tenant_id=tenant_id,
@@ -10868,6 +11425,7 @@ def _create_issue_agent_answer(
         actor_email=author_email,
         actor_role=knowledge_actor_role,
     )
+    _require_processing_claim(processing_run)
     if not issue:
         return None
     usage_sink = _AgentAnswerUsageSink(tenant_id=tenant_id, project_id=project_id)
@@ -10943,6 +11501,13 @@ def _create_issue_agent_answer(
         "fallback_confidence": fallback_confidence,
         "on_late_usage": usage_sink.report_late,
     }
+    _require_processing_claim(processing_run)
+    _advance_processing_run(
+        processing_run,
+        stage="composer",
+        label="Composing one customer answer",
+    )
+    _require_processing_claim(processing_run)
     if use_knowledge_agent:
         draft = draft_issue_agent_answer(
             articles=knowledge_corpus,
@@ -10953,6 +11518,7 @@ def _create_issue_agent_answer(
             articles=fallback_articles,
             **draft_kwargs,
         )
+    _require_processing_claim(processing_run)
     if draft.requires_human:
         clean_approval_required = True
     answer = draft.answer
@@ -11121,6 +11687,7 @@ def _create_issue_agent_answer(
         )
     )
     if needs_fresh_grounding_state:
+        _require_processing_claim(processing_run)
         refreshed_issue = get_issue(
             issue_id,
             tenant_id=tenant_id,
@@ -11128,6 +11695,7 @@ def _create_issue_agent_answer(
             actor_email=author_email,
             actor_role=knowledge_actor_role,
         )
+        _require_processing_claim(processing_run)
         if refreshed_issue:
             issue = refreshed_issue
             messages = (
@@ -11152,6 +11720,12 @@ def _create_issue_agent_answer(
         and _string_from(clean_automation_context.get("source")) == "channel_autopilot"
     )
     if automatic_draft_requires_grounding:
+        _require_processing_claim(processing_run)
+        _advance_processing_run(
+            processing_run,
+            stage="grounding",
+            label="Checking answer against evidence",
+        )
         grounding_assessment = assess_issue_automation_grounding(
             issue=issue,
             messages=messages,
@@ -11163,6 +11737,7 @@ def _create_issue_agent_answer(
             conversation_context=conversation_context,
             on_late_usage=usage_sink.report_late,
         )
+        _require_processing_claim(processing_run)
         grounding_gate = grounding_assessment.as_metadata()
         if not grounding_assessment.verified:
             draft_blocked_reason = grounding_assessment.reason_code or "grounding_check_failed"
@@ -11178,6 +11753,12 @@ def _create_issue_agent_answer(
             )
             if not auto_send_blocked_reason:
                 if not grounding_gate:
+                    _require_processing_claim(processing_run)
+                    _advance_processing_run(
+                        processing_run,
+                        stage="grounding",
+                        label="Checking answer against evidence",
+                    )
                     grounding_assessment = assess_issue_automation_grounding(
                         issue=issue,
                         messages=messages,
@@ -11189,6 +11770,7 @@ def _create_issue_agent_answer(
                         conversation_context=conversation_context,
                         on_late_usage=usage_sink.report_late,
                     )
+                    _require_processing_claim(processing_run)
                     grounding_gate = grounding_assessment.as_metadata()
                 if not grounding_assessment.verified:
                     auto_send_blocked_reason = (
@@ -11271,6 +11853,13 @@ def _create_issue_agent_answer(
     else:
         auto_send_policy = ""
     reply_status = "queued" if effective_auto_send else "draft"
+    _require_processing_claim(processing_run)
+    _advance_processing_run(
+        processing_run,
+        stage="saving",
+        label="Saving answer and review state",
+    )
+    _require_processing_claim(processing_run)
     if should_create_reply:
         reply_metadata: dict[str, Any] = {
             "approvalRequired": effective_approval_required,
@@ -11322,6 +11911,7 @@ def _create_issue_agent_answer(
             reply_metadata["revisionOfReplyId"] = _string_from(clean_revision_context.get("revisionOfReplyId"))
             reply_metadata["revisionNote"] = _string_from(clean_revision_context.get("revisionNote"))
         try:
+            _require_processing_claim(processing_run)
             reply = create_issue_reply(
                 issue_id,
                 tenant_id=tenant_id,
@@ -11333,6 +11923,7 @@ def _create_issue_agent_answer(
                 metadata=reply_metadata,
                 attachments=resolved_reply_attachments,
             )
+            _require_processing_claim(processing_run)
         except ValueError as exc:
             if not effective_auto_send or str(exc) != AUTOMATIC_REPLY_TERMINAL_ERROR:
                 raise
@@ -11352,6 +11943,7 @@ def _create_issue_agent_answer(
             }
             reply_metadata.pop("approvedBy", None)
             reply_metadata.pop("approvedAt", None)
+            _require_processing_claim(processing_run)
             reply = create_issue_reply(
                 issue_id,
                 tenant_id=tenant_id,
@@ -11363,6 +11955,7 @@ def _create_issue_agent_answer(
                 metadata=reply_metadata,
                 attachments=resolved_reply_attachments,
             )
+            _require_processing_claim(processing_run)
         if reply:
             persisted_reply_metadata = _parse(reply.get("metadata"), dict)
             persisted_grounding_gate = _record_from(
@@ -11375,6 +11968,7 @@ def _create_issue_agent_answer(
         usage_collector,
         event_start=usage_event_start,
     )
+    _require_processing_claim(processing_run)
     run = _record_agent_answer_ai_run(
         issue_id=issue_id,
         issue=issue,
@@ -11411,11 +12005,14 @@ def _create_issue_agent_answer(
         token_usage=token_usage,
         response_attachments=selected_response_attachments,
         unresolved_response_attachments=unresolved_response_attachments,
+        existing_run=processing_run if reuse_processing_run else None,
     )
+    _require_processing_claim(processing_run)
     usage_sink.bind(
         run_id=_string_from(run.get("id")),
         initial_calls=_parse(token_usage.get("calls"), list),
     )
+    _require_processing_claim(processing_run)
     knowledge_gap = _upsert_agent_answer_knowledge_gap(
         issue=issue,
         messages=messages,
@@ -11436,6 +12033,7 @@ def _create_issue_agent_answer(
         knowledge_access_policy=knowledge_access_policy,
         automation_context=clean_automation_context,
     )
+    _require_processing_claim(processing_run)
     event_metadata = {
         "question": question,
         "confidence": confidence,
@@ -11481,6 +12079,7 @@ def _create_issue_agent_answer(
         event_metadata["automationContext"] = clean_automation_context
     if clean_revision_context:
         event_metadata["revisionContext"] = clean_revision_context
+    _require_processing_claim(processing_run)
     _record_issue_event(
         issue_id=issue_id,
         event_type="agent_answer_prepared",
@@ -11490,7 +12089,19 @@ def _create_issue_agent_answer(
         title="Agent answer prepared",
         body=_clip(answer, 240),
         metadata=event_metadata,
+        record_id=(
+            _stable_record_id(
+                "support_issue_event",
+                project_id,
+                issue_id,
+                _string_from(clean_automation_context.get("actionIdempotencyKey")),
+                "agent_answer_prepared",
+            )
+            if _string_from(clean_automation_context.get("actionIdempotencyKey"))
+            else ""
+        ),
     )
+    _require_processing_claim(processing_run)
     return {
         "answer": answer,
         "confidence": confidence,
@@ -11583,6 +12194,7 @@ def create_issue_agent_chat_message(
         auto_send=auto_send,
         use_knowledge_agent=True,
         knowledge_actor_role=knowledge_actor_role,
+        persist_progress=True,
     )
     if not answer:
         return None
@@ -11713,14 +12325,18 @@ def prepare_issue_custom_fields(
     approval_required: bool = True,
     only_missing: bool = True,
     automation_context: dict[str, Any] | None = None,
+    processing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    _require_processing_claim(processing_run)
     issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
+    _require_processing_claim(processing_run)
     if not issue:
         return None
     field_definitions = _custom_field_definitions(tenant_id=tenant_id, project_id=project_id)
     if not field_definitions:
         raise ValueError("No ticket custom fields configured")
     current_fields = _custom_fields_from_issue(issue)
+    _require_processing_claim(processing_run)
     extraction = draft_issue_field_values(
         issue=issue,
         messages=issue.get("messages") if isinstance(issue.get("messages"), list) else [],
@@ -11730,6 +12346,7 @@ def prepare_issue_custom_fields(
         project_id=project_id,
         only_missing=only_missing,
     )
+    _require_processing_claim(processing_run)
     normalized_fields = _normalize_custom_field_patch_values(
         extraction.custom_fields,
         tenant_id=tenant_id,
@@ -11766,6 +12383,7 @@ def prepare_issue_custom_fields(
         if clean_automation_context:
             action_metadata["automationContext"] = clean_automation_context
         if approval_required:
+            _require_processing_claim(processing_run)
             execution = create_issue_action_execution(
                 issue_id,
                 tenant_id=tenant_id,
@@ -11778,13 +12396,16 @@ def prepare_issue_custom_fields(
                 result=action_result,
                 metadata=action_metadata,
             )
+            _require_processing_claim(processing_run)
         else:
+            _require_processing_claim(processing_run)
             applied_issue = update_issue(
                 issue_id,
                 tenant_id=tenant_id,
                 project_id=project_id,
                 updates={"merge_custom_fields": custom_fields, "actor_email": author_email, "skip_automations": True},
             )
+            _require_processing_claim(processing_run)
             action_result["application"] = {
                 "applied": True,
                 "type": "set_custom_fields",
@@ -11792,6 +12413,7 @@ def prepare_issue_custom_fields(
             }
             action_metadata["approvedBy"] = author_email
             action_metadata["approvedAt"] = _now_iso()
+            _require_processing_claim(processing_run)
             execution = create_issue_action_execution(
                 issue_id,
                 tenant_id=tenant_id,
@@ -11804,7 +12426,9 @@ def prepare_issue_custom_fields(
                 result=action_result,
                 metadata=action_metadata,
             )
+            _require_processing_claim(processing_run)
 
+    _require_processing_claim(processing_run)
     run = _record_issue_field_extraction_ai_run(
         issue_id=issue_id,
         issue=issue,
@@ -11820,6 +12444,7 @@ def prepare_issue_custom_fields(
         approval_required=approval_required,
         automation_context=clean_automation_context,
     )
+    _require_processing_claim(processing_run)
     if custom_fields:
         event_metadata: dict[str, Any] = {
             "customFields": custom_fields,
@@ -11831,6 +12456,7 @@ def prepare_issue_custom_fields(
         }
         if clean_automation_context:
             event_metadata["automationContext"] = clean_automation_context
+        _require_processing_claim(processing_run)
         _record_issue_event(
             issue_id=issue_id,
             event_type="custom_fields_prepared",
@@ -11840,7 +12466,20 @@ def prepare_issue_custom_fields(
             title="Ticket fields prepared",
             body=", ".join(f"{key}={value}" for key, value in custom_fields.items()),
             metadata=event_metadata,
+            record_id=(
+                _stable_record_id(
+                    "support_issue_event",
+                    project_id,
+                    issue_id,
+                    _string_from(clean_automation_context.get("actionIdempotencyKey")),
+                    "custom_fields_prepared",
+                )
+                if _string_from(clean_automation_context.get("actionIdempotencyKey"))
+                else ""
+            ),
         )
+        _require_processing_claim(processing_run)
+    _require_processing_claim(processing_run)
     return {
         "customFields": custom_fields,
         "confidence": extraction.confidence,
@@ -12030,12 +12669,16 @@ def prepare_issue_triage(
     author_email: str,
     approval_required: bool = True,
     automation_context: dict[str, Any] | None = None,
+    processing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    _require_processing_claim(processing_run)
     issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
+    _require_processing_claim(processing_run)
     if not issue:
         return None
     queues = list_support_queues(tenant_id=tenant_id, project_id=project_id, status="active")
     assignee_candidates = _triage_assignee_candidates(issue, author_email=author_email, queues=queues)
+    _require_processing_claim(processing_run)
     suggestion = draft_issue_triage(
         issue=issue,
         messages=issue.get("messages") if isinstance(issue.get("messages"), list) else [],
@@ -12044,6 +12687,7 @@ def prepare_issue_triage(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    _require_processing_claim(processing_run)
     patch = _triage_patch_from_suggestion(issue, suggestion)
     proposed_action = _triage_proposed_action(patch)
     clean_automation_context = _compact_metadata_context(automation_context)
@@ -12070,6 +12714,7 @@ def prepare_issue_triage(
         if clean_automation_context:
             action_metadata["automationContext"] = clean_automation_context
         if approval_required:
+            _require_processing_claim(processing_run)
             execution = create_issue_action_execution(
                 issue_id,
                 tenant_id=tenant_id,
@@ -12082,13 +12727,16 @@ def prepare_issue_triage(
                 result=action_result,
                 metadata=action_metadata,
             )
+            _require_processing_claim(processing_run)
         else:
+            _require_processing_claim(processing_run)
             applied_issue = update_issue(
                 issue_id,
                 tenant_id=tenant_id,
                 project_id=project_id,
                 updates={**patch, "assigned_by": author_email, "actor_email": author_email, "skip_automations": True},
             )
+            _require_processing_claim(processing_run)
             action_result["application"] = {
                 "applied": True,
                 "type": "triage_ticket",
@@ -12096,6 +12744,7 @@ def prepare_issue_triage(
             }
             action_metadata["approvedBy"] = author_email
             action_metadata["approvedAt"] = _now_iso()
+            _require_processing_claim(processing_run)
             execution = create_issue_action_execution(
                 issue_id,
                 tenant_id=tenant_id,
@@ -12108,7 +12757,9 @@ def prepare_issue_triage(
                 result=action_result,
                 metadata=action_metadata,
             )
+            _require_processing_claim(processing_run)
 
+    _require_processing_claim(processing_run)
     run = _record_issue_triage_ai_run(
         issue_id=issue_id,
         issue=issue,
@@ -12121,6 +12772,7 @@ def prepare_issue_triage(
         approval_required=approval_required,
         automation_context=clean_automation_context,
     )
+    _require_processing_claim(processing_run)
     if patch:
         event_metadata: dict[str, Any] = {
             "proposedAction": proposed_action,
@@ -12132,6 +12784,7 @@ def prepare_issue_triage(
         }
         if clean_automation_context:
             event_metadata["automationContext"] = clean_automation_context
+        _require_processing_claim(processing_run)
         _record_issue_event(
             issue_id=issue_id,
             event_type="triage_prepared",
@@ -12141,7 +12794,20 @@ def prepare_issue_triage(
             title="Triage prepared",
             body=", ".join(f"{key}={value}" for key, value in proposed_action.items() if key != "type"),
             metadata=event_metadata,
+            record_id=(
+                _stable_record_id(
+                    "support_issue_event",
+                    project_id,
+                    issue_id,
+                    _string_from(clean_automation_context.get("actionIdempotencyKey")),
+                    "triage_prepared",
+                )
+                if _string_from(clean_automation_context.get("actionIdempotencyKey"))
+                else ""
+            ),
         )
+        _require_processing_claim(processing_run)
+    _require_processing_claim(processing_run)
     return {
         "triage": proposed_action,
         "confidence": suggestion.confidence,
@@ -12251,8 +12917,11 @@ def _channel_auto_prepare_agent_reply(
     on_update: bool = False,
     automation_result: dict[str, Any] | None = None,
     context: dict[str, Any] | None = None,
+    processing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    _require_processing_claim(processing_run)
     if _automation_created_customer_reply(automation_result):
+        _finish_processing_run(processing_run, detail="Automation prepared the customer reply")
         return None
     config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
     enabled = _config_bool(
@@ -12264,6 +12933,7 @@ def _channel_auto_prepare_agent_reply(
         default=False,
     )
     if not enabled:
+        _finish_processing_run(processing_run, detail="Ticket automation complete")
         return None
     question = _string_from(
         config.get("agentQuestion")
@@ -12282,21 +12952,30 @@ def _channel_auto_prepare_agent_reply(
     # Avoid an otherwise unnecessary database read for the normal draft path.
     issue_requires_human = False
     if agent_auto_send:
+        _require_processing_claim(processing_run)
         issue_record = _issue_by_id(
             issue_id,
             tenant_id=tenant_id,
             project_id=project_id,
         ) or {}
+        _require_processing_claim(processing_run)
         issue_requires_human = bool(issue_record.get("requires_human"))
     try:
+        _require_processing_claim(processing_run)
+        autopilot_idempotency_key = (
+            "channel-autopilot:"
+            f"{hashlib.sha256(f'{project_id}:{issue_id}:{source}:{message_id}'.encode('utf-8')).hexdigest()}"
+        )
         automation_context = _compact_metadata_context(
             {
                 "source": "channel_autopilot",
+                "actionIdempotencyKey": autopilot_idempotency_key,
                 "channelId": channel.get("id"),
                 "channelKey": channel.get("channelKey") or channel.get("channel_key"),
                 "channelType": channel.get("type"),
                 "eventSource": source,
                 "messageId": message_id,
+                "sourceMessageId": message_id,
                 "onUpdate": on_update,
                 "agentAutoSendRequested": agent_auto_send,
                 **(context or {}),
@@ -12306,45 +12985,79 @@ def _channel_auto_prepare_agent_reply(
         triage_result: dict[str, Any] | None = None
         triage_error = ""
         if _config_bool(config, "autoPrepareTriage", "auto_prepare_triage", default=True):
+            _require_processing_claim(processing_run)
+            _advance_processing_run(
+                processing_run,
+                stage="triage",
+                label="Preparing ticket triage",
+            )
             try:
+                triage_kwargs: dict[str, Any] = {
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "author_email": "automation",
+                    "approval_required": True,
+                    "automation_context": automation_context,
+                }
+                if processing_run:
+                    triage_kwargs["processing_run"] = processing_run
                 triage_result = prepare_issue_triage(
                     issue_id,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    author_email="automation",
-                    approval_required=True,
-                    automation_context=automation_context,
+                    **triage_kwargs,
                 )
+                _require_processing_claim(processing_run)
+            except ProcessingClaimExpired:
+                raise
             except Exception as exc:  # keep channel replies moving even if triage cannot be proposed
                 triage_error = str(exc)
         field_result: dict[str, Any] | None = None
         field_error = ""
         field_skip_reason = ""
         if _config_bool(config, "autoPrepareCustomFields", "auto_prepare_custom_fields", default=True):
+            _require_processing_claim(processing_run)
+            _advance_processing_run(
+                processing_run,
+                stage="ticket_fields",
+                label="Preparing ticket fields",
+            )
             try:
+                field_kwargs: dict[str, Any] = {
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "author_email": "automation",
+                    "approval_required": True,
+                    "only_missing": True,
+                    "automation_context": automation_context,
+                }
+                if processing_run:
+                    field_kwargs["processing_run"] = processing_run
                 field_result = prepare_issue_custom_fields(
                     issue_id,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    author_email="automation",
-                    approval_required=True,
-                    only_missing=True,
-                    automation_context=automation_context,
+                    **field_kwargs,
                 )
+                _require_processing_claim(processing_run)
             except ValueError as exc:
                 if "No ticket custom fields configured" not in str(exc):
                     raise
                 field_skip_reason = str(exc)
+            except ProcessingClaimExpired:
+                raise
             except Exception as exc:  # keep channel replies moving even if field extraction fails
                 field_error = str(exc)
-        answer = create_issue_agent_answer(
-            issue_id,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            author_email="automation",
-            question=question,
-            create_draft=_config_bool(config, "autoCreateDraft", "auto_create_draft", default=True),
-            include_feedback_link=_config_bool(
+        _require_processing_claim(processing_run)
+        _advance_processing_run(
+            processing_run,
+            stage="composer",
+            label="Composing one customer answer",
+        )
+        _require_processing_claim(processing_run)
+        answer_kwargs: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "author_email": "automation",
+            "question": question,
+            "create_draft": _config_bool(config, "autoCreateDraft", "auto_create_draft", default=True),
+            "include_feedback_link": _config_bool(
                 config,
                 "includeFeedbackLink",
                 "include_feedback_link",
@@ -12355,14 +13068,24 @@ def _channel_auto_prepare_agent_reply(
             # One uncertain, unmatched, failed, or review-gated concern makes
             # the combined customer reply review-only. Other concerns still
             # process and remain useful in the draft.
-            approval_required=(
-                not agent_auto_send
-                or issue_requires_human
-            ),
-            auto_send=agent_auto_send,
-            automation_context=automation_context,
-            use_knowledge_agent=False,
+            "approval_required": not agent_auto_send or issue_requires_human,
+            "auto_send": agent_auto_send,
+            "automation_context": automation_context,
+            "use_knowledge_agent": False,
+        }
+        if processing_run:
+            answer_kwargs["processing_run"] = processing_run
+        answer = create_issue_agent_answer(
+            issue_id,
+            **answer_kwargs,
         )
+        _require_processing_claim(processing_run)
+        _advance_processing_run(
+            processing_run,
+            stage="finalizing",
+            label="Finalizing ticket package",
+        )
+        _require_processing_claim(processing_run)
         if answer:
             reply_id = (
                 _string_from(answer.get("reply", {}).get("id"))
@@ -12414,6 +13137,7 @@ def _channel_auto_prepare_agent_reply(
             answer["triage"] = triage_result
             answer["customFields"] = field_result
             answer["autopilotActions"] = autopilot_actions
+            _require_processing_claim(processing_run)
             _record_issue_event(
                 issue_id=issue_id,
                 event_type="channel_agent_autopilot",
@@ -12451,8 +13175,14 @@ def _channel_auto_prepare_agent_reply(
                     "automationContext": automation_context,
                 },
             )
+            _require_processing_claim(processing_run)
+        _require_processing_claim(processing_run)
+        _finish_processing_run(processing_run, detail="Ticket package ready for review")
         return answer
+    except ProcessingClaimExpired:
+        raise
     except Exception as exc:
+        _finish_processing_run(processing_run, failed=True, detail=str(exc))
         _record_issue_event(
             issue_id=issue_id,
             event_type="channel_agent_autopilot_failed",
@@ -12909,9 +13639,18 @@ def _ensure_email_channel_autopilot_package(
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not channel or not source.startswith("channel:"):
+        _finish_processing_run(
+            _processing_run_from_issue(issue),
+            detail="Ticket automation complete",
+        )
         return None
     issue_id = _string_from(issue.get("id"))
     if not issue_id:
+        _finish_processing_run(
+            _processing_run_from_issue(issue),
+            failed=True,
+            detail="Ticket identifier unavailable",
+        )
         return None
     result = _channel_auto_prepare_agent_reply(
         channel=channel,
@@ -12923,6 +13662,7 @@ def _ensure_email_channel_autopilot_package(
         on_update=on_update,
         automation_result=automation_result,
         context=context,
+        processing_run=_processing_run_from_issue(issue),
     )
     if not isinstance(result, dict):
         return None
@@ -15632,6 +16372,102 @@ def update_issue_reply(
     return _normalize_outbound_message(updated)
 
 
+def _reply_system_safety_blocked_reason(
+    issue: dict[str, Any] | None,
+    reply: dict[str, Any],
+    *,
+    require_human_approval: bool = False,
+) -> str:
+    """Validate customer-visible text against active system safety policy."""
+    if not issue:
+        return ""
+    raw_messages = issue.get("messages")
+    messages = raw_messages if isinstance(raw_messages, list) else []
+    subject = _string_from(issue.get("subject") or reply.get("subject"))
+    reason = lithium_battery_reply_safety_blocked_reason(
+        subject=subject,
+        messages=messages,
+        answer=_string_from(reply.get("body")),
+    )
+    if reason or not require_human_approval:
+        return reason
+    assessment = assess_lithium_battery_safety(
+        subject=subject,
+        messages=messages,
+    )
+    if not assessment.active:
+        return ""
+    metadata = _parse(reply.get("metadata"), dict)
+    approval_is_proven = (
+        metadata.get("humanApproved") is True
+        and metadata.get("approved") is True
+        and metadata.get("approvalRequired") is False
+        and _string_from(metadata.get("approvalSource")) == "human_review"
+        and _string_from(metadata.get("reviewStatus")) == "approved"
+        and bool(_string_from(metadata.get("approvedBy")))
+        and bool(_string_from(metadata.get("approvedAt")))
+    )
+    return "" if approval_is_proven else SAFETY_HUMAN_APPROVAL_REQUIRED_REASON_CODE
+
+
+def _issue_declared_message_count(issue: dict[str, Any] | None) -> int:
+    if not issue:
+        return 0
+    metadata = _parse(issue.get("metadata"), dict)
+    return _positive_int_from(
+        issue.get("message_count")
+        or issue.get("messageCount")
+        or metadata.get("messageCount")
+        or metadata.get("message_count")
+    )
+
+
+def _latest_customer_safety_messages(
+    issue_id: str,
+    *,
+    tenant_id: str | None,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch enough ordered customer history to preserve unresolved hazards."""
+    directions = " || ".join(
+        f"direction='{_escape_pb(direction)}'"
+        for direction in sorted(CUSTOMER_MESSAGE_DIRECTIONS)
+    )
+    try:
+        records = _list_all(
+            "support_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=f"issue='{_escape_pb(issue_id)}' && ({directions})",
+            ),
+            sort="occurred_at,created",
+            per_page=200,
+        )
+    except httpx.HTTPError as exc:
+        raise ValueError(
+            "Reply safety validation failed: safety_context_unavailable"
+        ) from exc
+    return [_normalize_message(record) for record in records]
+
+
+def _issue_declares_message_activity(issue: dict[str, Any] | None) -> bool:
+    if not issue:
+        return False
+    if _issue_declared_message_count(issue):
+        return True
+    if _string_from(
+        issue.get("latest_customer_message_at")
+        or issue.get("latestCustomerMessageAt")
+    ):
+        return True
+    latest_direction = _string_from(
+        issue.get("latest_message_direction")
+        or issue.get("latestMessageDirection")
+    ).lower()
+    return latest_direction in CUSTOMER_MESSAGE_DIRECTIONS
+
+
 def approve_issue_reply(
     issue_id: str,
     outbound_id: str,
@@ -15654,7 +16490,17 @@ def approve_issue_reply(
     approved_at = _now_iso()
     approved_by_email = _string_from(approved_by)
     existing_metadata = _parse(rec.get("metadata"), dict)
-    issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
+    try:
+        issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
+    except httpx.HTTPError as exc:
+        raise ValueError(
+            "Reply safety validation failed: safety_context_unavailable"
+        ) from exc
+    if not issue:
+        raise ValueError("Reply safety validation failed: safety_context_unavailable")
+    safety_blocked_reason = _reply_system_safety_blocked_reason(issue, rec)
+    if safety_blocked_reason:
+        raise ValueError(f"Reply safety validation failed: {safety_blocked_reason}")
     claim_owner = ""
     if issue and not _string_from(issue.get("assigneeEmail") or issue.get("assignee_email")):
         claim_owner = _reply_approval_owner_email(
@@ -15683,6 +16529,8 @@ def approve_issue_reply(
     metadata.pop("changesRequestedBy", None)
     metadata.pop("changesRequestedAt", None)
     metadata.pop("changesNote", None)
+    metadata.pop("safetyBlockedReason", None)
+    metadata.pop("safetyBlockedAt", None)
     data = {"metadata": metadata}
     _patch(f"/api/collections/support_outbound_messages/records/{rec['id']}", data)
     updated = {**rec, **data}
@@ -16433,6 +17281,64 @@ def _route_automatic_reply_to_grounding_review(
         )
 
 
+def _route_reply_to_system_safety_review(
+    reply: dict[str, Any],
+    *,
+    reason: str,
+    tenant_id: str | None,
+    project_id: str,
+    actor_email: str,
+) -> None:
+    """Invalidate approval when final deterministic safety validation fails."""
+    metadata = _parse(reply.get("metadata"), dict)
+    blocked_at = _now_iso()
+    updated_metadata = {
+        **metadata,
+        "autoSend": False,
+        "autoSendPolicy": "human_review",
+        "autoSendBlockedReason": reason,
+        "safetyBlockedReason": reason,
+        "safetyBlockedAt": blocked_at,
+        "approvalRequired": True,
+        "approved": False,
+        "reviewStatus": "pending",
+        "deliveryRequired": False,
+    }
+    for key in (
+        "approvedBy",
+        "approvedAt",
+        "humanApproved",
+        "human_approved",
+        "approvalSource",
+        "approval_source",
+        "approvalEventId",
+        "approval_event_id",
+        "deliveryBodySha256",
+        "deliveryPreflight",
+        "deliveryRoute",
+        "replyReadiness",
+    ):
+        updated_metadata.pop(key, None)
+    _patch(
+        f"/api/collections/support_outbound_messages/records/{reply['id']}",
+        {
+            "status": "draft",
+            "provider": "manual_draft",
+            "metadata": updated_metadata,
+        },
+    )
+    _record_issue_event(
+        issue_id=_string_from(reply.get("issue")),
+        event_type="reply_safety_invalidated",
+        tenant_id=tenant_id,
+        project_id=project_id,
+        actor_email=actor_email or "automation",
+        title="Reply needs safety changes",
+        body=reason,
+        metadata={"replyId": _string_from(reply.get("id")), "reason": reason},
+    )
+
+
 def deliver_issue_reply(
     issue_id: str,
     outbound_id: str,
@@ -16558,6 +17464,57 @@ def deliver_issue_reply(
         raise ValueError(
             "Automatic reply grounding requires human review: "
             f"{final_grounding_blocked_reason}"
+        )
+
+    final_safety_issue = delivery_issue
+    if final_safety_issue:
+        try:
+            final_safety_messages = _latest_customer_safety_messages(
+                issue_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+        except ValueError:
+            _route_reply_to_system_safety_review(
+                rec,
+                reason="safety_context_unavailable",
+                tenant_id=tenant_id,
+                project_id=project_id,
+                actor_email=_string_from(actor_email),
+            )
+            raise
+        if not final_safety_messages and _issue_declares_message_activity(
+            final_safety_issue
+        ):
+            _route_reply_to_system_safety_review(
+                rec,
+                reason="safety_context_unavailable",
+                tenant_id=tenant_id,
+                project_id=project_id,
+                actor_email=_string_from(actor_email),
+            )
+            raise ValueError(
+                "Reply safety validation failed: safety_context_unavailable"
+            )
+        final_safety_issue = {
+            **final_safety_issue,
+            "messages": final_safety_messages,
+        }
+    final_safety_blocked_reason = _reply_system_safety_blocked_reason(
+        final_safety_issue,
+        rec,
+        require_human_approval=True,
+    )
+    if final_safety_blocked_reason:
+        _route_reply_to_system_safety_review(
+            rec,
+            reason=final_safety_blocked_reason,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            actor_email=_string_from(actor_email),
+        )
+        raise ValueError(
+            f"Reply safety validation failed: {final_safety_blocked_reason}"
         )
 
     claim = _claim_issue_reply_delivery(
@@ -17208,6 +18165,7 @@ def create_issue_action_execution(
                 project_id,
                 issue_id,
                 effective_idempotency_key,
+                clean_key,
                 "action_recorded",
             )
             if effective_idempotency_key
@@ -18538,7 +19496,10 @@ def create_web_chat_session(
             tenant_id=tenant_id,
             project_id=project_id,
         )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     _ensure_issue_sla_events(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id)
+    _require_processing_claim(processing_run)
     automation_result = _run_automation_rules_for_issue(
         issue=processed_issue,
         trigger="issue_created",
@@ -18546,6 +19507,7 @@ def create_web_chat_session(
         project_id=project_id,
         actor_email="automation",
         context={"source": "web_chat", "channelKey": _string_from(channel.get("channelKey")) or channel_key},
+        processing_run=processing_run,
     )
     _channel_auto_prepare_agent_reply(
         channel=channel,
@@ -18555,6 +19517,7 @@ def create_web_chat_session(
         source="web_chat",
         message_id=message_id,
         automation_result=automation_result,
+        processing_run=processing_run,
     )
     _refresh_account_contact_counts(
         account_id=_string_from(account.get("id")) if account else None,
@@ -18751,6 +19714,8 @@ def _create_web_chat_message_issue(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     automation_result = _run_automation_rules_for_issue(
         issue=processed_issue,
         trigger="issue_created",
@@ -18763,6 +19728,7 @@ def _create_web_chat_message_issue(
             "webChatSessionId": session_id,
             "messageId": message_id,
         },
+        processing_run=processing_run,
     )
     _channel_auto_prepare_agent_reply(
         channel=channel,
@@ -18772,6 +19738,7 @@ def _create_web_chat_message_issue(
         source="web_chat",
         message_id=message_id,
         automation_result=automation_result,
+        processing_run=processing_run,
     )
     _refresh_account_contact_counts(
         account_id=_string_from(account.get("id")) if account else None,
@@ -18918,6 +19885,8 @@ def create_web_chat_message(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     automation_result = _run_message_update_automations(
         issue=processed_issue,
         tenant_id=tenant_id,
@@ -18926,6 +19895,7 @@ def create_web_chat_message(
         source="web_chat",
         message_id=message_id,
         context={"webChatSessionId": _string_from(session.get("id"))},
+        processing_run=processing_run,
     )
     _channel_auto_prepare_agent_reply(
         channel=channel,
@@ -18937,6 +19907,7 @@ def create_web_chat_message(
         on_update=True,
         automation_result=automation_result,
         context={"webChatSessionId": _string_from(session.get("id"))},
+        processing_run=processing_run,
     )
     return message
 
@@ -19437,8 +20408,11 @@ def ingest_slack_event(
         tenant_id=channel_tenant_id,
         project_id=channel_project_id,
     )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=channel_tenant_id, project_id=channel_project_id)
+        _require_processing_claim(processing_run)
         automation_result = _run_automation_rules_for_issue(
             issue=processed_issue,
             trigger="issue_created",
@@ -19446,6 +20420,7 @@ def ingest_slack_event(
             project_id=channel_project_id,
             actor_email="automation",
             context={"source": "slack", "channelKey": _string_from(channel.get("channelKey")), "messageId": source_message_id, **external_keys},
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -19456,6 +20431,7 @@ def ingest_slack_event(
             message_id=source_message_id,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     else:
         automation_result = _run_message_update_automations(
@@ -19466,6 +20442,7 @@ def ingest_slack_event(
             source="slack",
             message_id=source_message_id,
             context={"channelKey": _string_from(channel.get("channelKey")), "threadTs": thread_ts, **external_keys},
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -19477,6 +20454,7 @@ def ingest_slack_event(
             on_update=True,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,
@@ -19887,8 +20865,11 @@ def ingest_teams_event(
         tenant_id=channel_tenant_id,
         project_id=channel_project_id,
     )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=channel_tenant_id, project_id=channel_project_id)
+        _require_processing_claim(processing_run)
         automation_result = _run_automation_rules_for_issue(
             issue=processed_issue,
             trigger="issue_created",
@@ -19896,6 +20877,7 @@ def ingest_teams_event(
             project_id=channel_project_id,
             actor_email="automation",
             context={"source": "teams", "channelKey": _string_from(channel.get("channelKey")), "messageId": source_message_id, **external_keys},
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -19906,6 +20888,7 @@ def ingest_teams_event(
             message_id=source_message_id,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     else:
         automation_result = _run_message_update_automations(
@@ -19916,6 +20899,7 @@ def ingest_teams_event(
             source="teams",
             message_id=source_message_id,
             context={"channelKey": _string_from(channel.get("channelKey")), "threadId": thread_id, **external_keys},
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -19927,6 +20911,7 @@ def ingest_teams_event(
             on_update=True,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,
@@ -20186,6 +21171,7 @@ def _run_message_update_automations(
     source: str,
     message_id: str = "",
     context: dict[str, Any] | None = None,
+    processing_run: dict[str, Any] | None = None,
 ) -> None:
     run_context = {
         "event": "message_received",
@@ -20201,6 +21187,7 @@ def _run_message_update_automations(
         project_id=project_id,
         actor_email=actor_email or "automation",
         context=run_context,
+        processing_run=processing_run,
     )
 
 
@@ -20282,10 +21269,13 @@ def _execute_automation_actions(
     trigger: str = "",
     context: dict[str, Any] | None = None,
     customer_reply_claimed: bool = False,
+    processing_run: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    _require_processing_claim(processing_run)
     results: list[dict[str, Any]] = []
     issue_id = _string_from(issue.get("id"))
     for action_index, action in enumerate(actions):
+        _require_processing_claim(processing_run)
         if not isinstance(action, dict):
             continue
         action_type = _string_from(action.get("type"))
@@ -20460,18 +21450,23 @@ def _execute_automation_actions(
                 default=False,
             )
             automation_context = action_context
+            answer_kwargs: dict[str, Any] = {
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "author_email": actor_email,
+                "question": question,
+                "create_draft": create_draft,
+                "include_feedback_link": include_feedback_link,
+                "automation_context": automation_context,
+                "approval_required": approval_required,
+                "auto_send": auto_send,
+                "use_knowledge_agent": False,
+            }
+            if processing_run:
+                answer_kwargs["processing_run"] = processing_run
             answer = create_issue_agent_answer(
                 issue_id,
-                tenant_id=tenant_id,
-                project_id=project_id,
-                author_email=actor_email,
-                question=question,
-                create_draft=create_draft,
-                include_feedback_link=include_feedback_link,
-                automation_context=automation_context,
-                approval_required=approval_required,
-                auto_send=auto_send,
-                use_knowledge_agent=False,
+                **answer_kwargs,
             )
             reply = answer.get("reply") if isinstance(answer, dict) else None
             reply_id = _string_from(reply.get("id")) if isinstance(reply, dict) else ""
@@ -20530,14 +21525,19 @@ def _execute_automation_actions(
             )
             automation_context = action_context
             try:
+                field_kwargs: dict[str, Any] = {
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "author_email": actor_email,
+                    "approval_required": approval_required,
+                    "only_missing": only_missing,
+                    "automation_context": automation_context,
+                }
+                if processing_run:
+                    field_kwargs["processing_run"] = processing_run
                 prepared = prepare_issue_custom_fields(
                     issue_id,
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    author_email=actor_email,
-                    approval_required=approval_required,
-                    only_missing=only_missing,
-                    automation_context=automation_context,
+                    **field_kwargs,
                 )
             except ValueError as exc:
                 if "No ticket custom fields configured" not in str(exc):
@@ -20580,13 +21580,18 @@ def _execute_automation_actions(
                 default=True,
             )
             automation_context = action_context
+            triage_kwargs: dict[str, Any] = {
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "author_email": actor_email,
+                "approval_required": approval_required,
+                "automation_context": automation_context,
+            }
+            if processing_run:
+                triage_kwargs["processing_run"] = processing_run
             prepared = prepare_issue_triage(
                 issue_id,
-                tenant_id=tenant_id,
-                project_id=project_id,
-                author_email=actor_email,
-                approval_required=approval_required,
-                automation_context=automation_context,
+                **triage_kwargs,
             )
             triage = prepared.get("triage") if isinstance(prepared, dict) else {}
             action_execution = prepared.get("actionExecution") if isinstance(prepared, dict) else {}
@@ -20655,8 +21660,10 @@ def _execute_automation_actions(
                     "automationContext": automation_context,
                 }
             )
+        _require_processing_claim(processing_run)
         if results and _string_from(results[-1].get("replyId")):
             customer_reply_claimed = True
+    _require_processing_claim(processing_run)
     return results
 
 
@@ -21015,16 +22022,20 @@ def _run_automation_rules_for_issue(
     project_id: str,
     actor_email: str = "automation",
     context: dict[str, Any] | None = None,
+    processing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _require_processing_claim(processing_run)
     rules = _list_all(
         "support_automation_rules",
         _issue_filter(tenant_id=tenant_id, project_id=project_id, extra="active=true"),
         sort="name",
         per_page=200,
     )
+    _require_processing_claim(processing_run)
     runs: list[dict[str, Any]] = []
     customer_reply_claimed = False
     for rule in rules:
+        _require_processing_claim(processing_run)
         rule_trigger = _string_from(rule.get("trigger")) or "issue_created"
         if rule_trigger not in {trigger, "any_issue_event"}:
             continue
@@ -21043,44 +22054,52 @@ def _run_automation_rules_for_issue(
                 trigger=trigger,
                 context=context,
                 customer_reply_claimed=customer_reply_claimed,
+                processing_run=processing_run,
             )
+            _require_processing_claim(processing_run)
             if _automation_action_results_created_customer_reply(action_results):
                 customer_reply_claimed = True
+            _require_processing_claim(processing_run)
             _patch(
                 f"/api/collections/support_automation_rules/records/{rule['id']}",
                 {"last_run_at": _now_iso()},
             )
-            runs.append(
-                _record_automation_run(
-                    rule=rule,
-                    issue=issue,
-                    trigger=trigger,
-                    status="success",
-                    actions_applied=len(action_results),
-                    context=context or {},
-                    result={"actions": action_results},
-                    error="",
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    started_at=started_at,
-                )
+            _require_processing_claim(processing_run)
+            run = _record_automation_run(
+                rule=rule,
+                issue=issue,
+                trigger=trigger,
+                status="success",
+                actions_applied=len(action_results),
+                context=context or {},
+                result={"actions": action_results},
+                error="",
+                tenant_id=tenant_id,
+                project_id=project_id,
+                started_at=started_at,
             )
+            _require_processing_claim(processing_run)
+            runs.append(run)
+        except ProcessingClaimExpired:
+            raise
         except Exception as exc:
-            runs.append(
-                _record_automation_run(
-                    rule=rule,
-                    issue=issue,
-                    trigger=trigger,
-                    status="failed",
-                    actions_applied=0,
-                    context=context or {},
-                    result={},
-                    error=str(exc),
-                    tenant_id=tenant_id,
-                    project_id=project_id,
-                    started_at=started_at,
-                )
+            _require_processing_claim(processing_run)
+            run = _record_automation_run(
+                rule=rule,
+                issue=issue,
+                trigger=trigger,
+                status="failed",
+                actions_applied=0,
+                context=context or {},
+                result={},
+                error=str(exc),
+                tenant_id=tenant_id,
+                project_id=project_id,
+                started_at=started_at,
             )
+            _require_processing_claim(processing_run)
+            runs.append(run)
+    _require_processing_claim(processing_run)
     return {
         "processed": len(runs),
         "failed": sum(1 for run in runs if run.get("status") == "failed"),
@@ -23372,8 +24391,11 @@ def _ingest_generic_channel_message_event(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
     if not existing_issue:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id)
+        _require_processing_claim(processing_run)
         automation_result = _run_automation_rules_for_issue(
             issue=processed_issue,
             trigger="issue_created",
@@ -23386,6 +24408,7 @@ def _ingest_generic_channel_message_event(
                 "messageId": source_message_id,
                 **external_keys,
             },
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -23396,6 +24419,7 @@ def _ingest_generic_channel_message_event(
             message_id=source_message_id,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     else:
         automation_result = _run_message_update_automations(
@@ -23412,6 +24436,7 @@ def _ingest_generic_channel_message_event(
                 "threadId": thread_id,
                 **external_keys,
             },
+            processing_run=processing_run,
         )
         _channel_auto_prepare_agent_reply(
             channel=channel,
@@ -23423,6 +24448,7 @@ def _ingest_generic_channel_message_event(
             on_update=True,
             automation_result=automation_result,
             context=external_keys,
+            processing_run=processing_run,
         )
     _sync_channel_account_insights(
         account_id=_string_from(account.get("id")) if account else None,

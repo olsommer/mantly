@@ -94,6 +94,67 @@ def test_run_scheduled_support_sync_delegates_scope(monkeypatch):
     assert seen["source"] == "cron"
 
 
+def test_run_scheduled_support_processing_expiry_delegates_scope(monkeypatch):
+    seen: dict = {}
+
+    def fake_expiry(**kwargs):
+        seen.update(kwargs)
+        return {"inspected": 2, "expired": 1, "failed": 0, "items": []}
+
+    monkeypatch.setattr(
+        scheduler,
+        "expire_stale_direct_channel_processing_runs_for_scope",
+        fake_expiry,
+    )
+
+    result = scheduler.run_scheduled_support_processing_expiry(
+        tenant_id="tenant1",
+        project_id="project1",
+        limit=12,
+        source="cron",
+    )
+
+    assert result["expired"] == 1
+    assert seen == {
+        "tenant_id": "tenant1",
+        "project_id": "project1",
+        "limit": 12,
+        "source": "cron",
+    }
+
+
+def test_support_processing_expiry_scheduler_starts_by_default(monkeypatch):
+    created: dict = {}
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            created.update({
+                "target": target,
+                "args": args,
+                "daemon": daemon,
+                "name": name,
+            })
+
+        def start(self):
+            created["started"] = True
+
+    monkeypatch.setattr(scheduler, "_processing_expiry_started", False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_TENANT_ID", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_PROJECT_ID", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_LIMIT", raising=False)
+    monkeypatch.setattr(scheduler.threading, "Thread", FakeThread)
+
+    assert scheduler.start_support_processing_expiry_scheduler() is True
+    assert created == {
+        "target": scheduler._loop_processing_expiry,
+        "args": (60, None, None, 200),
+        "daemon": True,
+        "name": "support-processing-expiry-scheduler",
+        "started": True,
+    }
+
+
 def test_run_scheduled_support_delivery_records_run(monkeypatch):
     delivered: list[dict] = []
     recorded: list[dict] = []
@@ -703,6 +764,243 @@ def test_internal_support_channel_webhook_keeps_event_loop_responsive(monkeypatc
 
         result = await asyncio.wait_for(request_task, timeout=1)
         assert result["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("route_name", "auth_name", "ingest_name", "path"),
+    [
+        (
+            "receive_support_slack_event",
+            "_require_slack_request",
+            "ingest_slack_event",
+            "/api/internal/support/slack/slack-main",
+        ),
+        (
+            "receive_support_teams_event",
+            "_require_provider_channel_request",
+            "ingest_teams_event",
+            "/api/internal/support/teams/teams-main",
+        ),
+    ],
+)
+def test_direct_provider_webhooks_keep_event_loop_responsive(
+    monkeypatch,
+    route_name,
+    auth_name,
+    ingest_name,
+    path,
+):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {"messageId": "provider-message-1", "text": "Where is my order?"},
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, ingest_name, fake_ingest)
+    monkeypatch.setattr(internal_support, auth_name, fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        route = getattr(internal_support, route_name)
+        request_task = asyncio.create_task(route(path.rsplit("/", 1)[-1], request))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("route_name", ["start_web_chat", "add_web_chat_message"])
+def test_public_web_chat_posts_keep_event_loop_responsive(monkeypatch, route_name):
+    from automail.api import support_web_chat
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+
+    def fake_create(*_args, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"id": "result1", "sessionKey": "session1"}
+
+    dependency_name = (
+        "create_web_chat_session"
+        if route_name == "start_web_chat"
+        else "create_web_chat_message"
+    )
+    monkeypatch.setattr(support_web_chat, dependency_name, fake_create)
+
+    async def scenario():
+        event_loop_thread = threading.get_ident()
+        if route_name == "start_web_chat":
+            request_task = asyncio.create_task(
+                support_web_chat.start_web_chat(
+                    "project1",
+                    support_web_chat.WebChatSessionCreate(initial_message="Need help"),
+                )
+            )
+        else:
+            request_task = asyncio.create_task(
+                support_web_chat.add_web_chat_message(
+                    "session1",
+                    support_web_chat.WebChatMessageCreate(body="Still need help"),
+                )
+            )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert worker_threads and worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["id"] == "result1"
+
+    asyncio.run(scenario())
+
+
+def test_internal_support_sync_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    def fake_run(**_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"processed": 1}
+
+    monkeypatch.setattr(internal_support, "_require_support_token", fake_require)
+    monkeypatch.setattr(internal_support, "run_scheduled_support_sync", fake_run)
+
+    async def scenario():
+        request = Request({"type": "http", "method": "POST", "path": "/api/internal/support/sync", "headers": []})
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.run_support_sync(
+                internal_support.SupportSyncRequest(project_id="project1"),
+                request,
+            )
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+        finally:
+            release.set()
+        assert (await asyncio.wait_for(request_task, timeout=1))["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_internal_crm_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {"eventId": "evt-1"},
+    }).encode()
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    def fake_ingest(_connector_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"processed": 1}
+
+    monkeypatch.setattr(internal_support, "_require_support_token", fake_require)
+    monkeypatch.setattr(internal_support, "ingest_crm_webhook", fake_ingest)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/crm-webhooks/hubspot-main",
+            "headers": [(b"content-type", b"application/json")],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_crm_webhook("hubspot-main", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+        finally:
+            release.set()
+        assert (await asyncio.wait_for(request_task, timeout=1))["processed"] == 1
 
     asyncio.run(scenario())
 

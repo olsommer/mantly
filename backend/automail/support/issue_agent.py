@@ -27,6 +27,13 @@ from automail.support.pending_action_claims import (
     check_pending_action_claims,
 )
 from automail.support.reply_signoff import clean_reply_signoff
+from automail.support.safety_guidance import (
+    SAFETY_GUIDANCE_MISSING_REASON_CODE,
+    SafetyGuidanceAssessment,
+    assess_lithium_battery_safety,
+    lithium_battery_safety_system_prompt,
+    missing_lithium_battery_safety_guidance,
+)
 
 logger = logging.getLogger(__name__)
 _KNOWLEDGE_AGENT_SLOTS = threading.BoundedSemaphore(4)
@@ -48,6 +55,11 @@ GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
 _AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
+_GROUNDING_TICKET_SCOPED_KEYS = frozenset({
+    "concerns",
+    "toolEvidence",
+    "runbookActions",
+})
 LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
 BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
 _ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset({
@@ -57,9 +69,18 @@ _ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset({
 })
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
+_SYSTEM_SAFETY_PROMPT = lithium_battery_safety_system_prompt()
+_SYSTEM_PROMPT = (
+    (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
+    + "\n\n"
+    + _SYSTEM_SAFETY_PROMPT
+)
 _USER_TEMPLATE = (_PROMPTS_DIR / "issue_agent_user_prompt.md").read_text(encoding="utf-8").strip()
-_AUTOMATION_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_automation_system_prompt.md").read_text(encoding="utf-8").strip()
+_AUTOMATION_SYSTEM_PROMPT = (
+    (_PROMPTS_DIR / "issue_automation_system_prompt.md").read_text(encoding="utf-8").strip()
+    + "\n\n"
+    + _SYSTEM_SAFETY_PROMPT
+)
 _AUTOMATION_USER_TEMPLATE = (_PROMPTS_DIR / "issue_automation_user_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_grounding_eval_system_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_USER_TEMPLATE = (_PROMPTS_DIR / "issue_grounding_eval_user_prompt.md").read_text(encoding="utf-8").strip()
@@ -922,6 +943,44 @@ def _validated_draft_coverage(
     )
 
 
+def _issue_safety_assessment(
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> SafetyGuidanceAssessment:
+    return assess_lithium_battery_safety(
+        subject=_string_from(issue.get("subject")),
+        messages=messages,
+    )
+
+
+def _with_safety_prompt_context(
+    ticket: dict[str, Any],
+    assessment: SafetyGuidanceAssessment,
+) -> dict[str, Any]:
+    """Expose activated policy and its obligation without mutating runbook outcomes."""
+    if not assessment.active:
+        return ticket
+    return {
+        **ticket,
+        "systemSafety": assessment.prompt_context(),
+    }
+
+
+def _safety_review_state(
+    assessment: SafetyGuidanceAssessment,
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[bool, str]:
+    reasons = [model_reason.strip()] if model_requires_human and model_reason.strip() else []
+    if assessment.active:
+        reasons.append(assessment.requires_human_reason)
+    return (
+        bool(model_requires_human or assessment.active),
+        " ".join(dict.fromkeys(reasons))[:1_000],
+    )
+
+
 def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) -> list[str]:
     if isinstance(value, str):
         values = [value]
@@ -936,7 +995,17 @@ def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) 
     ]
 
 
-def _automatic_tool_evidence_context(value: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+def _tool_evidence_id(name: str, *, concern_id: str = "") -> str:
+    """Build the exact evidence identity for legacy or concern-scoped tools."""
+    return f"tool:{concern_id}:{name}" if concern_id else f"tool:{name}"
+
+
+def _automatic_tool_evidence_context(
+    value: Any,
+    *,
+    concern_id: str = "",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
     """Expose only the bounded, allowlisted facts recorded by HTTP tools."""
     if not isinstance(value, list):
         return []
@@ -956,12 +1025,33 @@ def _automatic_tool_evidence_context(value: Any, *, limit: int = 20) -> list[dic
             # to detach the prompt context from mutable persisted metadata.
             try:
                 record["responseFacts"] = json.loads(json.dumps(facts, ensure_ascii=False))
-                record["evidenceId"] = f"tool:{record['name']}"
+                record["evidenceId"] = _tool_evidence_id(
+                    record["name"],
+                    concern_id=concern_id,
+                )
             except (TypeError, ValueError):
                 pass
         if record["name"]:
             evidence.append(record)
     return evidence
+
+
+def _is_runbook_ai_run(
+    run: dict[str, Any],
+    intent_result: dict[str, Any],
+) -> bool:
+    """Identify modern and legacy runbook runs without claiming unrelated AI work."""
+    metadata = _record_from(run.get("metadata"))
+    if _string_from(metadata.get("kind")) == "direct_channel_runbooks":
+        return True
+    if _string_from(run.get("source")).startswith("channel:"):
+        return True
+    if isinstance(intent_result.get("concerns"), list):
+        return True
+    return any(
+        key in intent_result
+        for key in ("matched", "intentName", "intent_name")
+    )
 
 
 def _automatic_runbook_concern_context(
@@ -978,10 +1068,20 @@ def _automatic_runbook_concern_context(
         source = _string_from(run.get("source"))
         if source in {"agent_answer", "triage", "custom_fields"}:
             continue
+        metadata = _record_from(run.get("metadata"))
+        source_message_id = _string_from(
+            metadata.get("emailId")
+            or metadata.get("messageId")
+            or metadata.get("sourceMessageId")
+        )
         intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
+        if not _is_runbook_ai_run(run, intent_result):
+            continue
         raw_concerns = intent_result.get("concerns")
         if not isinstance(raw_concerns, list) or not raw_concerns:
-            continue
+            # Runs are newest-first. Once the newest runbook run is found,
+            # never revive concerns or evidence from an older customer message.
+            return [], [], {"sourceMessageId": source_message_id}
 
         concerns: list[dict[str, Any]] = []
         for index, raw in enumerate(raw_concerns[:10]):
@@ -1123,18 +1223,13 @@ def _automatic_runbook_concern_context(
                 or raw.get("toolEvidence")
                 or raw.get("tool_evidence")
                 or raw.get("toolCalls")
-                or raw.get("tool_calls")
+                or raw.get("tool_calls"),
+                concern_id=concern["id"],
             )
             if concern_tools:
                 concern["toolEvidence"] = concern_tools
             concerns.append(concern)
 
-        metadata = _record_from(run.get("metadata"))
-        source_message_id = _string_from(
-            metadata.get("emailId")
-            or metadata.get("messageId")
-            or metadata.get("sourceMessageId")
-        )
         # Modern runs bind evidence to each concern. Flat run-level calls can
         # include identity or another concern and are not customer-claim proof.
         return concerns, [], {"sourceMessageId": source_message_id}
@@ -1300,6 +1395,66 @@ def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
     return ticket
 
 
+def _global_grounding_ticket_evidence(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Keep concern-scoped runbook facts outside the global ``ticket`` evidence ID."""
+    return {
+        key: value
+        for key, value in ticket.items()
+        if key not in _GROUNDING_TICKET_SCOPED_KEYS
+    }
+
+
+def _concern_grounding_evidence_id(concern_id: str) -> str:
+    return f"concern:{concern_id}"
+
+
+def _scoped_grounding_ticket_evidence(
+    ticket: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose runbook facts only through exact concern or legacy evidence IDs."""
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    concern_evidence: list[dict[str, Any]] = []
+    raw_concerns = ticket.get("concerns")
+    if isinstance(raw_concerns, list):
+        for raw_concern in raw_concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(
+                concern.get("id")
+                or concern.get("concernId")
+                or concern.get("concern_id")
+            )
+            if not concern_id:
+                continue
+            scoped_actions = [
+                action
+                for raw_action in actions
+                if (
+                    (action := _record_from(raw_action))
+                    and _string_from(
+                        action.get("concernId") or action.get("concern_id")
+                    )
+                    == concern_id
+                )
+            ]
+            evidence = {
+                "evidenceId": _concern_grounding_evidence_id(concern_id),
+                "concernId": concern_id,
+                "context": concern,
+            }
+            if scoped_actions:
+                evidence["runbookActions"] = scoped_actions
+            concern_evidence.append(evidence)
+
+    scoped: dict[str, Any] = {}
+    if concern_evidence:
+        scoped["concerns"] = concern_evidence
+    raw_legacy_tools = ticket.get("toolEvidence")
+    if isinstance(raw_legacy_tools, list) and raw_legacy_tools:
+        scoped["legacyToolEvidence"] = raw_legacy_tools
+    return scoped
+
+
 def _automatic_conversation_context(
     conversation_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -1449,42 +1604,79 @@ def _unsupported_business_identifiers(
     )
 
 
-def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Flatten the exact ticket and per-concern tool evidence visible to agents."""
-    records: list[Any] = []
+def _automatic_tool_evidence_records_with_scope(
+    ticket: dict[str, Any],
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Return tool evidence paired with its trusted enclosing concern scope."""
+    records: list[tuple[str, dict[str, Any]]] = []
     raw_ticket_evidence = ticket.get("toolEvidence")
     if isinstance(raw_ticket_evidence, list):
-        records.extend(raw_ticket_evidence)
+        records.extend(
+            ("", record)
+            for raw_record in raw_ticket_evidence
+            if (record := _record_from(raw_record))
+        )
     concerns = ticket.get("concerns")
     if isinstance(concerns, list):
         for raw_concern in concerns:
             concern = _record_from(raw_concern)
+            concern_id = _string_from(
+                concern.get("id")
+                or concern.get("concernId")
+                or concern.get("concern_id")
+            )
             raw_concern_evidence = concern.get("toolEvidence")
-            if isinstance(raw_concern_evidence, list):
-                records.extend(raw_concern_evidence)
+            if concern_id and isinstance(raw_concern_evidence, list):
+                records.extend(
+                    (concern_id, record)
+                    for raw_record in raw_concern_evidence
+                    if (record := _record_from(raw_record))
+                )
+    return tuple(records)
+
+
+def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Flatten the exact ticket and per-concern tool evidence visible to agents."""
     return tuple(
         record
-        for raw_record in records
-        if (record := _record_from(raw_record))
+        for _concern_id, record in _automatic_tool_evidence_records_with_scope(ticket)
     )
+
+
+def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:
+    """Validate a successful tool record against its exact enclosing scope."""
+    name = _string_from(record.get("name"))
+    evidence_id = _string_from(record.get("evidenceId"))
+    if (
+        name
+        and evidence_id == _tool_evidence_id(name, concern_id=concern_id)
+        and _string_from(record.get("status")).lower() == "success"
+        and isinstance(record.get("responseFacts"), (dict, list))
+        and record.get("responseFacts")
+    ):
+        return evidence_id
+    return ""
 
 
 def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
     """Return only exact, successful tool evidence IDs surfaced in ticket context."""
 
     evidence_ids: list[str] = []
-    for record in _automatic_tool_evidence_records(ticket):
-        name = _string_from(record.get("name"))
-        evidence_id = _string_from(record.get("evidenceId"))
-        if (
-            name
-            and evidence_id == f"tool:{name}"
-            and _string_from(record.get("status")) == "success"
-            and isinstance(record.get("responseFacts"), (dict, list))
-            and record.get("responseFacts")
-        ):
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_id := _valid_tool_evidence_id(record, concern_id=concern_id):
             evidence_ids.append(evidence_id)
     return tuple(dict.fromkeys(evidence_ids))
+
+
+def _scoped_tool_evidence_concerns(ticket: dict[str, Any]) -> dict[str, str]:
+    """Map each exact modern tool evidence ID to its enclosing concern."""
+    scoped: dict[str, str] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if not concern_id:
+            continue
+        if evidence_id := _valid_tool_evidence_id(record, concern_id=concern_id):
+            scoped[evidence_id] = concern_id
+    return scoped
 
 
 def _successful_action_evidence_ids_by_concern(
@@ -1506,14 +1698,9 @@ def _successful_action_evidence_ids_by_concern(
                 continue
             for raw_record in raw_evidence:
                 record = _record_from(raw_record)
-                name = _string_from(record.get("name"))
-                evidence_id = _string_from(record.get("evidenceId"))
-                if (
-                    name
-                    and evidence_id == f"tool:{name}"
-                    and _string_from(record.get("status")).lower() == "success"
-                    and isinstance(record.get("responseFacts"), (dict, list))
-                    and record.get("responseFacts")
+                if evidence_id := _valid_tool_evidence_id(
+                    record,
+                    concern_id=concern_id,
                 ):
                     evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
 
@@ -1539,6 +1726,42 @@ def _successful_action_evidence_ids_by_concern(
     }
 
 
+def _scoped_grounding_evidence_concerns(
+    ticket: dict[str, Any],
+    *,
+    successful_evidence_by_concern: dict[str, frozenset[str]] | None = None,
+) -> dict[str, frozenset[str]]:
+    """Index every concern container and exact successful tool/action ID by scope."""
+    scoped: dict[str, set[str]] = {}
+    raw_concerns = ticket.get("concerns")
+    if isinstance(raw_concerns, list):
+        for raw_concern in raw_concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(
+                concern.get("id")
+                or concern.get("concernId")
+                or concern.get("concern_id")
+            )
+            if concern_id:
+                scoped.setdefault(
+                    _concern_grounding_evidence_id(concern_id),
+                    set(),
+                ).add(concern_id)
+
+    evidence_by_concern = (
+        successful_evidence_by_concern
+        if successful_evidence_by_concern is not None
+        else _successful_action_evidence_ids_by_concern(ticket)
+    )
+    for concern_id, evidence_ids in evidence_by_concern.items():
+        for evidence_id in evidence_ids:
+            scoped.setdefault(evidence_id, set()).add(concern_id)
+    return {
+        evidence_id: frozenset(concern_ids)
+        for evidence_id, concern_ids in scoped.items()
+    }
+
+
 def grounding_context_snapshots(
     *,
     issue: dict[str, Any],
@@ -1548,10 +1771,13 @@ def grounding_context_snapshots(
 ) -> tuple[dict[str, Any], ...]:
     """Bind automatic answers to the non-knowledge context seen by the evaluator."""
     ticket = _automatic_ticket_context(issue)
+    global_ticket_evidence = _global_grounding_ticket_evidence(ticket)
+    scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket)
     conversation = _automatic_conversation_context(conversation_context)
 
     payloads: list[tuple[str, Any]] = [
-        ("ticket", ticket),
+        ("ticket", global_ticket_evidence),
+        ("ticket:scoped", scoped_ticket_evidence),
         ("messages", _automatic_message_context(messages)),
         ("account", _record_from(account_context)),
         ("conversation", conversation),
@@ -1573,6 +1799,9 @@ def grounding_context_snapshots(
                 "contextSha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
             }
         )
+    safety_assessment = _issue_safety_assessment(issue, messages)
+    if safety_assessment.active:
+        snapshots.append(safety_assessment.snapshot())
     return tuple(snapshots)
 
 
@@ -1662,13 +1891,21 @@ def draft_issue_agent_answer(
     on_late_usage: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> IssueAgentDraft:
     """Run the isolated knowledge agent, falling back offline on any failure."""
+    safety_assessment = _issue_safety_assessment(issue, messages)
     slot_semaphore = _KNOWLEDGE_AGENT_SLOTS
     if not slot_semaphore.acquire(blocking=False):
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Knowledge agent capacity is temporarily exhausted.",
+        )
         return IssueAgentDraft(
             answer=_knowledge_failure_answer(question, messages),
             confidence="low",
             generation_mode="deterministic_fallback",
             error="Knowledge agent capacity is temporarily exhausted",
+            requires_human=True,
+            requires_human_reason=review_reason,
         )
     workspace: KnowledgeWorkspace | None = None
     deferred_slot_release = False
@@ -1684,7 +1921,10 @@ def draft_issue_agent_answer(
         usage_context = getattr(llm, "_mantly_usage_context", None)
         clean_question = (question.strip() or "Prepare the best support answer and next step.")[:4_000]
         workspace = KnowledgeWorkspace(
-            ticket=_ticket_context(issue),
+            ticket=_with_safety_prompt_context(
+                _ticket_context(issue),
+                safety_assessment,
+            ),
             messages=_message_context(messages),
             account=_record_from(account_context),
             conversation=_conversation_context(conversation_context),
@@ -1767,6 +2007,15 @@ def draft_issue_agent_answer(
         )
         if not answer:
             raise ValueError("Issue agent returned an empty answer")
+        missing_safety = (
+            missing_lithium_battery_safety_guidance(answer)
+            if safety_assessment.active
+            else ()
+        )
+        if missing_safety:
+            raise ValueError(
+                SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety)
+            )
         citation_ids = workspace.validated_citation_ids(
             structured.citation_ids,
             structured.citation_paths,
@@ -1794,6 +2043,11 @@ def draft_issue_agent_answer(
             missing_information.append(
                 "Full source content requires human review: " + ", ".join(truncated_citation_ids)
             )
+        model_requires_human, model_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=structured.requires_human,
+            model_reason=structured.requires_human_reason,
+        )
         (
             covered_concern_ids,
             covered_obligation_ids,
@@ -1803,8 +2057,8 @@ def draft_issue_agent_answer(
             issue,
             structured.covered_concern_ids,
             structured.covered_obligation_ids,
-            model_requires_human=structured.requires_human,
-            model_reason=structured.requires_human_reason,
+            model_requires_human=model_requires_human,
+            model_reason=model_reason,
         )
         return IssueAgentDraft(
             answer=answer,
@@ -1825,6 +2079,11 @@ def draft_issue_agent_answer(
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue agent answer: %s", exc)
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Knowledge answer generation failed.",
+        )
         (
             covered_concern_ids,
             covered_obligation_ids,
@@ -1835,7 +2094,7 @@ def draft_issue_agent_answer(
             [],
             [],
             model_requires_human=True,
-            model_reason="Knowledge answer generation failed.",
+            model_reason=review_reason,
         )
         return IssueAgentDraft(
             answer=_knowledge_failure_answer(question, messages),
@@ -1870,18 +2129,24 @@ def draft_issue_automation_answer(
     on_late_usage: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> IssueAgentDraft:
     """Preserve the bounded one-shot generator for automatic/shared retrieval paths."""
+    safety_assessment = _issue_safety_assessment(issue, messages)
     slot_semaphore = _AUTOMATION_AGENT_SLOTS
     if not slot_semaphore.acquire(
         blocking=True,
         timeout=AUTOMATION_AGENT_SLOT_WAIT_SECONDS,
     ):
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Automatic answer capacity is temporarily exhausted.",
+        )
         return IssueAgentDraft(
             answer=fallback_answer,
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error="Automatic answer capacity is temporarily exhausted",
             requires_human=True,
-            requires_human_reason="Automatic answer capacity is temporarily exhausted.",
+            requires_human_reason=review_reason,
         )
     deferred_slot_release = False
     parent_usage_collector: Any = None
@@ -1896,7 +2161,10 @@ def draft_issue_automation_answer(
         usage_context = getattr(llm, "_mantly_usage_context", None)
         reply_language = _latest_customer_language(messages)
         reply_language_name = _LANGUAGE_NAMES[reply_language]
-        ticket_context = _automatic_ticket_context(issue)
+        ticket_context = _with_safety_prompt_context(
+            _automatic_ticket_context(issue),
+            safety_assessment,
+        )
         allowed_business_identifiers = _allowed_business_identifiers(
             messages=messages,
             ticket=ticket_context,
@@ -1970,6 +2238,18 @@ def draft_issue_automation_answer(
                         + allowed_summary
                         + "."
                     )
+                missing_safety = (
+                    missing_lithium_battery_safety_guidance(first_answer)
+                    if first_answer and safety_assessment.active
+                    else ()
+                )
+                if missing_safety:
+                    correction_reasons.append(
+                        "Add every required immediate damaged-lithium-battery safety instruction. "
+                        "Missing policy elements: "
+                        + ", ".join(missing_safety)
+                        + "."
+                    )
                 if correction_reasons:
                     correction_prompt = (
                         f"{user_prompt}\n\n"
@@ -2011,6 +2291,15 @@ def draft_issue_automation_answer(
         )
         if not answer:
             raise ValueError("Issue automation returned an empty answer")
+        missing_safety = (
+            missing_lithium_battery_safety_guidance(answer)
+            if safety_assessment.active
+            else ()
+        )
+        if missing_safety:
+            raise ValueError(
+                SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety)
+            )
         if _detected_supported_language(answer) != reply_language:
             raise ValueError(
                 f"Automatic answer language mismatch: expected {reply_language_name}"
@@ -2029,6 +2318,11 @@ def draft_issue_automation_answer(
         missing_information = tuple(
             dict.fromkeys(item.strip()[:500] for item in structured.missing_information[:10] if item.strip())
         )
+        model_requires_human, model_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=structured.requires_human,
+            model_reason=structured.requires_human_reason,
+        )
         (
             covered_concern_ids,
             covered_obligation_ids,
@@ -2038,8 +2332,8 @@ def draft_issue_automation_answer(
             issue,
             structured.covered_concern_ids,
             structured.covered_obligation_ids,
-            model_requires_human=structured.requires_human,
-            model_reason=structured.requires_human_reason,
+            model_requires_human=model_requires_human,
+            model_reason=model_reason,
         )
         return IssueAgentDraft(
             answer=answer,
@@ -2058,6 +2352,11 @@ def draft_issue_automation_answer(
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue automation answer: %s", exc)
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Automatic answer generation failed.",
+        )
         (
             covered_concern_ids,
             covered_obligation_ids,
@@ -2068,7 +2367,7 @@ def draft_issue_automation_answer(
             [],
             [],
             model_requires_human=True,
-            model_reason="Automatic answer generation failed.",
+            model_reason=review_reason,
         )
         return IssueAgentDraft(
             answer=fallback_answer,
@@ -2182,6 +2481,7 @@ def assess_issue_automation_grounding(
     checked_at = datetime.now(timezone.utc).isoformat()
     answer = answer.strip()
     answer_sha256 = grounding_text_sha256(answer)
+    safety_assessment = _issue_safety_assessment(issue, messages)
     context_snapshots = grounding_context_snapshots(
         issue=issue,
         messages=messages,
@@ -2198,15 +2498,24 @@ def assess_issue_automation_grounding(
         }
         for unit in answer_units
     )
-    answer_obligations = _answer_obligations_from_issue(issue)
+    answer_obligations = list(_answer_obligations_from_issue(issue))
+    if safety_assessment.active:
+        answer_obligations.append(safety_assessment.answer_obligation())
+    answer_obligations = tuple(answer_obligations)
     citation_ids = tuple(
         dict.fromkeys(
             article_id for article_id in (_string_from(article.get("id")) for article in articles) if article_id
         )
     )
     ticket_evidence = _automatic_ticket_context(issue)
+    global_ticket_evidence = _global_grounding_ticket_evidence(ticket_evidence)
+    scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket_evidence)
     successful_action_evidence_by_concern = (
         _successful_action_evidence_ids_by_concern(ticket_evidence)
+    )
+    scoped_grounding_evidence_concerns = _scoped_grounding_evidence_concerns(
+        ticket_evidence,
+        successful_evidence_by_concern=successful_action_evidence_by_concern,
     )
     expected_language = _latest_customer_language(messages)
     detected_answer_language = _detected_supported_language(answer)
@@ -2269,6 +2578,31 @@ def assess_issue_automation_grounding(
             error=(
                 "Candidate answer contains unsupported business identifiers: "
                 + ", ".join(unsupported_identifiers[:20])
+            )[:1_000],
+        )
+    missing_safety = (
+        missing_lithium_battery_safety_guidance(answer)
+        if safety_assessment.active
+        else ()
+    )
+    if missing_safety:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=SAFETY_GUIDANCE_MISSING_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            uncovered_obligations=(
+                safety_assessment.answer_obligation()["question"],
+            ),
+            unsupported_claims=missing_safety,
+            error=(
+                "Missing mandatory damaged-lithium-battery safety guidance: "
+                + ", ".join(missing_safety)
             )[:1_000],
         )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
@@ -2342,9 +2676,16 @@ def assess_issue_automation_grounding(
         account_evidence = _record_from(account_context)
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]
+        if safety_assessment.active:
+            allowed_evidence_ids.append(safety_assessment.policy_id)
         allowed_evidence_ids.extend(_automatic_tool_evidence_ids(ticket_evidence))
         for evidence_ids in successful_action_evidence_by_concern.values():
             allowed_evidence_ids.extend(evidence_ids)
+        allowed_evidence_ids.extend(
+            evidence_id
+            for evidence_id in scoped_grounding_evidence_concerns
+            if evidence_id.startswith("concern:")
+        )
         if message_evidence:
             allowed_evidence_ids.append("messages")
         if account_evidence:
@@ -2358,11 +2699,13 @@ def assess_issue_automation_grounding(
             answer_units=_json(answer_units),
             answer_obligations=_json(answer_obligations),
             allowed_evidence_ids=_json(allowed_evidence_ids),
-            ticket=_json(ticket_evidence),
+            ticket=_json(global_ticket_evidence),
+            scoped_ticket_evidence=_json(scoped_ticket_evidence),
             account_intelligence=_json(account_evidence),
             conversation_context=_json(conversation_evidence),
             messages=_json(message_evidence),
             knowledge_articles=_json(evidence),
+            system_safety_policy=_json(safety_assessment.evidence()),
             answer=answer,
         )
         agent = create_agent(
@@ -2556,6 +2899,20 @@ def assess_issue_automation_grounding(
                 and not unknown_unit_ids
                 and set(answer_unit_ids).issubset(supported_units)
             )
+            obligation_concern_id = _string_from(obligation.get("concernId"))
+            linked_evidence_ids = {
+                evidence_id
+                for unit_id in answer_unit_ids
+                for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+            }
+            has_cross_concern_evidence = any(
+                scoped_concern_ids != frozenset({obligation_concern_id})
+                for evidence_id in linked_evidence_ids
+                if (
+                    scoped_concern_ids
+                    := scoped_grounding_evidence_concerns.get(evidence_id)
+                )
+            )
             if (
                 requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
                 and not answer_unit_ids
@@ -2568,10 +2925,14 @@ def assess_issue_automation_grounding(
                 and not linked_units_are_supported
             ):
                 resolution = "not_covered"
+            if (
+                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+                and has_cross_concern_evidence
+            ):
+                resolution = "not_covered"
             if requested_resolution == "fulfilled_action" and linked_units_are_supported:
-                concern_id = _string_from(obligation.get("concernId"))
                 exact_action_evidence_ids = successful_action_evidence_by_concern.get(
-                    concern_id,
+                    obligation_concern_id,
                     frozenset(),
                 )
                 if not exact_action_evidence_ids or any(

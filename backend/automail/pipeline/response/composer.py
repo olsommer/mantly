@@ -26,6 +26,11 @@ from automail.support.pending_action_claims import (
     PendingActionClaimCheck,
     check_pending_action_claims,
 )
+from automail.support.safety_guidance import (
+    SAFETY_GUIDANCE_MISSING_REASON_CODE,
+    assess_lithium_battery_safety,
+    missing_lithium_battery_safety_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +47,36 @@ def _matched_runbook_names(intent_result: IntentResult) -> list[str]:
 
 
 def _available_attachments(
-    runbook_names: list[str],
+    intent_result: IntentResult,
     *,
     intents_dir: Any,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     available: list[dict[str, Any]] = []
     always: list[str] = []
     seen: set[str] = set()
-    for runbook_name in runbook_names:
-        for item in get_intent_response_attachments(runbook_name, intents_dir=intents_dir):
-            filename = str(item.get("filename") or "").strip()
+    for concern in intent_result.concerns:
+        for attachment in concern.attachments:
+            filename = str(attachment.filename or "").strip()
             if not filename or filename in seen:
                 continue
             seen.add(filename)
-            available.append(item)
-            if str(item.get("mode") or "").strip() == "always":
+            available.append({
+                "filename": filename,
+                "description": str(attachment.description or ""),
+                "mode": str(attachment.mode or "dynamic"),
+            })
+            if str(attachment.mode or "").strip() in {"always", "generated"}:
                 always.append(filename)
+    if not available:
+        for runbook_name in _matched_runbook_names(intent_result):
+            for item in get_intent_response_attachments(runbook_name, intents_dir=intents_dir):
+                filename = str(item.get("filename") or "").strip()
+                if not filename or filename in seen:
+                    continue
+                seen.add(filename)
+                available.append(item)
+                if str(item.get("mode") or "").strip() == "always":
+                    always.append(filename)
     for item in current_generated_attachments():
         filename = str(item.get("filename") or "").strip()
         if not filename or filename in seen:
@@ -171,6 +190,10 @@ def compose_pipeline_reply(
     project_id: str | None = None,
 ) -> AgentResponse | None:
     """Draft one reply after every matched runbook has produced an outcome."""
+    safety_assessment = assess_lithium_battery_safety(
+        subject=email.subject,
+        body=email.body,
+    )
     runbook_names = _matched_runbook_names(intent_result)
     if not runbook_names:
         return None
@@ -180,7 +203,7 @@ def compose_pipeline_reply(
 
     config = resolve_effective_config(read_config(config_path=config_path), tenant_id, project_id)
     available_attachments, always_filenames = _available_attachments(
-        runbook_names,
+        intent_result,
         intents_dir=intents_dir,
     )
     learnings: list[str] = []
@@ -238,11 +261,32 @@ def compose_pipeline_reply(
     draft = result.get("structured_response") if isinstance(result, dict) else None
     if not isinstance(draft, ResponseDraft):
         raise ValueError("Ticket reply composer returned no structured response.")
+    missing_safety = (
+        missing_lithium_battery_safety_guidance(draft.response_text)
+        if safety_assessment.active
+        else ()
+    )
+    if missing_safety:
+        raise ValueError(
+            SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety)
+        )
     pending_action_check = _pending_action_claim_check(intent_result, draft.response_text)
     if pending_action_check.blocked:
         raise ValueError(PENDING_ACTION_CLAIM_REASON_CODE)
 
     requires_human, requires_human_reason = _draft_review_requirements(intent_result, draft)
+    if safety_assessment.active:
+        requires_human = True
+        requires_human_reason = " ".join(
+            dict.fromkeys(
+                reason
+                for reason in (
+                    requires_human_reason,
+                    safety_assessment.requires_human_reason,
+                )
+                if reason
+            )
+        )[:1_000]
     response = AgentResponse(
         response_text=draft.response_text,
         response_attachments=draft.response_attachments,

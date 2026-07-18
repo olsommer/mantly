@@ -102,6 +102,11 @@ def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
         "subject": "Cancel and buy",
         "aiRuns": [
             {
+                "source": "agent_field_extraction",
+                "status": "success",
+                "intentResult": {"fields": {"order": "ZF-1"}},
+            },
+            {
                 "source": "channel:email-main",
                 "intentResult": {
                     "concerns": [
@@ -171,7 +176,7 @@ def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
             "name": "product_lookup",
             "method": "GET",
             "status": "success",
-            "evidenceId": "tool:product_lookup",
+            "evidenceId": "tool:buy-product:product_lookup",
             "responseFacts": [
                 {"path": "product", "value": "XYZ Pro"},
                 {"path": "available", "value": True},
@@ -202,6 +207,129 @@ def test_failed_tool_call_cannot_expose_response_facts():
             "status": "http_500",
         }
     ]
+
+
+def test_newest_empty_runbook_run_does_not_revive_older_concerns_or_evidence():
+    issue = {
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "status": "failed",
+                "metadata": {"sourceMessageId": "message-new"},
+                "intentResult": {},
+            },
+            {
+                "source": "channel:email-main",
+                "status": "success",
+                "metadata": {"sourceMessageId": "message-old"},
+                "intentResult": {
+                    "concerns": [{
+                        "concernId": "old-concern",
+                        "matched": True,
+                        "intentName": "old-runbook",
+                        "toolEvidence": [{
+                            "name": "old_lookup",
+                            "status": "success",
+                            "responseFacts": {"status": "old"},
+                        }],
+                    }],
+                },
+            },
+        ]
+    }
+
+    concerns, evidence, scope = issue_agent._automatic_runbook_concern_context(issue)
+
+    assert concerns == []
+    assert evidence == []
+    assert scope == {"sourceMessageId": "message-new"}
+    assert "concerns" not in issue_agent._ticket_context(issue)
+
+
+def test_newest_unrelated_ai_run_does_not_hide_latest_runbook_context():
+    issue = {
+        "aiRuns": [
+            {
+                "source": "agent_field_extraction",
+                "intentResult": {"fields": {"order": "ZF-1"}},
+            },
+            {
+                "source": "legacy-email-pipeline",
+                "intentResult": {
+                    "matched": True,
+                    "concerns": [{
+                        "concernId": "current-concern",
+                        "matched": True,
+                        "intentName": "current-runbook",
+                    }],
+                },
+            },
+        ]
+    }
+
+    concerns, _evidence, _scope = issue_agent._automatic_runbook_concern_context(issue)
+
+    assert [concern["id"] for concern in concerns] == ["current-concern"]
+
+
+def test_tool_evidence_ids_scope_modern_concerns_and_keep_legacy_flat_records():
+    modern = {
+        "concerns": [
+            {
+                "id": "first-concern",
+                "toolEvidence": [{
+                    "name": "shared-lookup",
+                    "status": "success",
+                    "evidenceId": "tool:first-concern:shared-lookup",
+                    "responseFacts": {"status": "first"},
+                }],
+            },
+            {
+                "id": "second-concern",
+                "toolEvidence": [{
+                    "name": "shared-lookup",
+                    "status": "success",
+                    "evidenceId": "tool:second-concern:shared-lookup",
+                    "responseFacts": {"status": "second"},
+                }],
+            },
+        ]
+    }
+    legacy = {
+        "toolEvidence": [{
+            "name": "legacy-lookup",
+            "status": "success",
+            "evidenceId": "tool:legacy-lookup",
+            "responseFacts": {"status": "legacy"},
+        }]
+    }
+    spoofed = {
+        "toolEvidence": [{
+            "name": "legacy-lookup",
+            "status": "success",
+            "evidenceId": "tool:first-concern:legacy-lookup",
+            "responseFacts": {"status": "spoofed"},
+        }]
+    }
+    mis_scoped = {
+        "concerns": [{
+            "id": "first-concern",
+            "toolEvidence": [{
+                "name": "shared-lookup",
+                "status": "success",
+                "evidenceId": "tool:second-concern:shared-lookup",
+                "responseFacts": {"status": "spoofed"},
+            }],
+        }]
+    }
+
+    assert issue_agent._automatic_tool_evidence_ids(modern) == (
+        "tool:first-concern:shared-lookup",
+        "tool:second-concern:shared-lookup",
+    )
+    assert issue_agent._automatic_tool_evidence_ids(legacy) == ("tool:legacy-lookup",)
+    assert issue_agent._automatic_tool_evidence_ids(spoofed) == ()
+    assert issue_agent._automatic_tool_evidence_ids(mis_scoped) == ()
 
 
 def test_direct_runbook_outcome_keeps_review_reason_and_requirements():

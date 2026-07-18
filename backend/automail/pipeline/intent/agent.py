@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,11 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededErr
 from langchain.agents.structured_output import ToolStrategy
 from langgraph.errors import GraphRecursionError
 
-from automail.integrations.http_tool import current_generated_attachments, current_tool_calls
+from automail.integrations.http_tool import (
+    HttpToolCollection,
+    isolated_http_tool_collection,
+    merge_http_tool_collection,
+)
 from automail.llm.usage import llm_stage
 from automail.models import (
     AgentResponse,
@@ -754,10 +759,10 @@ def _answer_obligations(
     ]
 
 
-def _new_tool_evidence(start_index: int) -> list[RunbookToolEvidence]:
+def _tool_evidence(tool_calls: list[dict[str, Any]]) -> list[RunbookToolEvidence]:
     """Convert this concern's safe HTTP audit facts into composer evidence."""
     evidence: list[RunbookToolEvidence] = []
-    for call in current_tool_calls()[start_index:]:
+    for call in tool_calls:
         tool_name = str(call.get("name") or "").strip()
         if not tool_name:
             continue
@@ -786,7 +791,7 @@ def _new_tool_evidence(start_index: int) -> list[RunbookToolEvidence]:
 def _outcome_attachments(
     intent_name: str,
     intents_dir: Any,
-    generated_start_index: int,
+    generated_attachments: list[dict[str, Any]],
 ) -> list[RunbookAttachment]:
     attachments: list[RunbookAttachment] = []
     try:
@@ -802,8 +807,10 @@ def _outcome_attachments(
                 description=str(item.get("description") or "").strip(),
                 source="runbook",
                 mode=str(item.get("mode") or "dynamic"),
+                source_filename=filename,
+                source_intent=intent_name,
             ))
-    for item in current_generated_attachments()[generated_start_index:]:
+    for item in generated_attachments:
         filename = str(item.get("filename") or "").strip()
         if filename and item.get("attach_to_response", True):
             attachments.append(RunbookAttachment(
@@ -843,7 +850,7 @@ def _verified_facts(evidence: list[RunbookToolEvidence]) -> list[VerifiedFact]:
     return facts
 
 
-def _execute_routed_concern(
+def _build_routed_concern_outcome(
     concern_id: str,
     route: ConcernRoute,
     email: Email,
@@ -853,6 +860,7 @@ def _execute_routed_concern(
     parsed_attachments: dict[str, str] | None,
     tenant_id: str | None,
     project_id: str | None,
+    collection: HttpToolCollection,
 ) -> RunbookOutcome:
     intent_name = str(route.intent_name or "").strip()
     if not intent_name:
@@ -874,8 +882,6 @@ def _execute_routed_concern(
     intent_result = _build_intent_result(intent_name, intents_dir=intents_dir)
     requires_review = get_intent_require_review(intent_name, intents_dir=intents_dir)
     focused_email, processing_email = _concern_processing_email(email, route)
-    generated_start_index = len(current_generated_attachments())
-    tool_start_index = len(current_tool_calls())
     output: IntentProcessingOutput | IntentReviewOutput = IntentReviewOutput()
     fills_count = 0
 
@@ -902,8 +908,7 @@ def _execute_routed_concern(
     else:
         logger.info("Intent '%s' requires no tool or action processing", intent_name)
 
-    audited_evidence = _new_tool_evidence(tool_start_index)
-    tool_evidence = audited_evidence
+    tool_evidence = _tool_evidence(collection.tool_calls)
     review_reasons = []
     if requires_review:
         review_reasons.append("Intent is configured to require human review.")
@@ -939,10 +944,228 @@ def _execute_routed_concern(
             output.reply_requirements,
         ),
         forbidden_claims=output.forbidden_claims,
-        attachments=_outcome_attachments(intent_name, intents_dir, generated_start_index),
+        attachments=_outcome_attachments(
+            intent_name,
+            intents_dir,
+            collection.generated_attachments,
+        ),
         requires_human=bool(requires_human_reason),
         requires_human_reason=requires_human_reason,
     )
+
+
+@dataclass(frozen=True)
+class ConcernExecutionResult:
+    """One concern outcome plus only activity produced by that concern."""
+
+    outcome: RunbookOutcome
+    collection: HttpToolCollection
+
+
+def _scoped_attachment_filename(
+    *,
+    concern_id: str,
+    attachment_index: int,
+    original_filename: str,
+    owner_key: str,
+    occupied: set[str],
+) -> str:
+    """Build a stable collision-free runtime alias for one attachment owner."""
+    basename = original_filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not basename:
+        basename = "attachment"
+    suffix = Path(basename).suffix[:32]
+    stem = basename[:-len(suffix)] if suffix else basename
+    stem = stem or "attachment"
+    for nonce in range(100):
+        identity = "\x00".join((
+            concern_id,
+            owner_key,
+            str(attachment_index),
+            original_filename,
+            str(nonce),
+        ))
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        marker = f"--mantly-{digest}"
+        max_stem_chars = max(1, 240 - len(marker) - len(suffix))
+        candidate = f"{stem[:max_stem_chars]}{marker}{suffix}"
+        if candidate.casefold() not in occupied:
+            return candidate
+    raise ValueError("Could not assign a unique attachment filename")
+
+
+def _scope_attachment_collisions(
+    results: list[ConcernExecutionResult],
+) -> None:
+    """Give every colliding configured or generated owner a stable runtime alias."""
+    references: dict[
+        str,
+        list[tuple[ConcernExecutionResult, str, int, RunbookAttachment | dict[str, Any]]],
+    ] = {}
+    for result in results:
+        if result.outcome.status == "failed":
+            continue
+        for index, attachment in enumerate(result.outcome.attachments, start=1):
+            if attachment.source == "tool" or not attachment.filename:
+                continue
+            references.setdefault(attachment.filename.casefold(), []).append(
+                (result, "runbook", index, attachment)
+            )
+        for index, item in enumerate(result.collection.generated_attachments, start=1):
+            filename = str(item.get("filename") or "").strip()
+            if filename:
+                references.setdefault(filename.casefold(), []).append(
+                    (result, "tool", index, item)
+                )
+
+    colliding_names = {
+        filename
+        for filename, items in references.items()
+        if len(items) > 1
+    }
+    if not colliding_names:
+        return
+
+    occupied = set(references) - colliding_names
+    changed_results: set[int] = set()
+    for filename, items in references.items():
+        if filename not in colliding_names:
+            continue
+        for result, owner_type, attachment_index, owner in items:
+            if isinstance(owner, RunbookAttachment):
+                original_filename = owner.source_filename or owner.filename
+                owner_key = f"runbook:{owner.source_intent or result.outcome.intent_name or ''}"
+            else:
+                original_filename = str(owner.get("filename") or "").strip()
+                owner_key = f"tool:{str(owner.get('source_tool') or '')}"
+            scoped_filename = _scoped_attachment_filename(
+                concern_id=result.outcome.concern_id,
+                attachment_index=attachment_index,
+                original_filename=original_filename,
+                owner_key=owner_key,
+                occupied=occupied,
+            )
+            if isinstance(owner, RunbookAttachment):
+                owner.source_filename = original_filename
+                owner.source_intent = owner.source_intent or str(
+                    result.outcome.intent_name or ""
+                )
+                owner.filename = scoped_filename
+            else:
+                owner["filename"] = scoped_filename
+            occupied.add(scoped_filename.casefold())
+            changed_results.add(id(result))
+
+    for result in results:
+        if id(result) not in changed_results:
+            continue
+        configured = [
+            attachment
+            for attachment in result.outcome.attachments
+            if attachment.source != "tool"
+        ]
+        generated = [
+            RunbookAttachment(
+                filename=str(item.get("filename") or "").strip(),
+                description=(
+                    f"Generated by {str(item.get('source_tool') or 'runbook tool')}"
+                ),
+                source="tool",
+                mode="generated",
+            )
+            for item in result.collection.generated_attachments
+            if (
+                str(item.get("filename") or "").strip()
+                and item.get("attach_to_response", True)
+            )
+        ]
+        result.outcome.attachments = [*configured, *generated]
+
+
+def _merge_concern_execution_result(result: ConcernExecutionResult) -> RunbookOutcome:
+    """Merge audit activity, excluding files produced by failed runbooks."""
+    for call in result.collection.tool_calls:
+        call["concernId"] = result.outcome.concern_id
+    merge_http_tool_collection(
+        result.collection,
+        include_generated_attachments=result.outcome.status != "failed",
+    )
+    return result.outcome
+
+
+def _execute_routed_concern_result(
+    concern_id: str,
+    route: ConcernRoute,
+    email: Email,
+    identity_result: IdentityResult | None,
+    intents_dir: Any,
+    config_path: Any,
+    parsed_attachments: dict[str, str] | None,
+    tenant_id: str | None,
+    project_id: str | None,
+) -> ConcernExecutionResult:
+    """Execute one concern against fresh tool and attachment collectors."""
+    with isolated_http_tool_collection() as collection:
+        try:
+            outcome = _build_routed_concern_outcome(
+                concern_id,
+                route,
+                email,
+                identity_result,
+                intents_dir,
+                config_path,
+                parsed_attachments,
+                tenant_id,
+                project_id,
+                collection,
+            )
+        except Exception as exc:
+            logger.error(
+                "Runbook concern %s (%s) failed: %s",
+                concern_id,
+                route.intent_name,
+                exc,
+                exc_info=True,
+            )
+            outcome = _failed_outcome(concern_id, route, exc)
+    return ConcernExecutionResult(outcome=outcome, collection=collection)
+
+
+def _execute_routed_concern(
+    concern_id: str,
+    route: ConcernRoute,
+    email: Email,
+    identity_result: IdentityResult | None,
+    intents_dir: Any,
+    config_path: Any,
+    parsed_attachments: dict[str, str] | None,
+    tenant_id: str | None,
+    project_id: str | None,
+) -> RunbookOutcome:
+    """Execute one concern and preserve activity for legacy direct callers."""
+    result = _execute_routed_concern_result(
+        concern_id,
+        route,
+        email,
+        identity_result,
+        intents_dir,
+        config_path,
+        parsed_attachments,
+        tenant_id,
+        project_id,
+    )
+    return _merge_concern_execution_results([result])[0]
+
+
+def _merge_concern_execution_results(
+    results: list[ConcernExecutionResult],
+) -> list[RunbookOutcome]:
+    """Merge isolated activity and outcomes in router order."""
+    _scope_attachment_collisions(results)
+    outcomes: list[RunbookOutcome] = []
+    for result in results:
+        outcomes.append(_merge_concern_execution_result(result))
+    return outcomes
 
 
 def _failed_outcome(
@@ -1069,22 +1292,18 @@ def _handle_matched_intent(
     )
     occurrences: dict[str, int] = {}
     concern_id = _concern_id(email, route, occurrences)
-    try:
-        outcome = _execute_routed_concern(
-            concern_id,
-            route,
-            email,
-            identity_result,
-            intents_dir,
-            config_path,
-            parsed_attachments,
-            tenant_id,
-            project_id,
-        )
-    except Exception as exc:
-        logger.error("Runbook '%s' failed: %s", intent_name, exc, exc_info=True)
-        outcome = _failed_outcome(concern_id, route, exc)
-    outcomes = [outcome]
+    result = _execute_routed_concern_result(
+        concern_id,
+        route,
+        email,
+        identity_result,
+        intents_dir,
+        config_path,
+        parsed_attachments,
+        tenant_id,
+        project_id,
+    )
+    outcomes = _merge_concern_execution_results([result])
     return (
         _intent_result_from_outcomes(outcomes, intents_dir),
         _review_response_from_outcomes(outcomes),
@@ -1129,32 +1348,23 @@ def run_intent_agent(
             reason=reason,
         )]
 
-    outcomes: list[RunbookOutcome] = []
+    executions: list[ConcernExecutionResult] = []
     occurrences: dict[str, int] = {}
     for route in routes[:3]:
         concern_id = _concern_id(email, route, occurrences)
-        try:
-            outcome = _execute_routed_concern(
-                concern_id,
-                route,
-                email,
-                identity_result,
-                intents_dir,
-                config_path,
-                parsed_attachments,
-                tenant_id,
-                project_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "Runbook concern %s (%s) failed: %s",
-                concern_id,
-                route.intent_name,
-                exc,
-                exc_info=True,
-            )
-            outcome = _failed_outcome(concern_id, route, exc)
-        outcomes.append(outcome)
+        executions.append(_execute_routed_concern_result(
+            concern_id,
+            route,
+            email,
+            identity_result,
+            intents_dir,
+            config_path,
+            parsed_attachments,
+            tenant_id,
+            project_id,
+        ))
+
+    outcomes = _merge_concern_execution_results(executions)
 
     return (
         _intent_result_from_outcomes(outcomes, intents_dir),

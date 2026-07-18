@@ -328,6 +328,46 @@ def test_strict_attachment_loading_rejects_filename_without_runbook_owner(monkey
     assert calls == []
 
 
+def test_strict_attachment_loading_rejects_ambiguous_legacy_same_name_owners(
+    monkeypatch,
+):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "automail.api.attachments._list_all",
+        lambda _collection, filter_str="", **_kwargs: calls.append(filter_str) or [],
+    )
+    result = IntentResult(
+        matched=True,
+        intent_name="cancel-contract",
+        concerns=[
+            _concern(
+                "concern-cancel",
+                "cancel-contract",
+                attachments=[RunbookAttachment(filename="terms.pdf")],
+            ),
+            _concern(
+                "concern-buy",
+                "buy-product",
+                attachments=[RunbookAttachment(filename="terms.pdf")],
+            ),
+        ],
+    )
+    response = AgentResponse(
+        response_text="Attached.",
+        response_attachments=["terms.pdf"],
+    )
+
+    with pytest.raises(HTTPException, match="multiple runbook owners"):
+        load_attachment_files(
+            response,
+            intents_dir=SimpleNamespace(project_id="project-1"),
+            intent_result=result,
+            strict_intent_ownership=True,
+        )
+
+    assert calls == []
+
+
 def test_dict_shaped_nested_outcomes_remain_supported():
     result = {
         "intentName": "legacy-primary",

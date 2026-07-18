@@ -10,8 +10,11 @@
 ## Answer Obligations
 {answer_obligations}
 
-## Ticket
+## Global Ticket Evidence (`ticket`)
 {ticket}
+
+## Concern-Scoped Runbook Evidence
+{scoped_ticket_evidence}
 
 ## Account Intelligence
 {account_intelligence}
@@ -24,6 +27,9 @@
 
 ## Cited Knowledge
 {knowledge_articles}
+
+## System Safety Policy
+{system_safety_policy}
 
 ## Candidate Answer
 {answer}

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -11820,8 +11821,9 @@ def test_create_issue_agent_failure_has_low_confidence_no_citations_or_reply(mon
 
 def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
     posted: list[tuple[str, dict]] = []
+    patched: list[tuple[str, dict]] = []
     updates: list[dict] = []
-    ids = iter(["agentUser123", "reply123", "aiRun123", "agentAssistant123"])
+    ids = iter(["agentUser123", "aiRun123", "reply123", "agentAssistant123"])
     issue = {
         "id": "issue1",
         "channel": "email",
@@ -11861,6 +11863,7 @@ def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
     monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
     monkeypatch.setattr(issues, "_list_all", fake_list_all)
     monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
     monkeypatch.setattr(
         issues,
         "update_issue",
@@ -11911,6 +11914,20 @@ def test_create_issue_agent_chat_message_persists_transcript(monkeypatch):
     assert [message["role"] for message in result["agentMessages"]] == ["user", "assistant"]
     assert result["agentMessages"][1]["runId"] == "aiRun123"
     assert result["agentMessages"][1]["replyId"] == "reply123"
+    progress_post = next(
+        data for path, data in posted
+        if path == "/api/collections/support_ai_runs/records"
+    )
+    assert progress_post["id"] == "aiRun123"
+    assert progress_post["metadata"]["processingProgress"]["stage"] == "saving"
+    completed_patch = next(
+        data for path, data in reversed(patched)
+        if path == "/api/collections/support_ai_runs/records/aiRun123"
+        and data.get("status") == "needs_human"
+    )
+    assert completed_patch["source"] == "agent_answer"
+    assert completed_patch["metadata"]["processingProgress"]["status"] == "completed"
+    assert completed_patch["metadata"]["processingProgress"]["stage"] == "completed"
     assert updates == [{"assignee_email": "agent@example.com", "assigned_by": "agent@example.com"}]
 
 
@@ -13468,6 +13485,16 @@ def test_approve_issue_reply_records_approval_metadata(monkeypatch):
             "metadata": {"approvalRequired": True, "confidence": "high"},
         } if collection == "support_outbound_messages" else None,
     )
+    monkeypatch.setattr(
+        issues,
+        "get_issue",
+        lambda *_args, **_kwargs: {
+            "id": "issue1",
+            "subject": "Need help",
+            "assigneeEmail": "lead@example.com",
+            "messages": [],
+        },
+    )
     monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
     monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
 
@@ -14321,7 +14348,22 @@ def test_delivery_claim_binds_reply_issue_scope_versions_and_body(monkeypatch):
     assert payload["project_id"] == "project1"
 
 
-def test_deliver_issue_reply_claim_conflict_never_calls_provider(monkeypatch):
+@pytest.fixture
+def empty_customer_safety_history(monkeypatch):
+    """Keep non-safety delivery tests explicit about their empty message history."""
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection != "support_messages":
+            raise AssertionError(f"Unexpected collection lookup: {collection}")
+        return []
+
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+
+
+def test_deliver_issue_reply_claim_conflict_never_calls_provider(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     sent: list[dict] = []
 
     def fake_first(collection: str, *_args, **_kwargs):
@@ -14366,7 +14408,10 @@ def test_deliver_issue_reply_claim_conflict_never_calls_provider(monkeypatch):
     assert sent == []
 
 
-def test_deliver_issue_reply_marks_ambiguous_provider_failure_uncertain(monkeypatch):
+def test_deliver_issue_reply_marks_ambiguous_provider_failure_uncertain(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     patched: list[tuple[str, dict]] = []
 
     def fake_first(collection: str, *_args, **_kwargs):
@@ -14994,7 +15039,10 @@ def test_deliver_issue_reply_routes_changed_automatic_answer_to_review(monkeypat
     assert event["event_type"] == "reply_grounding_invalidated"
 
 
-def test_deliver_issue_reply_sends_and_marks_sla(monkeypatch):
+def test_deliver_issue_reply_sends_and_marks_sla(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -15052,7 +15100,10 @@ def test_deliver_issue_reply_sends_and_marks_sla(monkeypatch):
     assert timeline_message["attachments"] == [{"filename": "quote.pdf", "base64": "cGRm", "contentType": "application/pdf"}]
 
 
-def test_deliver_issue_reply_records_explicit_sender_actor(monkeypatch):
+def test_deliver_issue_reply_records_explicit_sender_actor(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     automation_calls: list[dict] = []
@@ -15108,7 +15159,10 @@ def test_deliver_issue_reply_records_explicit_sender_actor(monkeypatch):
     assert automation_calls[0]["actor_email"] == "sender@example.com"
 
 
-def test_deliver_issue_reply_preserves_existing_assignee(monkeypatch):
+def test_deliver_issue_reply_preserves_existing_assignee(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -15233,7 +15287,10 @@ def test_deliver_issue_reply_preflights_unassigned_delivery_owner_before_send(mo
     assert posted == []
 
 
-def test_deliver_issue_reply_uses_queue_default_owner_when_unassigned(monkeypatch):
+def test_deliver_issue_reply_uses_queue_default_owner_when_unassigned(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -15304,7 +15361,10 @@ def test_deliver_issue_reply_uses_queue_default_owner_when_unassigned(monkeypatc
     assert assignment["assigned_by"] == "reviewer@example.com"
 
 
-def test_deliver_issue_reply_runs_reply_sent_automation(monkeypatch):
+def test_deliver_issue_reply_runs_reply_sent_automation(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     automation_calls: list[dict] = []
@@ -15505,7 +15565,10 @@ def test_deliver_issue_reply_blocks_future_retry_without_force(monkeypatch):
     assert patched == []
 
 
-def test_deliver_issue_reply_force_retries_deferred_reply(monkeypatch):
+def test_deliver_issue_reply_force_retries_deferred_reply(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -15572,7 +15635,10 @@ def test_deliver_issue_reply_force_retries_deferred_reply(monkeypatch):
     assert any(path == "/api/collections/support_messages/records" for path, _data in posted)
 
 
-def test_deliver_issue_reply_uses_channel_webhook(monkeypatch):
+def test_deliver_issue_reply_uses_channel_webhook(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -16232,7 +16298,10 @@ def test_generic_channel_ticket_reply_lifecycle_preserves_external_refs(monkeypa
         assert reply_sent_calls[-1]["context"]["externalTicketKey"] == case["external_ticket_key"]
 
 
-def test_deliver_issue_reply_uses_email_channel_webhook(monkeypatch):
+def test_deliver_issue_reply_uses_email_channel_webhook(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     sent: list[dict] = []
@@ -16318,7 +16387,10 @@ def test_deliver_issue_reply_uses_email_channel_webhook(monkeypatch):
     assert timeline_post["metadata"]["deliveryRoute"]["targetUrl"] == "https://adapter.example/email"
 
 
-def test_deliver_issue_reply_plain_email_falls_back_to_smtp(monkeypatch):
+def test_deliver_issue_reply_plain_email_falls_back_to_smtp(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     sent: list[dict] = []
     patched: list[tuple[str, dict]] = []
 
@@ -16493,7 +16565,10 @@ def test_deliver_issue_reply_defers_transient_channel_failure(monkeypatch):
     assert not any(path == "/api/collections/support_messages/records" for path, _data in posted)
 
 
-def test_deliver_issue_reply_sends_web_chat_internally(monkeypatch):
+def test_deliver_issue_reply_sends_web_chat_internally(
+    monkeypatch,
+    empty_customer_safety_history,
+):
     posted: list[tuple[str, dict]] = []
     patched: list[tuple[str, dict]] = []
     ids = iter(["message123", "assignment123"])
@@ -17684,14 +17759,19 @@ def test_create_web_chat_message_auto_prepares_update_agent_reply(monkeypatch):
             "include_feedback_link": False,
             "approval_required": True,
             "auto_send": False,
-            "automation_context": {
-                "source": "channel_autopilot",
-                "channelId": "channel1",
+                "automation_context": {
+                    "source": "channel_autopilot",
+                    "actionIdempotencyKey": (
+                        "channel-autopilot:"
+                        f"{hashlib.sha256('project1:issue1:web_chat:msg2'.encode('utf-8')).hexdigest()}"
+                    ),
+                    "channelId": "channel1",
                 "channelKey": "web-chat",
                 "channelType": "chat",
-                "eventSource": "web_chat",
-                "messageId": "msg2",
-                "onUpdate": True,
+                    "eventSource": "web_chat",
+                    "messageId": "msg2",
+                    "sourceMessageId": "msg2",
+                    "onUpdate": True,
                 "agentAutoSendRequested": False,
                 "webChatSessionId": "session1",
             },
@@ -21987,14 +22067,19 @@ def test_ingest_channel_webhook_auto_prepares_agent_reply(monkeypatch):
         "question": "Draft from Discord context.",
         "create_draft": True,
         "include_feedback_link": True,
-        "automation_context": {
-            "source": "channel_autopilot",
-            "channelId": "channel1",
+            "automation_context": {
+                "source": "channel_autopilot",
+                "actionIdempotencyKey": (
+                    "channel-autopilot:"
+                    f"{hashlib.sha256('project1:issue1:discord:discord:discord-main:C123:m-1:m-1'.encode('utf-8')).hexdigest()}"
+                ),
+                "channelId": "channel1",
             "channelKey": "discord-main",
             "channelType": "discord",
-            "eventSource": "discord",
-            "messageId": "discord:discord-main:C123:m-1:m-1",
-            "onUpdate": False,
+                "eventSource": "discord",
+                "messageId": "discord:discord-main:C123:m-1:m-1",
+                "sourceMessageId": "discord:discord-main:C123:m-1:m-1",
+                "onUpdate": False,
             "agentAutoSendRequested": False,
             "externalProvider": "discord",
             "externalChannelKey": "discord:discord-main:G123:C123",
@@ -22070,11 +22155,16 @@ def test_channel_auto_prepare_runs_full_ticket_prep(monkeypatch):
     assert result is not None
     expected_context = {
         "source": "channel_autopilot",
+        "actionIdempotencyKey": (
+            "channel-autopilot:"
+            f"{hashlib.sha256('project1:issue1:discord:msg1'.encode('utf-8')).hexdigest()}"
+        ),
         "channelId": "channel1",
         "channelKey": "discord-main",
         "channelType": "discord",
         "eventSource": "discord",
         "messageId": "msg1",
+        "sourceMessageId": "msg1",
         "onUpdate": False,
         "agentAutoSendRequested": False,
         "externalMessageKey": "discord-message-1",
@@ -22132,6 +22222,139 @@ def test_channel_auto_prepare_runs_full_ticket_prep(monkeypatch):
     assert autopilot_event["metadata"]["agentAutoSendRequested"] is False
     assert autopilot_event["metadata"]["autoSend"] is False
     assert autopilot_event["metadata"]["actions"][0]["type"] == "prepare_triage"
+
+
+def test_channel_auto_prepare_advances_and_finishes_source_message_progress(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    progress_run = {
+        "id": "source-run1",
+        "status": "processing",
+        "started_at": "2026-07-18T00:00:00+00:00",
+        "metadata": {"kind": "direct_channel_runbooks"},
+    }
+    progress_run["metadata"] = issues._processing_progress_metadata(
+        progress_run,
+        stage="automation",
+        label="Applying ticket automation",
+        terminal_status="needs_human",
+    )
+
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "prepare_issue_triage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "prepare_issue_custom_fields", lambda *_args, **_kwargs: None)
+
+    def fake_agent(_issue_id: str, **kwargs):
+        assert kwargs["processing_run"] is progress_run
+        issues._advance_processing_run(
+            progress_run,
+            stage="grounding",
+            label="Checking answer against evidence",
+        )
+        return {"reply": {"id": "reply1"}, "run": {"id": "answer-run1"}}
+
+    monkeypatch.setattr(issues, "create_issue_agent_answer", fake_agent)
+
+    result = issues._channel_auto_prepare_agent_reply(
+        channel={
+            "id": "channel1",
+            "channelKey": "email-main",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True},
+        },
+        issue_id="issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        source="email",
+        message_id="message1",
+        processing_run=progress_run,
+    )
+
+    assert result is not None
+    final_patch = patched[-1][1]
+    assert final_patch["status"] == "needs_human"
+    progress = final_patch["metadata"]["processingProgress"]
+    assert progress["status"] == "completed"
+    assert progress["stage"] == "completed"
+    assert [stage["key"] for stage in progress["stages"]] == [
+        "automation",
+        "triage",
+        "ticket_fields",
+        "composer",
+        "grounding",
+        "finalizing",
+        "completed",
+    ]
+    assert all(stage["status"] == "completed" for stage in progress["stages"])
+
+
+def test_channel_auto_prepare_marks_source_message_progress_failed_on_exception(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    progress_run = {
+        "id": "source-run1",
+        "status": "processing",
+        "started_at": "2026-07-18T00:00:00+00:00",
+        "metadata": {"kind": "direct_channel_runbooks"},
+    }
+    progress_run["metadata"] = issues._processing_progress_metadata(
+        progress_run,
+        stage="automation",
+        label="Applying ticket automation",
+        terminal_status="success",
+    )
+    monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "prepare_issue_triage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(issues, "prepare_issue_custom_fields", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "create_issue_agent_answer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("composer unavailable")),
+    )
+
+    result = issues._channel_auto_prepare_agent_reply(
+        channel={
+            "id": "channel1",
+            "channelKey": "email-main",
+            "type": "email",
+            "config": {"autoPrepareAgentReply": True},
+        },
+        issue_id="issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        source="email",
+        message_id="message1",
+        processing_run=progress_run,
+    )
+
+    assert result is None
+    final_patch = patched[-1][1]
+    assert final_patch["status"] == "failed"
+    assert final_patch["requires_human"] is True
+    assert final_patch["metadata"]["processingProgress"]["status"] == "failed"
+    assert final_patch["metadata"]["processingProgress"]["detail"] == "composer unavailable"
+
+
+def test_processing_progress_patch_failure_does_not_abort_work(monkeypatch):
+    progress_run = {
+        "id": "source-run1",
+        "status": "processing",
+        "metadata": {"kind": "direct_channel_runbooks"},
+    }
+
+    def fail_patch(*_args, **_kwargs):
+        raise RuntimeError("progress store unavailable")
+
+    monkeypatch.setattr(issues, "_patch", fail_patch)
+
+    result = issues._advance_processing_run(
+        progress_run,
+        stage="grounding",
+        label="Checking answer against evidence",
+    )
+
+    assert result is progress_run
+    assert progress_run["metadata"] == {"kind": "direct_channel_runbooks"}
 
 
 def test_channel_auto_prepare_can_request_guarded_auto_send(monkeypatch):

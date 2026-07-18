@@ -116,3 +116,45 @@ def attachment_intent_names(
         remaining.insert(0, primary)
 
     return [*owners, *remaining]
+
+
+def attachment_intent_sources(
+    intent_result: Any,
+    filename: str,
+) -> list[tuple[str, str]]:
+    """Return exact runbook and stored filename owners for a runtime alias."""
+    if intent_result is None:
+        return []
+
+    owners: list[tuple[str, str]] = []
+    for concern in _field(intent_result, "concerns", default=[]) or []:
+        outcome = _field(concern, "outcome", "runbookOutcome", "runbook_outcome", default=None) or concern
+        concern_intent = str(
+            _field(concern, "intent_name", "intentName", "runbook", default=None)
+            or _field(outcome, "intent_name", "intentName", "runbook", default="")
+            or ""
+        ).strip()
+        for item in (
+            _field(outcome, "attachments", default=None)
+            or _field(concern, "attachments", default=[])
+            or []
+        ):
+            if str(_field(item, "filename", default="") or "").strip() != filename:
+                continue
+            source = str(
+                _field(item, "source", default="runbook") or "runbook"
+            ).strip().lower()
+            if source == "tool":
+                continue
+            source_intent = str(
+                _field(item, "source_intent", "sourceIntent", default="")
+                or concern_intent
+            ).strip()
+            source_filename = str(
+                _field(item, "source_filename", "sourceFilename", default="")
+                or filename
+            ).strip()
+            owner = (source_intent, source_filename)
+            if source_intent and source_filename and owner not in owners:
+                owners.append(owner)
+    return owners

@@ -10,7 +10,10 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from automail.db.pocketbase.client import _get_binary, _list_all
-from automail.pipeline.intent.consumers import attachment_intent_names
+from automail.pipeline.intent.consumers import (
+    attachment_intent_names,
+    attachment_intent_sources,
+)
 
 try:
     from docling.document_converter import DocumentConverter  # pyright: ignore[reportMissingImports]
@@ -154,16 +157,13 @@ def load_attachment_files(
 
             if project_id:
                 try:
-                    filters = [
-                        f"project='{_escape_pb(project_id)}'",
-                        f"filename='{_escape_pb(filename)}'",
-                    ]
                     preferred = []
-                    intent_names = attachment_intent_names(
-                        intent_result,
-                        filename,
-                        owners_only=strict_intent_ownership,
-                    )
+                    intent_sources = attachment_intent_sources(intent_result, filename)
+                    if strict_intent_ownership and len(intent_sources) > 1:
+                        raise ValueError(
+                            f"Attachment alias '{filename}' has multiple runbook owners"
+                        )
+                    intent_names = attachment_intent_names(intent_result, filename)
                     activated_intent = str(getattr(agent_response, "activated_intent", None) or "").strip()
                     if (
                         not strict_intent_ownership
@@ -171,7 +171,17 @@ def load_attachment_files(
                         and activated_intent not in intent_names
                     ):
                         intent_names.append(activated_intent)
-                    for intent_name in intent_names:
+                    candidates = intent_sources or [
+                        (intent_name, filename)
+                        for intent_name in (
+                            [] if strict_intent_ownership else intent_names
+                        )
+                    ]
+                    for intent_name, source_filename in candidates:
+                        filters = [
+                            f"project='{_escape_pb(project_id)}'",
+                            f"filename='{_escape_pb(source_filename)}'",
+                        ]
                         preferred = _list_all(
                             "intent_attachments",
                             " && ".join([*filters, f"intent='{_escape_pb(intent_name)}'"]),
@@ -181,6 +191,10 @@ def load_attachment_files(
                             break
                     records = preferred
                     if not records and not strict_intent_ownership:
+                        filters = [
+                            f"project='{_escape_pb(project_id)}'",
+                            f"filename='{_escape_pb(filename)}'",
+                        ]
                         records = _list_all(
                             "intent_attachments",
                             " && ".join(filters),
@@ -202,6 +216,8 @@ def load_attachment_files(
                                 "size": len(content),
                             })
                             continue
+                except ValueError:
+                    raise
                 except Exception:
                     logger.warning(
                         "Failed to load PocketBase intent attachment %s",

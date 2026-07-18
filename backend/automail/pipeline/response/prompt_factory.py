@@ -6,6 +6,7 @@ from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from automail.core.config import read_config
 from automail.models import Email, IdentityResult, IntentResult
+from automail.support.safety_guidance import lithium_battery_safety_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,11 @@ def create_response_system_prompt(
         config_path: Optional path to admin config file.
         intents_dir: Kept for API symmetry with the response user prompt.
     """
-    system_prompt = (_PROMPTS_DIR / "response_system_prompt.md").read_text(encoding="utf-8").strip()
+    system_prompt = (
+        (_PROMPTS_DIR / "response_system_prompt.md").read_text(encoding="utf-8").strip()
+        + "\n\n"
+        + lithium_battery_safety_system_prompt()
+    )
     config = read_config(config_path=config_path)
     project_id = getattr(config_path, "project_id", None)
     if tenant_id or project_id:
@@ -258,17 +263,6 @@ def create_response_user_prompt(
         from automail.pipeline.intent.intents_factory import get_intent_response_attachments
         available_response_attachments = []
         seen_filenames: set[str] = set()
-        attachment_intents = [
-            str(getattr(concern, "intent_name", "") or "")
-            for concern in concerns
-            if getattr(concern, "matched", False)
-        ] or ([intent_result.intent_name] if intent_result.matched and intent_result.intent_name else [])
-        for intent_name in attachment_intents:
-            for attachment in get_intent_response_attachments(intent_name, intents_dir=intents_dir):
-                filename = str(attachment.get("filename") or "").strip()
-                if filename and filename not in seen_filenames:
-                    seen_filenames.add(filename)
-                    available_response_attachments.append(attachment)
         for concern in concerns:
             for attachment in list(getattr(concern, "attachments", None) or []):
                 filename = str(getattr(attachment, "filename", "") or "").strip()
@@ -282,6 +276,25 @@ def create_response_user_prompt(
                         "mode": str(getattr(attachment, "mode", "dynamic") or "dynamic"),
                     }
                 )
+        if not available_response_attachments:
+            attachment_intents = [
+                str(getattr(concern, "intent_name", "") or "")
+                for concern in concerns
+                if getattr(concern, "matched", False)
+            ] or (
+                [intent_result.intent_name]
+                if intent_result.matched and intent_result.intent_name
+                else []
+            )
+            for intent_name in attachment_intents:
+                for attachment in get_intent_response_attachments(
+                    intent_name,
+                    intents_dir=intents_dir,
+                ):
+                    filename = str(attachment.get("filename") or "").strip()
+                    if filename and filename not in seen_filenames:
+                        seen_filenames.add(filename)
+                        available_response_attachments.append(attachment)
 
     available_attachments_text = "<available_attachments>\n"
     if available_response_attachments:

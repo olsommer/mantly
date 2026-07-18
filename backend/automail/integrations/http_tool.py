@@ -16,9 +16,10 @@ import logging
 import math
 import os
 import re
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
@@ -86,6 +87,22 @@ _tool_calls: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "http_tool_calls",
     default=None,
 )
+_tool_execution_claim: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "http_tool_execution_claim",
+    default=None,
+)
+
+
+class HttpToolExecutionFenced(RuntimeError):
+    """The durable processing claim expired before an HTTP tool could run."""
+
+
+@dataclass
+class HttpToolCollection:
+    """Tool activity captured inside one isolated execution scope."""
+
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    generated_attachments: list[dict[str, Any]] = field(default_factory=list)
 
 # Tool responses are untrusted.  Persist only a small, fixed set of operational
 # facts for later reply composition/grounding; never persist the raw response,
@@ -219,6 +236,49 @@ def collect_tool_calls(token: Token | None = None) -> list[dict[str, Any]]:
 def current_tool_calls() -> list[dict[str, Any]]:
     """Return HTTP tool calls collected so far without resetting context."""
     return [dict(call) for call in (_tool_calls.get() or [])]
+
+
+@contextmanager
+def fence_http_tool_execution(claim_is_active: Callable[[], bool]) -> Iterator[None]:
+    """Require a durable active claim immediately before every HTTP tool call."""
+    token = _tool_execution_claim.set(claim_is_active)
+    try:
+        yield
+    finally:
+        _tool_execution_claim.reset(token)
+
+
+def _require_http_tool_execution_claim() -> None:
+    claim_is_active = _tool_execution_claim.get()
+    if claim_is_active is not None and not claim_is_active():
+        raise HttpToolExecutionFenced("HTTP tool execution claim expired")
+
+
+@contextmanager
+def isolated_http_tool_collection() -> Iterator[HttpToolCollection]:
+    """Capture tool activity without reading from or mutating a parent scope."""
+    collection = HttpToolCollection()
+    generated_token = _generated_attachments.set(collection.generated_attachments)
+    tool_token = _tool_calls.set(collection.tool_calls)
+    try:
+        yield collection
+    finally:
+        _tool_calls.reset(tool_token)
+        _generated_attachments.reset(generated_token)
+
+
+def merge_http_tool_collection(
+    collection: HttpToolCollection,
+    *,
+    include_generated_attachments: bool = True,
+) -> None:
+    """Append allowed isolated activity to the active parent in caller order."""
+    tool_calls = _tool_calls.get()
+    if tool_calls is not None:
+        tool_calls.extend(dict(call) for call in collection.tool_calls)
+    generated_attachments = _generated_attachments.get()
+    if generated_attachments is not None and include_generated_attachments:
+        generated_attachments.extend(dict(item) for item in collection.generated_attachments)
 
 
 def _normalized_fact_key(value: str) -> str:
@@ -564,6 +624,9 @@ def _make_http_tool(
     _bound_sender = sender_email or ""
 
     def _http_call(**kwargs: Any) -> str:
+        # Fence before demo adapters and real network calls. A stale worker may
+        # still finish LLM reasoning, but it cannot start another tool request.
+        _require_http_tool_execution_claim()
         # Resolve sender_email: LLM-provided (identity) or pre-bound (intent)
         email_addr: str = kwargs.pop("sender_email", _bound_sender)
         url = defn.url_template.replace(

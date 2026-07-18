@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from automail.db.pocketbase.client import create_web_chat_message, create_web_chat_session, get_web_chat_session
 from automail.models import CamelCaseModel
@@ -41,7 +42,8 @@ def _script_json(value: str) -> str:
 @router.post("/api/support/web-chat/{project_id}/sessions")
 async def start_web_chat(project_id: str, body: WebChatSessionCreate) -> dict[str, Any]:
     try:
-        return create_web_chat_session(
+        return await run_in_threadpool(
+            create_web_chat_session,
             tenant_id=None,
             project_id=project_id,
             channel_key=body.channel_key,
@@ -67,7 +69,8 @@ async def get_web_chat(session_key: str) -> dict[str, Any]:
 @router.post("/api/support/web-chat/sessions/{session_key}/messages")
 async def add_web_chat_message(session_key: str, body: WebChatMessageCreate) -> dict[str, Any]:
     try:
-        message = create_web_chat_message(
+        message = await run_in_threadpool(
+            create_web_chat_message,
             session_key,
             body=body.body,
             sender_name=body.sender_name,

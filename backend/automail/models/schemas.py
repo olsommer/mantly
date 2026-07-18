@@ -149,6 +149,8 @@ class RunbookAttachment(CamelCaseModel):
     description: str = ""
     source: Literal["runbook", "tool"] = "runbook"
     mode: str = "dynamic"
+    source_filename: str = ""
+    source_intent: str = ""
 
 
 class RunbookOutcome(CamelCaseModel):

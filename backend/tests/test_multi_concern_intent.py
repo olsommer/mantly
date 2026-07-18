@@ -1,7 +1,34 @@
 """Focused tests for multi-concern runbook execution."""
 
-from automail.models import ConcernRoute, Email, IntentProcessingOutput, IntentReviewOutput
+import json
+from types import SimpleNamespace
+
+from automail.api.attachments import load_attachment_files
+from automail.integrations.http_tool import (
+    ToolDefinition,
+    _capture_generated_file,
+    _record_tool_call,
+    begin_generated_attachment_collection,
+    begin_tool_call_collection,
+    collect_generated_attachments,
+    collect_tool_calls,
+    current_generated_attachments,
+    current_tool_calls,
+)
+from automail.models import (
+    AgentResponse,
+    ConcernRoute,
+    Email,
+    IdentityResult,
+    IntentProcessingOutput,
+    IntentReviewOutput,
+    PhishingResult,
+    PromptInjectionResult,
+)
+from automail.pipeline import orchestrator
 from automail.pipeline.intent.agent import _concern_id, _execute_routed_concern, run_intent_agent
+from automail.pipeline.response.composer import _available_attachments
+from automail.pipeline.response.prompt_factory import create_response_user_prompt
 
 
 def _email() -> Email:
@@ -22,8 +49,47 @@ def _base_stubs(monkeypatch) -> None:
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_attachments", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("automail.pipeline.intent.agent.current_generated_attachments", lambda: [])
-    monkeypatch.setattr("automail.pipeline.intent.agent.current_tool_calls", lambda: [])
+
+
+def _record_test_tool(intent_name: str) -> None:
+    _record_tool_call(
+        ToolDefinition(
+            name=f"lookup-{intent_name}",
+            description="Lookup",
+            method="GET",
+            url_template="https://example.test/lookup",
+        ),
+        status="success",
+        response_text=json.dumps({"status": f"status-{intent_name}"}),
+    )
+
+
+def _record_test_attachment(intent_name: str) -> None:
+    _record_named_test_attachment(f"{intent_name}.pdf", "cGRm", intent_name)
+
+
+def _record_named_test_attachment(
+    filename: str,
+    content_base64: str,
+    source: str,
+) -> None:
+    _capture_generated_file(
+        ToolDefinition(
+            name=f"file-{source}",
+            description="Generate file",
+            method="POST",
+            url_template="https://example.test/file",
+            expects_file=True,
+            file_name_path="filename",
+            file_content_type_path="contentType",
+            file_content_base64_path="contentBase64",
+        ),
+        json.dumps({
+            "filename": filename,
+            "contentType": "application/pdf",
+            "contentBase64": content_base64,
+        }),
+    )
 
 
 def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monkeypatch):
@@ -567,24 +633,24 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
     )
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        "automail.pipeline.intent.agent._run_processing_agent",
-        lambda *_args, **_kwargs: IntentReviewOutput.model_validate({
+    def process(*_args, **_kwargs):
+        _record_tool_call(
+            ToolDefinition(
+                name="contract_lookup",
+                description="Lookup contract",
+                method="GET",
+                url_template="https://example.test/contracts",
+            ),
+            status="success",
+            response_text='{"contract": {"status": "active"}}',
+        )
+        return IntentReviewOutput.model_validate({
             "summary": "Lookup complete",
             "verified_facts": [{"fact": "Invented cancellation date"}],
             "tool_evidence": [{"tool_name": "fake", "facts": [{"fact": "Invented"}]}],
-        }),
-    )
-    snapshots = iter([
-        [],
-        [{
-            "name": "contract_lookup",
-            "method": "GET",
-            "status": "success",
-            "responseFacts": [{"path": "contract.status", "value": "active"}],
-        }],
-    ])
-    monkeypatch.setattr("automail.pipeline.intent.agent.current_tool_calls", lambda: next(snapshots))
+        })
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
     route = ConcernRoute(
         summary="Cancel contract",
         source_text="Cancel C-1.",
@@ -609,3 +675,456 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
     assert [item.tool_name for item in outcome.tool_evidence] == ["contract_lookup"]
     assert [item.method for item in outcome.tool_evidence] == ["GET"]
     assert "Invented" not in outcome.model_dump_json()
+
+
+def test_concern_collectors_isolate_tools_actions_knowledge_and_composer_order(monkeypatch):
+    _base_stubs(monkeypatch)
+    routes = [
+        ConcernRoute(
+            summary="Cancel contract",
+            source_text="Cancel C-1.",
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Buy product",
+            source_text="Buy XYZ.",
+            intent_name="buy-product",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda intent_name, **_kwargs: [{"name": f"lookup-{intent_name}", "method": "GET"}],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda intent_name, **_kwargs: [{
+            "name": f"action-{intent_name}",
+            "label": f"Action {intent_name}",
+            "type": "button",
+        }],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda intent_name, **_kwargs: {
+            "response_rules": [f"Knowledge rule for {intent_name}"],
+        },
+    )
+
+    def process(intent_name, *_args, **_kwargs):
+        assert current_tool_calls() == []
+        assert current_generated_attachments() == []
+        _record_test_tool(intent_name)
+        _record_test_attachment(intent_name)
+        return IntentProcessingOutput(
+            summary=f"Processed {intent_name}",
+            reply_requirements=[f"Runtime knowledge for {intent_name}"],
+        )
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    generated_token = begin_generated_attachment_collection()
+    tool_token = begin_tool_call_collection()
+    try:
+        result, response = run_intent_agent(_email())
+    finally:
+        generated = collect_generated_attachments(generated_token)
+        tool_calls = collect_tool_calls(tool_token)
+
+    assert response is None
+    assert [concern.intent_name for concern in result.concerns] == [
+        "cancel-contract",
+        "buy-product",
+    ]
+    assert [[tool.tool_name for tool in concern.tool_evidence] for concern in result.concerns] == [
+        ["lookup-cancel-contract"],
+        ["lookup-buy-product"],
+    ]
+    assert [[action.name for action in concern.actions] for concern in result.concerns] == [
+        ["action-cancel-contract"],
+        ["action-buy-product"],
+    ]
+    assert [concern.reply_requirements for concern in result.concerns] == [
+        [
+            "Knowledge rule for cancel-contract",
+            "Runtime knowledge for cancel-contract",
+        ],
+        [
+            "Knowledge rule for buy-product",
+            "Runtime knowledge for buy-product",
+        ],
+    ]
+    assert [[item.filename for item in concern.attachments] for concern in result.concerns] == [
+        ["cancel-contract.pdf"],
+        ["buy-product.pdf"],
+    ]
+    assert [call["name"] for call in tool_calls] == [
+        "lookup-cancel-contract",
+        "lookup-buy-product",
+    ]
+    assert [item["filename"] for item in generated] == [
+        "cancel-contract.pdf",
+        "buy-product.pdf",
+    ]
+    prompt = create_response_user_prompt(_email(), intent_result=result)
+    assert prompt.index("runbook>cancel-contract</runbook>") < prompt.index(
+        "runbook>buy-product</runbook>"
+    )
+
+
+def test_failed_concern_activity_cannot_leak_into_next_concern(monkeypatch):
+    _base_stubs(monkeypatch)
+    routes = [
+        ConcernRoute(summary="Cancel", source_text="Cancel C-1.", intent_name="cancel-contract"),
+        ConcernRoute(summary="Buy", source_text="Buy XYZ.", intent_name="buy-product"),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def process(intent_name, *_args, **_kwargs):
+        assert current_tool_calls() == []
+        assert current_generated_attachments() == []
+        _record_test_tool(intent_name)
+        if intent_name == "cancel-contract":
+            _record_test_attachment("partial-cancel")
+            raise RuntimeError("cancel service unavailable")
+        _record_test_attachment(intent_name)
+        return IntentReviewOutput(summary="Purchase processed")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    generated_token = begin_generated_attachment_collection()
+    tool_token = begin_tool_call_collection()
+    try:
+        result, response = run_intent_agent(_email())
+    finally:
+        generated = collect_generated_attachments(generated_token)
+        tool_calls = collect_tool_calls(tool_token)
+
+    assert [concern.status for concern in result.concerns] == ["failed", "ready"]
+    assert result.concerns[0].tool_evidence == []
+    assert result.concerns[0].attachments == []
+    assert [tool.tool_name for tool in result.concerns[1].tool_evidence] == [
+        "lookup-buy-product",
+    ]
+    assert [item.filename for item in result.concerns[1].attachments] == [
+        "buy-product.pdf",
+    ]
+    assert response is not None and response.requires_human is True
+    assert [call["name"] for call in tool_calls] == [
+        "lookup-cancel-contract",
+        "lookup-buy-product",
+    ]
+    assert [call["concernId"] for call in tool_calls] == [
+        result.concerns[0].concern_id,
+        result.concerns[1].concern_id,
+    ]
+    assert "status-cancel-contract" not in result.model_dump_json()
+    assert [item["filename"] for item in generated] == ["buy-product.pdf"]
+
+
+def test_configured_filename_collision_aliases_every_owner_and_loads_exact_sources(
+    monkeypatch,
+):
+    _base_stubs(monkeypatch)
+    routes = [
+        ConcernRoute(summary="Cancel", source_text="Cancel.", intent_name="cancel-contract"),
+        ConcernRoute(summary="Buy", source_text="Buy.", intent_name="buy-product"),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_attachments",
+        lambda intent_name, **_kwargs: [{
+            "filename": "terms.pdf",
+            "description": f"Terms for {intent_name}",
+            "mode": "dynamic",
+        }],
+    )
+
+    result, _response = run_intent_agent(_email())
+
+    attachments = [concern.attachments[0] for concern in result.concerns]
+    aliases = [attachment.filename for attachment in attachments]
+    assert len(set(aliases)) == 2
+    assert all(alias != "terms.pdf" for alias in aliases)
+    assert [attachment.source_filename for attachment in attachments] == [
+        "terms.pdf",
+        "terms.pdf",
+    ]
+    assert [attachment.source_intent for attachment in attachments] == [
+        "cancel-contract",
+        "buy-product",
+    ]
+    available, _always = _available_attachments(result, intents_dir=None)
+    assert [item["filename"] for item in available] == aliases
+    prompt = create_response_user_prompt(_email(), intent_result=result)
+    assert "terms.pdf" not in prompt
+    assert all(alias in prompt for alias in aliases)
+
+    filters: list[str] = []
+
+    def fake_list_all(_collection, filter_str="", **_kwargs):
+        filters.append(filter_str)
+        if "intent='cancel-contract'" in filter_str:
+            return [{"id": "cancel-file", "file": "cancel.pdf"}]
+        if "intent='buy-product'" in filter_str:
+            return [{"id": "buy-file", "file": "buy.pdf"}]
+        return []
+
+    monkeypatch.setattr("automail.api.attachments._list_all", fake_list_all)
+    monkeypatch.setattr(
+        "automail.api.attachments._get_binary",
+        lambda path: (
+            b"cancel terms" if "cancel-file" in path else b"buy terms",
+            "application/pdf",
+        ),
+    )
+    response = AgentResponse(
+        response_text="Attached.",
+        response_attachments=aliases,
+    )
+
+    loaded = load_attachment_files(
+        response,
+        intents_dir=SimpleNamespace(project_id="project-1"),
+        intent_result=result,
+        strict_intent_ownership=True,
+    )
+
+    assert loaded is not None
+    assert [item["filename"] for item in loaded] == aliases
+    assert [item["content_base64"] for item in loaded] == [
+        "Y2FuY2VsIHRlcm1z",
+        "YnV5IHRlcm1z",
+    ]
+    assert filters == [
+        "project='project-1' && filename='terms.pdf' && intent='cancel-contract'",
+        "project='project-1' && filename='terms.pdf' && intent='buy-product'",
+    ]
+
+
+def test_configured_and_generated_same_name_both_receive_selectable_aliases(
+    monkeypatch,
+):
+    _base_stubs(monkeypatch)
+    route = ConcernRoute(
+        summary="Create label",
+        source_text="Create a label.",
+        intent_name="cancel-contract",
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: ([route], None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "make-label", "method": "POST"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_attachments",
+        lambda *_args, **_kwargs: [{"filename": "label.pdf", "mode": "dynamic"}],
+    )
+
+    def process(*_args, **_kwargs):
+        _record_named_test_attachment("label.pdf", "Z2VuZXJhdGVk", "label-tool")
+        return IntentReviewOutput(summary="Created label")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    generated_token = begin_generated_attachment_collection()
+    try:
+        result, _response = run_intent_agent(_email())
+    finally:
+        generated = collect_generated_attachments(generated_token)
+
+    configured, tool_file = result.concerns[0].attachments
+    assert configured.source == "runbook"
+    assert configured.source_filename == "label.pdf"
+    assert tool_file.source == "tool"
+    assert configured.filename != tool_file.filename
+    assert "label.pdf" not in {configured.filename, tool_file.filename}
+    assert generated[0]["filename"] == tool_file.filename
+
+    monkeypatch.setattr(
+        "automail.api.attachments._list_all",
+        lambda _collection, filter_str="", **_kwargs: (
+            [{"id": "static-label", "file": "stored-label.pdf"}]
+            if "filename='label.pdf'" in filter_str
+            and "intent='cancel-contract'" in filter_str
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        "automail.api.attachments._get_binary",
+        lambda _path: (b"configured", "application/pdf"),
+    )
+    response = AgentResponse(
+        response_text="Attached.",
+        response_attachments=[configured.filename, tool_file.filename],
+        generated_attachments=generated,
+    )
+
+    loaded = load_attachment_files(
+        response,
+        intents_dir=SimpleNamespace(project_id="project-1"),
+        intent_result=result,
+        strict_intent_ownership=True,
+    )
+
+    assert loaded is not None
+    assert [item["filename"] for item in loaded] == [
+        configured.filename,
+        tool_file.filename,
+    ]
+    assert [item["content_base64"] for item in loaded] == [
+        "Y29uZmlndXJlZA==",
+        "Z2VuZXJhdGVk",
+    ]
+
+
+def test_cross_concern_generated_filename_collision_reaches_loader_with_both_payloads(
+    monkeypatch,
+):
+    _base_stubs(monkeypatch)
+    routes = [
+        ConcernRoute(summary="First", source_text="First.", intent_name="cancel-contract"),
+        ConcernRoute(summary="Second", source_text="Second.", intent_name="buy-product"),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "make-label", "method": "POST"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def process(intent_name, *_args, **_kwargs):
+        content = "Zmlyc3Q=" if intent_name == "cancel-contract" else "c2Vjb25k"
+        _record_named_test_attachment("label.pdf", content, intent_name)
+        return IntentReviewOutput(summary=f"Processed {intent_name}")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    monkeypatch.setattr(
+        orchestrator,
+        "read_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            phishing_monitoring_enabled=False,
+            prompt_injection_monitoring_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_identity_agent",
+        lambda *_args, **_kwargs: IdentityResult(),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "detect_phishing",
+        lambda *_args, **_kwargs: PhishingResult(),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "detect_prompt_injection",
+        lambda *_args, **_kwargs: PromptInjectionResult(),
+    )
+
+    pipeline_result = orchestrator.run_pipeline(_email(), compose_response=False)
+
+    outcome_filenames = [
+        attachment.filename
+        for concern in pipeline_result.intent_result.concerns
+        for attachment in concern.attachments
+        if attachment.source == "tool"
+    ]
+    generated_filenames = [
+        attachment.filename
+        for attachment in pipeline_result.agent_response.generated_attachments
+    ]
+    assert len(outcome_filenames) == 2
+    assert len(set(outcome_filenames)) == 2
+    assert all(filename != "label.pdf" for filename in outcome_filenames)
+    assert generated_filenames == outcome_filenames
+    assert pipeline_result.agent_response.response_attachments == outcome_filenames
+
+    loaded = load_attachment_files(pipeline_result.agent_response)
+
+    assert loaded is not None
+    assert [item["filename"] for item in loaded] == outcome_filenames
+    assert [item["content_base64"] for item in loaded] == ["Zmlyc3Q=", "c2Vjb25k"]
+
+    repeated_result = orchestrator.run_pipeline(_email(), compose_response=False)
+    assert [
+        attachment.filename
+        for attachment in repeated_result.agent_response.generated_attachments
+    ] == generated_filenames
+
+
+def test_same_concern_duplicate_generated_filenames_are_both_advertised(monkeypatch):
+    _base_stubs(monkeypatch)
+    route = ConcernRoute(
+        summary="Two labels",
+        source_text="Create two labels.",
+        intent_name="cancel-contract",
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: ([route], None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "make-label", "method": "POST"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def process(*_args, **_kwargs):
+        _record_named_test_attachment("label.pdf", "b25l", "one")
+        _record_named_test_attachment("label.pdf", "dHdv", "two")
+        return IntentReviewOutput(summary="Created two labels")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    generated_token = begin_generated_attachment_collection()
+    try:
+        result, _response = run_intent_agent(_email())
+    finally:
+        generated = collect_generated_attachments(generated_token)
+
+    outcome_filenames = [item.filename for item in result.concerns[0].attachments]
+    generated_filenames = [str(item.get("filename") or "") for item in generated]
+    assert len(outcome_filenames) == 2
+    assert len(set(outcome_filenames)) == 2
+    assert generated_filenames == outcome_filenames
+    assert [item["content_base64"] for item in generated] == ["b25l", "dHdv"]

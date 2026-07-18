@@ -51,6 +51,7 @@ from automail.db.pocketbase.migration import migrate_to_projects
 from automail.support.scheduler import (
     start_support_crm_sync_scheduler,
     start_support_delivery_scheduler,
+    start_support_processing_expiry_scheduler,
     start_support_sla_scheduler,
     start_support_sync_scheduler,
 )
@@ -153,6 +154,7 @@ def create_app() -> FastAPI:
         start_support_delivery_scheduler()
         start_support_crm_sync_scheduler()
         start_support_sla_scheduler()
+        start_support_processing_expiry_scheduler()
 
         yield
 

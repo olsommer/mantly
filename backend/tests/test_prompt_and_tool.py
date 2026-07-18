@@ -1367,17 +1367,16 @@ class TestIntentAttachmentContext:
         from automail.pipeline.intent.agent import _outcome_attachments
 
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_attachments", lambda *_args, **_kwargs: [])
-        monkeypatch.setattr(
-            "automail.pipeline.intent.agent.current_generated_attachments",
-            lambda: [{
+        attachments = _outcome_attachments(
+            "gruene-karte-beauftragen",
+            None,
+            [{
                 "filename": "gruene-karte-max-keller.pdf",
                 "content_type": "application/pdf",
                 "source_tool": "request_green_card",
                 "attach_to_response": True,
             }],
         )
-
-        attachments = _outcome_attachments("gruene-karte-beauftragen", None, 0)
 
         assert [item.filename for item in attachments] == ["gruene-karte-max-keller.pdf"]
         assert attachments[0].source == "tool"

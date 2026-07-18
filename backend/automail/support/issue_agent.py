@@ -822,6 +822,19 @@ _ACTION_STATE_SUBJECT_STOP_WORDS = frozenset({
     "you",
     "your",
 })
+_ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN = re.compile(
+    r"^(?:i|me|you|he|him|she|her|it|we|us|they|them|this|that|these|those|"
+    r"there|whether|if|who|what|which)\b",
+    re.IGNORECASE,
+)
+_ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN = re.compile(
+    r"(?:\b(?:is|are|was|were|has|have|had|will|would|can|could|should|must|"
+    r"do|does|did)\b|"
+    r"\b(?:changed|escalated|cancelled|canceled|refunded|shipped|dispatched|"
+    r"started|completed|confirmed|approved|opened|created|updated|processed|"
+    r"sent|received|arrived|failed|succeeded|happened|occurred|went)\b\s*$)",
+    re.IGNORECASE,
+)
 
 
 def _detected_supported_language(*values: str) -> str:
@@ -1934,7 +1947,10 @@ def _action_state_obligation_subject(
         if match is None:
             continue
         raw_subject = match.group("subject").strip()
-        if re.match(r"^you\b", raw_subject, flags=re.IGNORECASE):
+        if (
+            _ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(raw_subject)
+            or _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(raw_subject)
+        ):
             return ""
         subject = raw_subject.strip(" \t\r\n.,;:!?\"'“”‘’")
         if _action_state_subject_tokens(subject):

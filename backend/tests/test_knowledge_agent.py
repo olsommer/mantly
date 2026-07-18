@@ -1137,6 +1137,7 @@ def test_action_state_repair_preserves_positive_topic_answer_byte_for_byte() -> 
     [
         "Confirm you have escalated it",
         "Confirm you escalated it",
+        "Confirm it changed",
     ],
 )
 def test_action_state_repair_ignores_pronoun_only_confirmation_clause(
@@ -1159,6 +1160,7 @@ def test_action_state_repair_ignores_pronoun_only_confirmation_clause(
 
     assert repaired == answer
     assert "Escalated it is not confirmed" not in repaired
+    assert "It changed is not confirmed" not in repaired
 
 
 def test_action_state_repair_does_not_cross_concern_boundaries() -> None:

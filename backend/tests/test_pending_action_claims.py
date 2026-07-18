@@ -48,6 +48,10 @@ def test_pending_action_guard_blocks_live_progressive_claims(answer: str) -> Non
         "The investigation is now in progress.",
         "The incident has been flagged for urgent human operations review.",
         "This request has been marked for escalation.",
+        "We have also internally escalated your request for urgent triage.",
+        "We are prioritizing your matter.",
+        "Your matter has been prioritized for urgent review.",
+        "We will prioritize your matter immediately.",
         "A warehouse ticket for this order is pending approval and will be opened shortly.",
         "We will escalate this to our team.",
         "Your order has been cancelled.",
@@ -65,6 +69,28 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
     assert result.claims == (answer,)
 
 
+def test_pending_action_guard_blocks_exact_live_coordinated_triage_claims() -> None:
+    answer = (
+        "We have noted the critical deadline of 20 July 2026 and have escalated "
+        "your request for immediate human triage due to its urgency. While we "
+        "cannot promise a same-day consultation, we are prioritizing your matter."
+    )
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (
+        (
+            "We have noted the critical deadline of 20 July 2026 and have escalated "
+            "your request for immediate human triage due to its urgency."
+        ),
+        (
+            "While we cannot promise a same-day consultation, we are prioritizing "
+            "your matter."
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -75,6 +101,11 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
         "This urgent safety incident is pending human review.",
         "We have not escalated this incident.",
         "We have not immediately escalated this case.",
+        "We have noted the deadline and have not escalated your request.",
+        "We are not prioritizing your matter before approval.",
+        "We cannot prioritize your matter until a human approves triage.",
+        "We will prioritize your matter once triage is approved.",
+        "We cannot promise that your matter will be prioritized before approval.",
         "We are unable to promise a replacement or refund before this verification is complete.",
         "We are waiting for approval before escalating.",
         "We are ready to check this after approval.",

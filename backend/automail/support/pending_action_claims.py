@@ -34,6 +34,7 @@ _PROGRESSIVE_ACTIONS = (
     r"beginning",
     r"activating",
     r"authorizing",
+    r"prioriti[sz]ing",
     r"working\s+on",
     r"looking\s+into",
     r"following\s+up",
@@ -68,6 +69,7 @@ _COMPLETED_ACTIONS = (
     r"begun",
     r"activated",
     r"authorized",
+    r"prioriti[sz]ed",
     r"completed",
     r"finished",
 )
@@ -96,6 +98,7 @@ _FUTURE_ACTIONS = (
     r"begin",
     r"activate",
     r"authorize",
+    r"prioriti[sz]e",
     r"flag",
     r"mark",
     r"work\s+on",
@@ -130,6 +133,8 @@ _ACTION_STATE_SUBJECTS = (
     r"subscription\s+change",
     r"carrier\s+redirect",
     r"warehouse\s+ticket",
+    r"matter",
+    r"triage",
 )
 _ACTION_STATE_SUBJECT_PATTERN = (
     rf"(?:[a-z][a-z-]*\s+){{0,3}}(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
@@ -297,21 +302,31 @@ _ITALIAN_ACTION_SUBJECTS = (
     r"indirizzo",
 )
 
+_ACTION_MODIFIER_PATTERN = (
+    r"(?:(?:already|currently|now|actively|immediately|promptly|successfully|just|"
+    r"also|therefore|further|[a-z]+ly)\s+)*"
+)
 _PROGRESSIVE_ACTION_PATTERN = re.compile(
     rf"\b(?:we\s+are|we['’]re|i\s+am|i['’]m)\s+"
-    rf"(?:(?:already|currently|now|actively|immediately|promptly)\s+)*"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
     rf"(?:{'|'.join(_PROGRESSIVE_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _PERFECT_ACTION_PATTERN = re.compile(
     rf"\b(?:we\s+have|we['’]ve|i\s+have|i['’]ve)\s+"
-    rf"(?:(?:already|successfully|now|immediately|promptly|just)\s+)*"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_COORDINATED_PERFECT_ACTION_PATTERN = re.compile(
+    rf"\b(?:we|i)\s+have\s+[^.!?\n]{{1,140}}?\b(?:and|but)\s+have\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
     rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
 _PAST_ACTION_PATTERN = re.compile(
     rf"\b(?:we|i)\s+"
-    rf"(?:(?:already|successfully|immediately|promptly|just)\s+)*"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
     rf"(?:{'|'.join(_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
@@ -460,6 +475,7 @@ _ANSWER_UNIT_PATTERN = re.compile(r"[^.!?\n]+(?:[.!?]+|(?=\n)|$)")
 _CLAIM_PATTERNS = (
     _PROGRESSIVE_ACTION_PATTERN,
     _PERFECT_ACTION_PATTERN,
+    _COORDINATED_PERFECT_ACTION_PATTERN,
     _PAST_ACTION_PATTERN,
     _PASSIVE_ACTION_PATTERN,
     _LIFECYCLE_PASSIVE_ACTION_PATTERN,

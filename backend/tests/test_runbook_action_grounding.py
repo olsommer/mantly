@@ -559,6 +559,113 @@ def test_grounding_preflight_blocks_pending_action_claim_without_llm(monkeypatch
     assert result.pending_actions == ("Open delivery investigation",)
 
 
+def test_grounding_preflight_blocks_live_pending_agent_triage_claims(monkeypatch):
+    source_message_id = "channel:email-main:law-r10-c03-message"
+    answer = (
+        "We have noted the critical deadline of 20 July 2026 and have escalated "
+        "your request for immediate human triage due to its urgency. While we "
+        "cannot promise a same-day consultation, we are prioritizing your matter."
+    )
+    issue = {
+        "id": "issue1",
+        "subject": "Urgent legal consultation",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": source_message_id},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "legal-intake",
+                            "matched": True,
+                            "intentName": "legal-intake-qa",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "agent_triage",
+                "actionKey": "agent_triage",
+                "label": "Prior-message agent triage",
+                "status": "pending",
+                "metadata": {
+                    "source": "agent_triage",
+                    "approvalRequired": True,
+                    "automationContext": {
+                        "sourceMessageId": "channel:email-main:older-message"
+                    },
+                },
+                "result": {
+                    "proposedAction": {
+                        "type": "triage_ticket",
+                        "priority": "urgent",
+                    }
+                },
+            },
+            {
+                "type": "agent_triage",
+                "actionKey": "agent_triage",
+                "label": "Agent triage",
+                "status": "pending",
+                "metadata": {
+                    "source": "agent_triage",
+                    "approvalRequired": True,
+                    "approved": False,
+                    "automationContext": {
+                        "sourceMessageId": source_message_id,
+                        "messageId": "law-r10-c03-message",
+                    },
+                },
+                "result": {
+                    "proposedAction": {
+                        "type": "triage_ticket",
+                        "priority": "urgent",
+                        "status": "ongoing",
+                    }
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    ticket_context = issue_agent._automatic_ticket_context(issue)
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert ticket_context["runbookActions"] == [
+        {
+            "name": "agent_triage",
+            "label": "Agent triage",
+            "status": "pending_approval",
+        }
+    ]
+    assert result.verified is False
+    assert result.reason_code == "pending_action_claim"
+    assert result.pending_action_claims == (
+        (
+            "We have noted the critical deadline of 20 July 2026 and have escalated "
+            "your request for immediate human triage due to its urgency."
+        ),
+        (
+            "While we cannot promise a same-day consultation, we are prioritizing "
+            "your matter."
+        ),
+    )
+    assert result.pending_actions == ("Agent triage",)
+
+
 def test_grounding_preflight_blocks_wrong_reply_language_without_llm(monkeypatch):
     monkeypatch.setattr(
         issue_agent,

@@ -46,6 +46,7 @@ from automail.pipeline.intent.helpers import (
     _find_activated_intent,
     _find_no_match_reason,
     _find_routed_concerns,
+    _find_router_tool_call,
     _format_attachment_context,
     _invoke_agent,
     _is_open_ticket_button,
@@ -62,6 +63,12 @@ from automail.pipeline.intent.intents_factory import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
+_MALFORMED_ROUTER_REVIEW_REASON = (
+    "Intent classification returned malformed structured output; "
+    "human review is required."
+)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _PROCESSING_SECURITY_BOUNDARY = (
@@ -339,6 +346,74 @@ def _concern_processing_email(
     return focused, processing
 
 
+def _is_malformed_function_call_reason(value: Any) -> bool:
+    """Recognize Gemini's exact malformed-function-call finish reason."""
+    if hasattr(value, "name"):
+        value = value.name
+    normalized = str(value or "").strip().upper().rsplit(".", 1)[-1]
+    return normalized == "MALFORMED_FUNCTION_CALL"
+
+
+def _message_has_malformed_tool_output(message: Any) -> bool:
+    if isinstance(message, dict):
+        response_metadata = message.get("response_metadata")
+        invalid_tool_calls = message.get("invalid_tool_calls")
+    else:
+        response_metadata = getattr(message, "response_metadata", None)
+        invalid_tool_calls = getattr(message, "invalid_tool_calls", None)
+
+    if invalid_tool_calls:
+        return True
+    if not isinstance(response_metadata, dict):
+        return False
+    return any(
+        _is_malformed_function_call_reason(response_metadata.get(key))
+        for key in ("finish_reason", "finishReason")
+    )
+
+
+def _route_concerns_call_is_invalid(messages: list[Any]) -> bool:
+    """Return whether a present route call violates its structured contract."""
+    args = _find_router_tool_call(messages, "route_concerns")
+    if args is None:
+        return False
+
+    raw_concerns = args.get("concerns")
+    if not isinstance(raw_concerns, list) or not 1 <= len(raw_concerns) <= 3:
+        return True
+    for raw_concern in raw_concerns:
+        if not isinstance(raw_concern, dict):
+            return True
+        try:
+            ConcernRoute.model_validate(raw_concern)
+        except Exception:
+            return True
+    return False
+
+
+def _router_result_has_malformed_output(raw_result: dict[str, Any]) -> bool:
+    messages = raw_result.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(_message_has_malformed_tool_output(message) for message in messages) or (
+        _route_concerns_call_is_invalid(messages)
+    )
+
+
+def _is_malformed_router_exception(exc: BaseException) -> bool:
+    """Recognize only provider errors explicitly naming malformed calls."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if "MALFORMED_FUNCTION_CALL" in str(current).upper().replace(" ", "_"):
+            return True
+        if "MALFORMEDFUNCTIONCALL" in type(current).__name__.upper():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _run_intent_router_agent(
     email: Email,
     known_intents: set[str],
@@ -375,20 +450,40 @@ def _run_intent_router_agent(
         )
 
         with use_intents_dir(intents_dir), llm_stage("intent"):
-            raw_result = _invoke_agent(
-                agent,
-                _classification_user_prompt(email, parsed_attachments),
-                parsed_attachments=parsed_attachments,
-                usage_context=usage_context,
-                run_name="intent_router_agent",
-                tags=["mantly", "intent", "router"],
-                metadata={
-                    "tenant_id": tenant_id,
-                    "project_id": project_id,
-                    "source": "pipeline.intent.agent",
-                },
-                recursion_limit=4,
-            )
+            for attempt in range(_ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+                try:
+                    raw_result = _invoke_agent(
+                        agent,
+                        _classification_user_prompt(email, parsed_attachments),
+                        parsed_attachments=parsed_attachments,
+                        usage_context=usage_context,
+                        run_name="intent_router_agent",
+                        tags=["mantly", "intent", "router"],
+                        metadata={
+                            "tenant_id": tenant_id,
+                            "project_id": project_id,
+                            "source": "pipeline.intent.agent",
+                        },
+                        recursion_limit=4,
+                    )
+                except (GraphRecursionError, ToolCallLimitExceededError):
+                    raise
+                except Exception as exc:
+                    if not _is_malformed_router_exception(exc):
+                        raise
+                    malformed_output = True
+                else:
+                    malformed_output = _router_result_has_malformed_output(raw_result)
+
+                if not malformed_output:
+                    break
+                if attempt + 1 < _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Intent router returned malformed structured output; retrying once"
+                    )
+                    continue
+                logger.error("Intent router returned malformed structured output twice")
+                return [], _MALFORMED_ROUTER_REVIEW_REASON
     except (GraphRecursionError, ToolCallLimitExceededError) as exc:
         logger.error("Intent router stopped at its execution limit: %s", exc)
         return [], "Intent classification stopped safely; human review is required."

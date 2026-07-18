@@ -1080,20 +1080,55 @@ def _automatic_runbook_action_context(
         if not isinstance(execution, dict):
             continue
         metadata = _record_from(execution.get("metadata"))
-        if (
-            _string_from(execution.get("type")) != "runbook_webhook"
-            and _string_from(metadata.get("source")) != "runbook"
-        ):
-            continue
-        execution_source_message_id = _string_from(
-            metadata.get("sourceMessageId") or metadata.get("source_message_id")
+        status = _string_from(execution.get("status")).lower()
+        execution_type = _string_from(execution.get("type")).lower()
+        execution_source = _string_from(metadata.get("source")).lower()
+        is_runbook_action = (
+            execution_type == "runbook_webhook" or execution_source == "runbook"
         )
+        # Channel triage is a real pending mutation even though it is not a
+        # runbook webhook. Expose only the approval-gated pending form.
+        is_pending_agent_triage = (
+            (execution_type == "agent_triage" or execution_source == "agent_triage")
+            and status == "pending"
+            and metadata.get("approvalRequired") is True
+        )
+        if not is_runbook_action and not is_pending_agent_triage:
+            continue
+        automation_context = _record_from(
+            metadata.get("automationContext") or metadata.get("automation_context")
+        )
+        # Channel-created actions keep their message scope in automationContext.
+        execution_source_message_ids = {
+            value
+            for value in (
+                _string_from(
+                    metadata.get("sourceMessageId")
+                    or metadata.get("source_message_id")
+                ),
+                _string_from(metadata.get("emailId") or metadata.get("email_id")),
+                _string_from(metadata.get("messageId") or metadata.get("message_id")),
+                _string_from(
+                    automation_context.get("sourceMessageId")
+                    or automation_context.get("source_message_id")
+                ),
+                _string_from(
+                    automation_context.get("emailId")
+                    or automation_context.get("email_id")
+                ),
+                _string_from(
+                    automation_context.get("messageId")
+                    or automation_context.get("message_id")
+                ),
+            )
+            if value
+        }
         execution_concern_id = _string_from(
             metadata.get("concernId") or metadata.get("concern_id")
         )
-        if source_message_id and execution_source_message_id != source_message_id:
+        if source_message_id and source_message_id not in execution_source_message_ids:
             continue
-        if concern_ids and execution_concern_id not in concern_ids:
+        if concern_ids and is_runbook_action and execution_concern_id not in concern_ids:
             continue
         result = _record_from(execution.get("result"))
         proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
@@ -1105,7 +1140,6 @@ def _automatic_runbook_action_context(
             or proposed.get("concern_id")
         )
         runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
-        status = _string_from(execution.get("status"))
         if status == "pending" and metadata.get("approvalRequired") is True:
             action_context = {
                 "name": name,

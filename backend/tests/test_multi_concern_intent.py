@@ -3,6 +3,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from automail.api.attachments import load_attachment_files
 from automail.integrations.http_tool import (
     ToolDefinition,
@@ -346,6 +348,240 @@ def test_explicit_questions_fill_router_obligation_omissions(monkeypatch):
     ]
 
 
+def test_compound_action_and_confirmation_are_separate_obligations(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = (
+        "change the address to 24 New Street, Zurich 8001 today and confirm it changed. "
+        "If already shipped, request a carrier redirect."
+    )
+    route = ConcernRoute(
+        summary="Change the delivery address",
+        source_text=source_text,
+        answer_obligations=[
+            "change the address to 24 New Street, Zurich 8001 today and confirm it changed",
+            "request a carrier redirect if already shipped",
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "address-change",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "change the address to 24 New Street, Zurich 8001 today",
+        "confirm it changed",
+        "request a carrier redirect if already shipped",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        "address-change:obligation-1",
+        "address-change:obligation-2",
+        "address-change:obligation-3",
+    ]
+
+
+def test_live_e05_two_concerns_keep_all_six_obligations(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    routes = [
+        ConcernRoute(
+            summary="Give shipment status",
+            source_text="give current status, last carrier event, and ETA",
+            answer_obligations=[
+                "give current status",
+                "give last carrier event",
+                "give ETA",
+            ],
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Change the delivery address",
+            source_text=(
+                "change the address to 24 New Street, Zurich 8001 today and "
+                "confirm it changed. If already shipped, request a carrier redirect."
+            ),
+            answer_obligations=[
+                "change the address to 24 New Street, Zurich 8001 today and confirm it changed",
+                "request a carrier redirect if already shipped",
+            ],
+            intent_name="cancel-contract",
+        ),
+    ]
+
+    outcomes = [
+        _execute_routed_concern(
+            f"e05-concern-{index}",
+            route,
+            _email(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        for index, route in enumerate(routes, start=1)
+    ]
+
+    assert [len(outcome.answer_obligations) for outcome in outcomes] == [3, 3]
+    assert [
+        obligation.question
+        for outcome in outcomes
+        for obligation in outcome.answer_obligations
+    ] == [
+        "give current status",
+        "give last carrier event",
+        "give ETA",
+        "change the address to 24 New Street, Zurich 8001 today",
+        "confirm it changed",
+        "request a carrier redirect if already shipped",
+    ]
+    assert [
+        obligation.obligation_id
+        for outcome in outcomes
+        for obligation in outcome.answer_obligations
+    ] == [
+        "e05-concern-1:obligation-1",
+        "e05-concern-1:obligation-2",
+        "e05-concern-1:obligation-3",
+        "e05-concern-2:obligation-1",
+        "e05-concern-2:obligation-2",
+        "e05-concern-2:obligation-3",
+    ]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Can you confirm that we can cancel and replace the order?",
+        "Tell me which items you can refund and replace under warranty.",
+        "Please explain how to check and update the shipment status.",
+        "Provide the check and update history.",
+        "Can you explain how to change and confirm the delivery address?",
+        "Tell me whether I should change the address and confirm it by email.",
+        "Change the company name to Update and Confirm LLC.",
+        "Change notification addresses to billing@example.test, confirm@example.test.",
+        "Can you provide steps to change the address and confirm it is valid?",
+        "Send instructions on how to change the address and confirm it was saved.",
+        "Change the workflow so agents update and confirm the address before saving.",
+        "Update the company name to Update and Confirm It Ltd.",
+    ],
+)
+def test_nested_or_noun_coordination_is_not_split(
+    monkeypatch,
+    question: str,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Keep shared context",
+        source_text=question,
+        answer_obligations=[question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "shared-context",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [question]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Change the address and then confirm it changed.",
+        "Change the address, then confirm it changed.",
+        "Change the address; (2) confirm it changed.",
+        "Change the address\n- confirm it changed.",
+    ],
+)
+def test_confirmation_followup_separators_are_split(
+    monkeypatch,
+    question: str,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Change and confirm",
+        source_text=question,
+        answer_obligations=[question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "confirmation-separator",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert len(outcome.answer_obligations) == 2
+    assert outcome.answer_obligations[1].question.lower().startswith("confirm it changed")
+
+
+def test_question_form_compound_request_is_split_without_splitting_noun_lists(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Status and address request",
+        source_text=(
+            "Can you give current status, last carrier event, and ETA? "
+            "Can you change the address today and confirm it changed?"
+        ),
+        answer_obligations=[
+            "Give current status, last carrier event, and ETA.",
+            "Change the address today and confirm it changed.",
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "status-address",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "Can you give current status, last carrier event, and ETA?",
+        "Can you change the address today and confirm it changed?",
+        "confirm it changed.",
+    ]
+
+
 def test_explicit_question_is_kept_when_router_returned_more_other_obligations(monkeypatch):
     _base_stubs(monkeypatch)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
@@ -382,6 +618,93 @@ def test_explicit_question_is_kept_when_router_returned_more_other_obligations(m
         "Provide every confirmed tracking number.",
         "Refund the missing units if there is no second parcel.",
     ]
+
+
+def test_independently_routed_billing_side_splits_compound_question_without_duplicate(
+    monkeypatch,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = "what are the standard initial consultation fee and advance retainer?"
+    route = ConcernRoute(
+        summary="Explain standard fees",
+        source_text=source_text,
+        answer_obligations=["What is the standard advance retainer?"],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "legal-billing",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "What is the standard initial consultation fee?",
+        "What is the standard advance retainer?",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        "legal-billing:obligation-1",
+        "legal-billing:obligation-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("question", "routed_question"),
+    [
+        (
+            "What are the terms and conditions?",
+            "What are the terms and conditions?",
+        ),
+        (
+            "What are the terms and conditions?",
+            "What are the conditions?",
+        ),
+        (
+            "What are the standard terms and conditions?",
+            "Explain the applicable conditions.",
+        ),
+        (
+            "What are the standard initial consultation fee and advance retainer?",
+            "Explain the standard initial consultation fee and advance retainer.",
+        ),
+    ],
+)
+def test_compound_question_is_not_split_without_independent_routing_evidence(
+    monkeypatch,
+    question: str,
+    routed_question: str,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Keep compound question",
+        source_text=question,
+        answer_obligations=[routed_question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "compound-question",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [question]
 
 
 def test_duplicate_routes_execute_runbook_only_once(monkeypatch):

@@ -105,6 +105,11 @@ be upgraded to `fulfilled_action` without successful exact same-concern action
 evidence. Generic acknowledgement, intake-only language, repetition of the request,
 or a promise to look into it remains `not_covered`.
 
+A supported answer that explicitly says a requested guarantee cannot be made and
+explains the evidence-backed controlling party or limitation directly addresses the
+guarantee request; use `pending_or_unavailable`, not `not_covered`. For every
+obligation, return only evidence IDs already attached to its linked answer units.
+
 Do not assume the previous result was wrong and do not assume the reply is complete.
 Return the full required structured result, reassessing every unit and obligation
 exactly once.
@@ -393,6 +398,93 @@ def _grounding_needs_obligation_reassessment(
         and any(_string_from(value) in expected_unit_ids for value in assessment.answer_unit_ids)
         for assessment in structured.obligation_assessments
     )
+
+
+_GUARANTEE_REQUEST_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"guarantee\s+(?:that\s+)?(?P<subject>.+?)\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+def _knowledge_backed_negative_guarantee_answers_obligation(
+    *,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    citation_ids: frozenset[str],
+) -> bool:
+    """Recognize an explicit, knowledge-backed refusal of a requested guarantee."""
+    request_match = _GUARANTEE_REQUEST_PATTERN.search(question)
+    if request_match is None:
+        return False
+    subject = request_match.group("subject").strip(" \t\r\n.,;:!?\"'“”‘’")
+    subject = re.sub(
+        r"\s+\b(?:by|before|on)\b\s+.+$",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    ).strip()
+    subject = re.sub(r"^(?:a|an|the)\s+", "", subject, flags=re.IGNORECASE)
+    if not subject:
+        return False
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    subject_object_boundary = r"(?=\s*(?:[.,;:!?]|$|\bby\b))"
+    negative_patterns = (
+        rf"^\s*(?:(?:unfortunately|currently)\s*,?\s+)?"
+        rf"(?:we|i|zenfulfillment)\s+"
+        rf"(?:cannot|can['’]t|can\s+not|am\s+unable\s+to|are\s+unable\s+to|"
+        rf"am\s+not\s+able\s+to|are\s+not\s+able\s+to)\s+"
+        rf"guarantee\s+(?:a|an|the)?\s*{subject_pattern}\b"
+        rf"{subject_object_boundary}",
+        rf"^\s*(?:a|an|the)?\s*{subject_pattern}(?:\s+timing)?\s+"
+        rf"(?:(?:cannot|can['’]t|can\s+not)\s+be\s+guaranteed|"
+        rf"(?:is|are)\s+not\s+guaranteed)\b",
+        rf"^\s*(?:regarding|about)\s+(?:a|an|the)?\s*{subject_pattern}\s*,\s*"
+        rf"(?:its|the)\s+(?:timing|outcome)\b"
+        rf"(?:(?!\b(?:guaranteed|while|but|however|though|although|yet)\b)"
+        rf"[^,;.!?\n]){{0,100}}?\b"
+        rf"(?:cannot|can['’]t|can\s+not)\s+be\s+guaranteed\b",
+        rf"^\s*(?:there\s+is|there['’]s)\s+no\s+guarantee\s+"
+        rf"(?:for|of|that)?\s*(?:a|an|the)?\s*{subject_pattern}\b"
+        rf"{subject_object_boundary}",
+    )
+    negated_attribution_pattern = re.compile(
+        r"(?:\b(?:does|do|did|is|was)\s+(?:not|never)\s+"
+        r"(?:say|state|mean|show|claim)\b|"
+        r"\b(?:false\s+that|not\s+true\s+that)\b|"
+        r"\bno\s+one\s+(?:said|says|states|claimed|claims)\b)",
+        re.IGNORECASE,
+    )
+    guarantee_reversal_pattern = re.compile(
+        r"\b(?:but|however|though|although|yet|while)\b"
+        r"[^.!?\n]{0,120}\b(?:false|guaranteed|untrue)\b",
+        re.IGNORECASE,
+    )
+    negated_conclusion_pattern = re.compile(
+        r"[^.!?\n]{0,80}\b(?:is|was)\s+(?:false|untrue)\b",
+        re.IGNORECASE,
+    )
+    for unit_id in answer_unit_ids:
+        evidence_ids = supported_unit_evidence_ids.get(unit_id, frozenset())
+        if not evidence_ids.intersection(citation_ids):
+            continue
+        unit_text = _string_from(expected_units.get(unit_id, {}).get("text"))
+        for pattern in negative_patterns:
+            for negative_match in re.finditer(pattern, unit_text, re.IGNORECASE):
+                if negated_attribution_pattern.search(
+                    unit_text[max(0, negative_match.start() - 160):negative_match.start()]
+                ):
+                    continue
+                if guarantee_reversal_pattern.search(unit_text[negative_match.end():]):
+                    continue
+                if negated_conclusion_pattern.fullmatch(
+                    unit_text[negative_match.end():].strip()
+                ):
+                    continue
+                return True
+    return False
 
 
 def _string_from(value: Any) -> str:
@@ -1967,6 +2059,65 @@ def _action_state_subject_tokens(value: str) -> frozenset[str]:
     )
 
 
+def _answer_has_explicit_negative_confirmation(answer: str, subject: str) -> bool:
+    """Recognize a direct negative answer so a later policy aside cannot duplicate it."""
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    patterns = (
+        rf"\b(?:cannot|can['’]t|unable\s+to|not\s+able\s+to)\s+confirm\b"
+        rf"[^.!?\n]{{0,100}}\b{subject_pattern}\b",
+        rf"\b{subject_pattern}\b[^.!?\n]{{0,80}}\b"
+        rf"(?:is|are|was|were|has|have|had|cannot|can['’]t)\s+"
+        rf"(?:(?:not|never)\s+|not\s+been\s+|be\s+)?confirmed\b",
+        rf"\bno\s+confirmation\b[^.!?\n]{{0,100}}\b{subject_pattern}\b",
+    )
+    return any(re.search(pattern, answer, re.IGNORECASE) for pattern in patterns)
+
+
+def _answer_uses_pending_confirmation_gerund(answer: str, subject: str) -> bool:
+    """Detect bounded, safe `confirming X ... pending` wording for canonicalization."""
+    if _answer_has_explicit_negative_confirmation(answer, subject):
+        return False
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    for match in re.finditer(
+        rf"\bconfirming\s+(?:the\s+|an?\s+)?{subject_pattern}\b"
+        rf"(?P<tail>[^.!?\n]{{0,240}})",
+        answer,
+        re.IGNORECASE,
+    ):
+        tail = match.group("tail")
+        pending_match = re.match(
+            r"^\s+(?:is|are|remain|remains)\s+"
+            r"(?:(?:all|both|still)\s+)*(?:pending|awaiting)\b",
+            tail,
+            re.IGNORECASE,
+        )
+        if pending_match is not None:
+            remainder = tail[pending_match.end():]
+            if re.search(
+                r"\b(?:complete|completed|done|successful|confirmed)\b",
+                remainder,
+                re.IGNORECASE,
+            ) is None:
+                return True
+        pending_match = re.match(
+            r"^(?:\s*,\s*(?:confirming|guaranteeing)\s+[^,;.!?\n]+)+"
+            r"\s*,?\s+and\s+(?:confirming|guaranteeing)\s+[^,;.!?\n]+"
+            r"\s+(?:are|remain)\s+(?:(?:all|both|still)\s+)*"
+            r"(?:pending|awaiting)\b",
+            tail,
+            re.IGNORECASE,
+        )
+        if pending_match is not None:
+            remainder = tail[pending_match.end():]
+            if re.search(
+                r"\b(?:complete|completed|done|successful|confirmed)\b",
+                remainder,
+                re.IGNORECASE,
+            ) is None:
+                return True
+    return False
+
+
 def _pending_action_obligation_notices(
     *,
     ticket: dict[str, Any],
@@ -2029,23 +2180,29 @@ def _pending_action_obligation_notices(
                 language=language,
             )
             subject_tokens = _action_state_subject_tokens(subject)
-            if (
-                not subject_tokens
-                or subject_tokens in seen_subjects
-                or not subject_tokens.isdisjoint(answer_tokens)
-            ):
-                continue
-            seen_subjects.add(subject_tokens)
             rendered_subject = (
                 subject[:1].upper() + subject[1:]
                 if language == "en"
                 else subject
             )
-            notices.append(
-                _ACTION_STATE_PENDING_NOTICES[language].format(
-                    subject=rendered_subject,
-                )
+            notice = _ACTION_STATE_PENDING_NOTICES[language].format(
+                subject=rendered_subject,
             )
+            if (
+                not subject_tokens
+                or subject_tokens in seen_subjects
+                or notice.casefold() in answer.casefold()
+                or (
+                    not subject_tokens.isdisjoint(answer_tokens)
+                    and not (
+                        language == "en"
+                        and _answer_uses_pending_confirmation_gerund(answer, subject)
+                    )
+                )
+            ):
+                continue
+            seen_subjects.add(subject_tokens)
+            notices.append(notice)
             answer_tokens = answer_tokens.union(subject_tokens)
     return tuple(notices)
 
@@ -3321,6 +3478,7 @@ def assess_issue_automation_grounding(
             if _string_from(obligation.get("id"))
         }
         seen_obligation_ids: set[str] = set()
+        deterministically_resolved_obligation_ids: set[str] = set()
         clean_obligation_assessments: list[dict[str, Any]] = []
         uncovered_obligations: list[str] = []
         if len(structured.obligation_assessments) > 100:
@@ -3375,14 +3533,21 @@ def assess_issue_automation_grounding(
             unknown_obligation_evidence_ids = [
                 evidence_id
                 for evidence_id in requested_obligation_evidence_ids
-                if evidence_id not in linked_evidence_ids
+                if evidence_id not in allowed_ids
             ]
             if unknown_obligation_evidence_ids:
                 protocol_errors.append(
-                    "Answer obligation uses evidence not attached to its answer units: "
+                    "Answer obligation uses unknown evidence IDs: "
                     + ", ".join(unknown_obligation_evidence_ids[:5])
                 )
-            obligation_evidence_ids = set(requested_obligation_evidence_ids or linked_evidence_ids)
+            requested_linked_evidence_ids = {
+                evidence_id
+                for evidence_id in requested_obligation_evidence_ids
+                if evidence_id in linked_evidence_ids
+            }
+            obligation_evidence_ids = set(
+                requested_linked_evidence_ids or linked_evidence_ids
+            )
             usable_obligation_evidence_ids = {
                 evidence_id
                 for evidence_id in obligation_evidence_ids
@@ -3412,6 +3577,20 @@ def assess_issue_automation_grounding(
                 resolution = "not_covered"
             if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
                 resolution = "not_covered"
+            if (
+                requested_resolution == "not_covered"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _knowledge_backed_negative_guarantee_answers_obligation(
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                    citation_ids=frozenset(citation_ids),
+                )
+            ):
+                resolution = "pending_or_unavailable"
+                deterministically_resolved_obligation_ids.add(obligation_id)
             if requested_resolution == "fulfilled_action" and linked_units_are_supported:
                 exact_action_evidence_ids = successful_action_evidence_by_concern.get(
                     obligation_concern_id,
@@ -3443,10 +3622,18 @@ def assess_issue_automation_grounding(
                 "answerUnitIds": list(answer_unit_ids),
             }
             if requested_obligation_evidence_ids:
+                clean_evidence_candidates = (
+                    requested_obligation_evidence_ids
+                    if requested_linked_evidence_ids
+                    else tuple(sorted(linked_evidence_ids))
+                )
                 clean_assessment["evidenceIds"] = [
                     evidence_id
-                    for evidence_id in requested_obligation_evidence_ids
-                    if evidence_id in usable_obligation_evidence_ids
+                    for evidence_id in clean_evidence_candidates
+                    if (
+                        evidence_id in obligation_evidence_ids
+                        and evidence_id in usable_obligation_evidence_ids
+                    )
                 ]
             clean_obligation_assessments.append(clean_assessment)
         if seen_obligation_ids != set(expected_obligations):
@@ -3499,8 +3686,17 @@ def assess_issue_automation_grounding(
                 model=model,
                 error="; ".join(dict.fromkeys(protocol_errors))[:1_000],
             )
+        deterministic_guarantee_override = bool(
+            deterministically_resolved_obligation_ids
+            and not clean_unsupported
+            and not contradictions
+            and not clean_uncovered_obligations
+        )
         if (
-            structured.verdict != "grounded"
+            (
+                structured.verdict != "grounded"
+                and not deterministic_guarantee_override
+            )
             or clean_unsupported
             or contradictions
             or clean_uncovered_obligations

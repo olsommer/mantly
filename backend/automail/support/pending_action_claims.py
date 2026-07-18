@@ -415,6 +415,47 @@ _CONFIRMING_ACTION_STATE_PATTERN = re.compile(
     rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
     re.IGNORECASE,
 )
+_BARE_CONFIRMING_ACTION_STATE_PATTERN = re.compile(
+    rf"\bconfirming\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_PENDING_CONFIRMATION_DIRECT_TAIL_PATTERN = re.compile(
+    r"^\s+(?:is|are|remain|remains)\s+"
+    r"(?:(?:all|both|still)\s+)*(?:pending|awaiting)\b",
+    re.IGNORECASE,
+)
+_PENDING_CONFIRMATION_COORDINATED_TAIL_PATTERN = re.compile(
+    r"^(?:\s*,\s*(?:confirming|guaranteeing)\s+[^,;.!?\n]+)+"
+    r"\s*,?\s+and\s+(?:confirming|guaranteeing)\s+[^,;.!?\n]+"
+    r"\s+(?:are|remain)\s+(?:(?:all|both|still)\s+)*"
+    r"(?:pending|awaiting)\b",
+    re.IGNORECASE,
+)
+_PENDING_CONFIRMATION_REVERSAL_PATTERN = re.compile(
+    r"\b(?:complete|completed|done|successful|confirmed)\b",
+    re.IGNORECASE,
+)
+_CONFIRMING_ACTION_COMPLETION_PATTERN = re.compile(
+    rf"\bconfirming\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b"
+    r"[^.!?\n]{0,80}?\b(?:"
+    r"(?:is|are|was|were)\s+(?:(?:already|successfully|now)\s+)*"
+    r"(?:complete|completed|done|successful|not\s+pending|no\s+longer\s+pending)|"
+    r"(?:has|have)\s+(?:(?:already|successfully|now)\s+)*been\s+"
+    r"(?:completed|confirmed|successful)"
+    r")\b",
+    re.IGNORECASE,
+)
+_PRONOUN_ACTION_COMPLETION_PATTERN = re.compile(
+    r"(?:^|;\s*)(?:it|this|that)\s+"
+    r"(?:(?!\b(?:after|could|if|may|might|never|not|once|should|unclear|"
+    r"unless|until|when|whether|will|would)\b)[^;.!?\n]){0,100}?"
+    r"\b(?:complete|completed|done|successful|confirmed)\b",
+    re.IGNORECASE,
+)
 _CAN_CONFIRM_ACTION_STATE_PATTERN = re.compile(
     rf"\b(?:we|i)\s+can\s+"
     rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}confirm\s+"
@@ -462,7 +503,8 @@ _FUTURE_NECESSITY_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CONTROLLED_SUPPORT_ACTOR_PATTERN = (
-    r"(?:our\s+team|(?:a|the)\s+specialist|(?:a|the)\s+human\s+agent|"
+    r"(?:our\s+team|(?:an?|the|our)\s+agent|(?:a|the)\s+specialist|"
+    r"(?:a|the)\s+human\s+agent|"
     r"(?:our|the)\s+operations(?:\s+team)?|(?:a|the|our)\s+support\s+representative)"
 )
 _CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN = re.compile(
@@ -480,6 +522,12 @@ _FUTURE_UPDATE_PROMISE_PATTERN = re.compile(
     r"(?:(?:you|the\s+customer)\s+(?:with\s+)?)?"
     r"(?:an?\s+)?(?:(?:further|additional)\s+)?updates?|"
     r"keep\s+(?:you|the\s+customer)\s+(?:updated|informed))\b",
+    re.IGNORECASE,
+)
+_FUTURE_CONTACT_PROMISE_PATTERN = re.compile(
+    rf"\b(?:(?:we|i)\s+will|(?:we|i)['’]ll|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall))\s+"
+    r"(?:be|get)\s+in\s+touch\b",
     re.IGNORECASE,
 )
 _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN = re.compile(
@@ -617,6 +665,9 @@ _CLAIM_PATTERNS = (
     _CONFIRMED_ACTION_STATE_PATTERN,
     _PERFECT_CONFIRMED_ACTION_STATE_PATTERN,
     _CONFIRMING_ACTION_STATE_PATTERN,
+    _BARE_CONFIRMING_ACTION_STATE_PATTERN,
+    _CONFIRMING_ACTION_COMPLETION_PATTERN,
+    _PRONOUN_ACTION_COMPLETION_PATTERN,
     _CONFIRM_ACTION_STATE_PATTERN,
     _CONFIRMED_BY_SUPPORT_PATTERN,
     _GERMAN_COMPLETED_PATTERN,
@@ -647,6 +698,7 @@ _FUTURE_CLAIM_PATTERNS = (
     _FUTURE_PASSIVE_CONFIRM_ACTION_STATE_PATTERN,
     _CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN,
     _CAN_CONFIRM_ACTION_STATE_PATTERN,
+    _FUTURE_CONTACT_PROMISE_PATTERN,
 )
 _CONDITION_MARKERS = (
     r"after",
@@ -912,6 +964,23 @@ def _has_scoped_future_contingency(*, prefix: str, suffix: str) -> bool:
     return not any(pattern.search(action_scope) for pattern in _FUTURE_CLAIM_PATTERNS)
 
 
+def _bare_confirmation_is_safely_pending(
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    """Require pending grammar to bind to the same bare confirmation group."""
+    tail = unit[match.end():]
+    pending_match = (
+        _PENDING_CONFIRMATION_DIRECT_TAIL_PATTERN.match(tail)
+        or _PENDING_CONFIRMATION_COORDINATED_TAIL_PATTERN.match(tail)
+    )
+    if pending_match is None:
+        return False
+    return _PENDING_CONFIRMATION_REVERSAL_PATTERN.search(
+        tail[pending_match.end():]
+    ) is None
+
+
 def _has_unsafe_claim(
     unit: str,
     *,
@@ -921,6 +990,11 @@ def _has_unsafe_claim(
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(unit):
             if _FUTURE_CONDITION_PREFIX_PATTERN.search(unit[:match.start()]):
+                continue
+            if (
+                pattern is _BARE_CONFIRMING_ACTION_STATE_PATTERN
+                and _bare_confirmation_is_safely_pending(unit, match)
+            ):
                 continue
             if (
                 pattern in {

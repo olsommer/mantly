@@ -370,6 +370,7 @@ def test_pending_action_guard_allows_safe_b2b_nearby_language(answer: str) -> No
             "regarding the next steps for this."
         ),
         "A human agent will follow up with you shortly to assist further with this case.",
+        "An agent will be in touch shortly to assist you further.",
         "Our team will contact you with an update.",
         "Operations will investigate the delivery exception.",
         "The operations team will open a warehouse ticket.",
@@ -634,6 +635,7 @@ def test_pending_action_guard_allows_multilingual_negative_or_conditional_claims
         ),
         "We are escalating this immediately to our warehouse team.",
         "A human agent will follow up to confirm authorization.",
+        "An agent will be in touch shortly to assist you further.",
     ],
 )
 def test_pending_action_repair_replaces_live_residual_claims_with_neutral_state(

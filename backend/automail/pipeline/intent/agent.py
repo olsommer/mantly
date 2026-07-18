@@ -705,6 +705,34 @@ _OBLIGATION_STOP_WORDS = {
     "you",
 }
 
+_OBLIGATION_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"\s*(?:"
+    r"\band\s+(?:then\s+)?|"
+    r",\s*(?:(?:and|then)\s+)?|"
+    r";\s*(?:(?:\(\d+\)|\d+[.)])\s*)?|"
+    r"\n+\s*(?:(?:[-*]|\(\d+\)|\d+[.)])\s*)?"
+    r")(?=(?:please\s+)?confirm\s+it\s+"
+    r"(?:changed|is|was|has|had|will|did|can|cannot|can't)\b)",
+    re.IGNORECASE,
+)
+_DIRECT_ACTION_OBLIGATION_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?"
+    r"change\b",
+    re.IGNORECASE,
+)
+
+
+def _split_answer_obligation(value: str) -> list[str]:
+    """Keep explicit follow-up requests as independently auditable obligations."""
+    item = str(value or "").strip()
+    if not item:
+        return []
+    if _DIRECT_ACTION_OBLIGATION_PATTERN.match(item) is None:
+        return [item]
+    parts = [part.strip() for part in _OBLIGATION_CLAUSE_SPLIT_PATTERN.split(item)]
+    return [part for part in parts if part]
+
 
 def _obligation_tokens(value: str) -> set[str]:
     tokens: set[str] = set()
@@ -730,20 +758,126 @@ def _obligation_covers_question(obligation: str, question: str) -> bool:
     return len(question_tokens & obligation_tokens) / len(question_tokens) >= 0.6
 
 
+def _obligation_restates_part_of_question(obligation: str, question: str) -> bool:
+    """Avoid adding a routed subset beside an explicit compound question."""
+    obligation_tokens = _obligation_tokens(obligation)
+    question_tokens = _obligation_tokens(question)
+    if (
+        re.match(r"^\s*(?:please\s+)?confirm\b", obligation, re.IGNORECASE)
+        and re.search(r"\band\s+(?:then\s+)?confirm\b", question, re.IGNORECASE)
+    ):
+        return False
+    if {"term", "condition"}.issubset(question_tokens) and obligation_tokens.intersection(
+        {"term", "condition"}
+    ):
+        return True
+    return bool(obligation_tokens and obligation_tokens.issubset(question_tokens))
+
+
+_EXPLICIT_COMPOUND_QUESTION_PATTERN = re.compile(
+    r"^\s*what\s+(?:is|are)\s+(?P<article>the\s+)?"
+    r"(?P<first>[^?]+?)\s+and\s+(?P<second>[^?]+?)\?\s*$",
+    re.IGNORECASE,
+)
+_SHARED_COMPOUND_QUESTION_MODIFIERS = frozenset({
+    "applicable",
+    "available",
+    "current",
+    "estimated",
+    "exact",
+    "initial",
+    "standard",
+})
+_COMPOUND_BILLING_OBJECT_TOKENS = frozenset({
+    "charge",
+    "cost",
+    "deposit",
+    "fee",
+    "price",
+    "retainer",
+})
+
+
+def _split_explicit_compound_question(
+    question: str,
+    *,
+    routed_questions: list[str],
+) -> list[str]:
+    """Split a noun-pair question only when routing independently identifies one side."""
+    if question.casefold().count(" and ") != 1:
+        return [question]
+    match = _EXPLICIT_COMPOUND_QUESTION_PATTERN.fullmatch(question)
+    if match is None:
+        return [question]
+    first = match.group("first").strip()
+    second = match.group("second").strip()
+    first_tokens = _obligation_tokens(first)
+    second_tokens = _obligation_tokens(second)
+    if (
+        not first_tokens.intersection(_COMPOUND_BILLING_OBJECT_TOKENS)
+        or not second_tokens.intersection(_COMPOUND_BILLING_OBJECT_TOKENS)
+    ):
+        return [question]
+    independently_routed = False
+    for routed_question in routed_questions:
+        routed_tokens = _obligation_tokens(routed_question)
+        if not routed_tokens:
+            continue
+        first_coverage = len(first_tokens & routed_tokens) / len(first_tokens)
+        second_coverage = len(second_tokens & routed_tokens) / len(second_tokens)
+        if (
+            first_coverage >= 0.8
+            and second_coverage < 0.5
+            or second_coverage >= 0.8
+            and first_coverage < 0.5
+        ):
+            independently_routed = True
+            break
+    if not independently_routed:
+        return [question]
+
+    article = "the " if match.group("article") else ""
+    first_word = first.split(maxsplit=1)[0].casefold()
+    shared_modifier = (
+        first_word + " "
+        if (
+            first_word in _SHARED_COMPOUND_QUESTION_MODIFIERS
+            and not second.casefold().startswith(first_word + " ")
+        )
+        else ""
+    )
+    return [
+        f"What is {article}{first}?",
+        f"What is {article}{shared_modifier}{second}?",
+    ]
+
+
 def _answer_obligations(
     concern_id: str,
     route: ConcernRoute,
 ) -> list[AnswerObligation]:
     """Bind router-extracted questions to stable runtime IDs."""
-    routed_questions = _dedupe_strings(route.answer_obligations)
+    routed_questions = _dedupe_strings([
+        part
+        for raw in route.answer_obligations
+        for part in _split_answer_obligation(raw)
+    ])
     explicit_questions = _dedupe_strings([
-        match.group(0).strip()
+        part
         for match in re.finditer(r"[^.!?\n]*\?", route.source_text)
         if match.group(0).strip()
+        for part in _split_explicit_compound_question(
+            match.group(0).strip(),
+            routed_questions=routed_questions,
+        )
     ])
     questions = list(explicit_questions)
     for routed_question in routed_questions:
-        if any(_obligation_covers_question(routed_question, question) for question in explicit_questions):
+        if any(
+            _obligation_covers_question(routed_question, question)
+            or _obligation_restates_part_of_question(routed_question, question)
+            for question in explicit_questions
+        ):
             continue
         questions.append(routed_question)
     if not questions:

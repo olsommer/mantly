@@ -1053,6 +1053,141 @@ def test_action_state_repair_answers_only_omitted_e09_obligation() -> None:
     ).blocked is False
 
 
+def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Confirm executive escalation.",
+            "Guarantee inventory and dispatch.",
+            "Confirm SLA compensation.",
+            "State the exact data you need.",
+        ]
+    )
+    answer = (
+        "Thank you for reaching out regarding the P1 incident with your 87 blocked "
+        "launch orders. Confirming executive escalation, guaranteeing inventory and "
+        "dispatch, and confirming SLA compensation are all pending this review. To "
+        "help us investigate, please provide the full list of affected orders, exact "
+        "quantities, campaign deadline, and operational impact details.\n\n"
+        "Any requested action that requires human review is pending and is not "
+        "confirmed as started or completed."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Confirm executive escalation, guarantee inventory and dispatch, "
+                    "confirm SLA compensation, and state the exact data you need."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == (
+        answer
+        + "\n\n"
+        + _EXECUTIVE_ESCALATION_PENDING_NOTICE
+        + "\n\nSLA compensation is not confirmed. A related next step for your "
+        "request remains pending human review."
+    )
+    assert "Inventory and dispatch is not confirmed" not in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Confirming executive escalation is complete.",
+        "Confirming executive escalation has been completed.",
+        "Confirming executive escalation was successful.",
+        "Confirming executive escalation is no longer pending.",
+    ],
+)
+def test_action_state_repair_removes_positive_confirmation_gerund(
+    answer: str,
+) -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation."]
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert answer not in repaired
+    assert _EXECUTIVE_ESCALATION_PENDING_NOTICE in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_action_state_repair_does_not_duplicate_safe_negative_paraphrase() -> None:
+    answer = (
+        "We cannot confirm executive escalation. A policy note explains that "
+        "confirming executive escalation remains pending human review."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm executive escalation."]
+        ),
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Confirming executive escalation, but SLA compensation remains pending.",
+        "Confirming executive escalation; inventory approval remains pending.",
+        "Confirming executive escalation is pending, but it is actually complete.",
+        "Confirming executive escalation remains pending, though it was actually completed.",
+        "Confirming executive escalation is pending; it is actually complete.",
+        "Confirming executive escalation remains pending. It is actually complete.",
+        "Confirming executive escalation remains pending. It is definitely complete.",
+        "Confirming executive escalation remains pending. It definitely is complete.",
+        "Confirming executive escalation remains pending. This has in fact been completed.",
+        "Confirming executive escalation remains pending. It is not pending; it is complete.",
+        "Confirming executive escalation remains pending. It is complete, if that helps.",
+        "Confirming executive escalation remains pending. This is not merely reviewed; it is confirmed.",
+    ],
+)
+def test_action_state_repair_does_not_borrow_unrelated_pending_clause(
+    answer: str,
+) -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation."]
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert answer not in repaired
+    assert _EXECUTIVE_ESCALATION_PENDING_NOTICE in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
 def test_action_state_repair_is_noop_when_subject_is_already_answered() -> None:
     answer = _EXECUTIVE_ESCALATION_PENDING_NOTICE
 
@@ -1630,6 +1765,7 @@ def _assess_with_grounding_outputs(
     issue: dict[str, Any],
     answer: str,
     outputs: list[AutomationGroundingOutput],
+    articles: list[dict[str, Any]] | None = None,
 ) -> tuple[issue_agent.AutomationGroundingAssessment, list[str]]:
     prompts: list[str] = []
     monkeypatch.setattr(config_module, "read_config", lambda: {})
@@ -1666,7 +1802,7 @@ def _assess_with_grounding_outputs(
         issue=issue,
         messages=[],
         answer=answer,
-        articles=[],
+        articles=articles or [],
         tenant_id="tenant-1",
         project_id="project-1",
     )
@@ -3071,6 +3207,209 @@ def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
         "What is the current shipment status?",
         "When will it arrive?",
     )
+
+
+def test_grounding_resolves_knowledge_backed_negative_refund_guarantee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "concern-return"
+    obligation_id = "return:refund-guarantee"
+    article_id = "return-policy"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, "Guarantee the refund by Friday.")],
+    )
+    answer = (
+        "Regarding the refund, its timing is controlled by the merchant and cannot "
+        "be guaranteed by ZenFulfillment."
+    )
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        checked_citation_ids=[article_id],
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[article_id],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=[article_id, f"concern:{concern_id}"],
+            )
+        ],
+    )
+    article = {
+        "id": article_id,
+        "title": "Return authorization and refund timing",
+        "body": (
+            "A return requires merchant authorization and a return reference before "
+            "shipping. The merchant controls refund timing; ZenFulfillment cannot "
+            "guarantee it."
+        ),
+        "tags": ["return", "refund"],
+        "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
+        "needsReview": False,
+    }
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output, output],
+        articles=[article],
+    )
+
+    assert len(prompts) == 2
+    assert "requested guarantee cannot be made" in prompts[1]
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": obligation_id,
+            "resolution": "pending_or_unavailable",
+            "covered": True,
+            "answerUnitIds": [unit["id"]],
+            "evidenceIds": [article_id],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Delivery timing cannot be guaranteed by ZenFulfillment.",
+        "The refund by Friday is guaranteed by ZenFulfillment.",
+        "The refund request is logged, but delivery timing cannot be guaranteed.",
+        "We cannot deny that the refund is guaranteed.",
+    ],
+)
+def test_negative_guarantee_resolution_requires_matching_subject_and_refusal(
+    answer: str,
+) -> None:
+    unit = issue_agent._grounding_answer_units(answer)[0]
+
+    assert issue_agent._knowledge_backed_negative_guarantee_answers_obligation(
+        question="Guarantee the refund by Friday.",
+        answer_unit_ids=(unit["id"],),
+        expected_units={unit["id"]: unit},
+        supported_unit_evidence_ids={unit["id"]: frozenset({"return-policy"})},
+        citation_ids=frozenset({"return-policy"}),
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "article_body"),
+    [
+        (
+            "The refund request is logged, but delivery timing cannot be guaranteed.",
+            "The refund request is logged, but delivery timing cannot be guaranteed.",
+        ),
+        (
+            "We cannot deny that the refund is guaranteed.",
+            "For this test, the refund is guaranteed.",
+        ),
+        (
+            "We cannot guarantee the refund policy is complete.",
+            "The refund policy is complete.",
+        ),
+        (
+            "We cannot guarantee the refund email was delivered.",
+            "The refund email was delivered.",
+        ),
+        (
+            "Regarding the refund, its timing is guaranteed while delivery cannot be guaranteed.",
+            "Refund timing is guaranteed while delivery timing cannot be guaranteed.",
+        ),
+        (
+            "Our policy does not say that we cannot guarantee the refund.",
+            "Our policy does not say that we cannot guarantee the refund.",
+        ),
+        (
+            "It is false that we cannot guarantee the refund.",
+            "It is false that we cannot guarantee the refund.",
+        ),
+        (
+            "We cannot guarantee the refund, but it is guaranteed.",
+            "We cannot guarantee the refund, but it is guaranteed.",
+        ),
+        (
+            "It remains unclear whether the refund cannot be guaranteed.",
+            "It remains unclear whether the refund cannot be guaranteed.",
+        ),
+        (
+            'The statement "the refund cannot be guaranteed" is false.',
+            'The statement "the refund cannot be guaranteed" is false.',
+        ),
+    ],
+)
+def test_grounding_does_not_apply_negative_guarantee_override_across_clauses(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    article_body: str,
+) -> None:
+    concern_id = "concern-return"
+    obligation_id = "return:refund-guarantee"
+    article_id = "return-policy"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, "Guarantee the refund by Friday.")],
+    )
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        checked_citation_ids=[article_id],
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[article_id],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=[article_id, f"concern:{concern_id}"],
+            )
+        ],
+    )
+    article = {
+        "id": article_id,
+        "title": "Adversarial return policy",
+        "body": article_body,
+        "tags": ["return", "refund"],
+        "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
+        "needsReview": False,
+    }
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output, output],
+        articles=[article],
+    )
+
+    assert len(prompts) == 2
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == ("Guarantee the refund by Friday.",)
 
 
 @pytest.mark.parametrize("failure_kind", ["unsupported", "unknown_evidence"])

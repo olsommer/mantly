@@ -105,6 +105,62 @@ def test_dangling_closing_is_completed_or_removed() -> None:
     assert _clean_answer(answer) == "Please keep the damaged parcel isolated."
 
 
+@pytest.mark.parametrize(
+    "closing",
+    [
+        "Thank you,",
+        "Thank you.",
+        "THANK YOU,",
+        "Thank you‚",
+        "Thank you…",
+        "Thank you，",
+        "Thank you。",
+    ],
+)
+def test_terminal_thank_you_closing_is_removed(closing: str) -> None:
+    answer = f"The motor claim is ready for lawyer review.\n\n{closing}"
+
+    assert _clean_answer(answer) == "The motor claim is ready for lawyer review."
+
+
+def test_terminal_thank_you_closing_uses_configured_signer() -> None:
+    answer = "The motor claim is ready for lawyer review.\n\nThank you,"
+
+    assert _clean_answer(answer, signer_name="Helvetia Legal AG") == (
+        "The motor claim is ready for lawyer review.\n\n"
+        "Thank you,\nHelvetia Legal AG"
+    )
+
+
+def test_terminal_thank_you_removes_unconfigured_generated_signer() -> None:
+    answer = (
+        "The motor claim is ready for lawyer review.\n\n"
+        "Thank you,\nExample Legal Team"
+    )
+
+    assert _clean_answer(answer) == "The motor claim is ready for lawyer review."
+
+
+def test_terminal_thank_you_before_feedback_link_is_removed() -> None:
+    footer = (
+        "Rate this support experience: "
+        "https://app.mantly.io/support/portal/test-token"
+    )
+    answer = f"The motor claim is ready for lawyer review.\n\nThank you,\n\n{footer}"
+
+    assert _clean_answer(answer) == (
+        f"The motor claim is ready for lawyer review.\n\n{footer}"
+    )
+
+
+def test_substantive_thank_you_sentence_and_customer_quote_are_preserved() -> None:
+    substantive = "Thank you for sending the documents."
+    quoted = "The customer wrote:\n\n\u201cThank you,\u201d"
+
+    assert _clean_answer(substantive) == substantive
+    assert _clean_answer(quoted) == quoted
+
+
 def test_unconfigured_generated_support_signature_is_removed_before_grounding() -> None:
     answer = (
         "Shipment UPS1Z999AA10123456784 is in transit.\n\n"

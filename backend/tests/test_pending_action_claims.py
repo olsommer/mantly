@@ -112,6 +112,37 @@ def test_pending_action_guard_blocks_exact_live_b2b_escalation_claim() -> None:
     assert result.claims == (answer,)
 
 
+def test_pending_action_guard_blocks_exact_active_internal_review_claim() -> None:
+    answer = "This matter is now undergoing an internal review process."
+    actions = [
+        {"name": "agent_triage", "label": "Agent triage", "status": "pending_approval"}
+    ]
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is True
+    assert result.pending_actions == ("Agent triage",)
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "This matter is not undergoing an internal review process.",
+        "This matter is pending internal review.",
+        "This matter will undergo an internal review once approved.",
+        "This legal opinion discusses the court's standard of review.",
+    ],
+)
+def test_pending_action_guard_allows_safe_internal_review_nearby_language(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
 @pytest.mark.parametrize(
     "answer",
     [

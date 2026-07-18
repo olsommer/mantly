@@ -349,6 +349,12 @@ _ACTIVE_STATE_PATTERN = re.compile(
     r"\s+(?:is|are)\s+(?:(?:already|now|currently)\s+)*(?:underway|in\s+progress|ongoing)\b",
     re.IGNORECASE,
 )
+_ACTIVE_INTERNAL_REVIEW_STATE_PATTERN = re.compile(
+    r"\b(?:this|the|your|our)\s+(?:matter|case|request|ticket|incident|issue)\s+"
+    r"(?:is|are)\s+(?:(?:already|now|currently)\s+)*"
+    r"(?!(?:not|never)\b)undergoing\s+(?:an?\s+)?internal\s+review(?:\s+process)?\b",
+    re.IGNORECASE,
+)
 _ACTION_COMPLETION_STATE_PATTERN = re.compile(
     rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
     r"[^.!?\n]{0,80}?\b(?:is|are|was|were)\s+"
@@ -494,6 +500,7 @@ _CLAIM_PATTERNS = (
     _PASSIVE_ACTION_PATTERN,
     _LIFECYCLE_PASSIVE_ACTION_PATTERN,
     _ACTIVE_STATE_PATTERN,
+    _ACTIVE_INTERNAL_REVIEW_STATE_PATTERN,
     _ACTION_COMPLETION_STATE_PATTERN,
     _GERMAN_COMPLETED_PATTERN,
     _GERMAN_PASSIVE_PATTERN,

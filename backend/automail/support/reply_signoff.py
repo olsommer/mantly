@@ -18,9 +18,18 @@ _DANGLING_CLOSINGS = {
     "regards",
     "saludos cordiales",
     "sincerely",
+    "thank you",
     "yours faithfully",
     "yours sincerely",
 }
+_TERMINAL_THANK_YOU_RE = re.compile(
+    r"^thank\s+you(?:[,.\u201a\u2026\u3002\uff0c])*$",
+    re.IGNORECASE,
+)
+_FEEDBACK_LINK_SUFFIX_RE = re.compile(
+    r"^Rate this support experience:\s+https?://\S+$",
+    re.IGNORECASE,
+)
 _SIGNER_PLACEHOLDER_RE = re.compile(
     r"""^\[\s*(?:
         (?:agent|responder|support|your)\s+name
@@ -118,7 +127,9 @@ def clean_reply_signoff(
     An exact copy of the latest customer's detached signature or a signer-name
     placeholder is replaced by the configured signer when available. A closing
     without any signer is completed the same way, or removed when no authorized
-    signer exists. Other final lines are preserved verbatim.
+    signer exists. A standalone terminal ``Thank you`` closing follows the same
+    signer rule even when a feedback-link footer follows it. Other final lines
+    are preserved verbatim.
     """
     lines = answer.strip().splitlines()
     while lines and not lines[-1].strip():
@@ -126,7 +137,24 @@ def clean_reply_signoff(
     if not lines:
         return ""
 
+    feedback_suffix = ""
+    if _FEEDBACK_LINK_SUFFIX_RE.fullmatch(lines[-1].strip()):
+        feedback_suffix = lines.pop().strip()
+        while lines and not lines[-1].strip():
+            lines.pop()
+
     configured_signer = " ".join(signer_name.split()).strip()
+    if lines and _TERMINAL_THANK_YOU_RE.fullmatch(lines[-1].strip()):
+        if configured_signer:
+            lines.append(configured_signer)
+        else:
+            lines.pop()
+            while lines and not lines[-1].strip():
+                lines.pop()
+
+    if not lines:
+        return feedback_suffix
+
     configured_normalized = _normalized_line(configured_signer)
     customer_signatures = _latest_customer_signature_lines(messages or [])
     final_line = lines[-1].strip()
@@ -169,4 +197,7 @@ def clean_reply_signoff(
 
     while lines and not lines[-1].strip():
         lines.pop()
-    return "\n".join(lines).strip()
+    cleaned = "\n".join(lines).strip()
+    if feedback_suffix:
+        return f"{cleaned}\n\n{feedback_suffix}" if cleaned else feedback_suffix
+    return cleaned

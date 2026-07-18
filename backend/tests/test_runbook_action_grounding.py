@@ -667,6 +667,83 @@ def test_grounding_preflight_blocks_live_pending_agent_triage_claims(monkeypatch
     assert result.pending_actions == ("Agent triage",)
 
 
+def test_grounding_preflight_blocks_active_internal_review_with_pending_triage(
+    monkeypatch,
+):
+    source_message_id = "channel:email-main:law-rerun-c08-message"
+    answer = "This matter is now undergoing an internal review process."
+    issue = {
+        "id": "issue1",
+        "subject": "Legal matter review",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": source_message_id},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "legal-intake",
+                            "matched": True,
+                            "intentName": "legal-intake-qa",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "agent_triage",
+                "actionKey": "agent_triage",
+                "label": "Agent triage",
+                "status": "pending",
+                "metadata": {
+                    "source": "agent_triage",
+                    "approvalRequired": True,
+                    "approved": False,
+                    "automationContext": {
+                        "sourceMessageId": source_message_id,
+                        "messageId": "law-rerun-c08-message",
+                    },
+                },
+                "result": {
+                    "proposedAction": {
+                        "type": "triage_ticket",
+                        "priority": "normal",
+                        "status": "ongoing",
+                    }
+                },
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    ticket_context = issue_agent._automatic_ticket_context(issue)
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert ticket_context["runbookActions"] == [
+        {
+            "name": "agent_triage",
+            "label": "Agent triage",
+            "status": "pending_approval",
+        }
+    ]
+    assert result.verified is False
+    assert result.reason_code == "pending_action_claim"
+    assert result.pending_action_claims == (answer,)
+    assert result.pending_actions == ("Agent triage",)
+
+
 def test_grounding_preflight_blocks_wrong_reply_language_without_llm(monkeypatch):
     monkeypatch.setattr(
         issue_agent,

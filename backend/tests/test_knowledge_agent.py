@@ -657,6 +657,25 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
     assert len(captured["middleware"]) == 2
 
 
+def test_draft_removes_terminal_thank_you_closing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_agent_dependencies(
+        monkeypatch,
+        commands=["cat README.md request.json ticket/ticket.json"],
+        output=KnowledgeAgentOutput(
+            answer="The motor claim is ready for lawyer review.\n\nThank you,",
+            confidence="medium",
+            citation_ids=[],
+        ),
+    )
+
+    result = _draft()
+
+    assert result.generation_mode == "knowledge_agent"
+    assert result.answer == "The motor claim is ready for lawyer review."
+
+
 def test_draft_real_agent_completes_at_configured_tool_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

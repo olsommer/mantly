@@ -870,7 +870,7 @@ class TestIntentAttachmentContext:
         assert captured["response_format"] is None
         assert len(captured["middleware"]) == 1
         assert captured["middleware"][0].run_limit == 1
-        assert captured["recursion_limit"] == 4
+        assert captured["recursion_limit"] == 6
         assert captured["run_name"] == "intent_router_agent"
         assert captured["tags"] == ["mantly", "intent", "router"]
         assert captured["metadata"]["source"] == "pipeline.intent.agent"

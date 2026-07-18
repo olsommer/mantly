@@ -65,6 +65,7 @@ from automail.pipeline.intent.intents_factory import (
 logger = logging.getLogger(__name__)
 
 _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
+_ROUTER_GRAPH_RECURSION_LIMIT = 6
 _MALFORMED_ROUTER_REVIEW_REASON = (
     "Intent classification returned malformed structured output; "
     "human review is required."
@@ -464,7 +465,7 @@ def _run_intent_router_agent(
                             "project_id": project_id,
                             "source": "pipeline.intent.agent",
                         },
-                        recursion_limit=4,
+                        recursion_limit=_ROUTER_GRAPH_RECURSION_LIMIT,
                     )
                 except (GraphRecursionError, ToolCallLimitExceededError):
                     raise

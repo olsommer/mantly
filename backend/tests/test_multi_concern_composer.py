@@ -224,3 +224,31 @@ def test_pipeline_composer_deterministically_blocks_pending_action_claim():
 
     assert unsafe.blocked is True
     assert safe.blocked is False
+
+
+def test_pipeline_composer_blocks_controlled_actor_future_action_claim():
+    result = _result()
+    result.concerns[0].action_outcomes = [
+        RunbookActionOutcome(
+            name="open_ticket",
+            label="Open ticket",
+            status="proposed",
+        )
+    ]
+
+    unsafe = _pending_action_claim_check(
+        result,
+        "A human agent will follow up with you shortly to assist further with this case.",
+    )
+    conditional = _pending_action_claim_check(
+        result,
+        "A human agent will follow up once the ticket is approved.",
+    )
+    external = _pending_action_claim_check(
+        result,
+        "The carrier will update tracking tomorrow.",
+    )
+
+    assert unsafe.blocked is True
+    assert conditional.blocked is False
+    assert external.blocked is False

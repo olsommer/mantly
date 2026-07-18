@@ -1108,6 +1108,120 @@ def test_automatic_context_omits_current_workflow_state_but_binds_related_ticket
     assert related_done_snapshots != open_snapshots
 
 
+def _issue_with_grounding_obligations(
+    *,
+    concern_id: str,
+    questions: list[tuple[str, str]],
+    tool_evidence: list[dict[str, Any]] | None = None,
+    action_executions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    outcome: dict[str, Any] = {}
+    if tool_evidence:
+        outcome["toolEvidence"] = tool_evidence
+    issue: dict[str, Any] = {
+        "id": "issue-obligations",
+        "subject": "Grounding obligation regression",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": concern_id,
+                            "matched": True,
+                            "intentName": "grounding-regression",
+                            "answerObligations": [
+                                {
+                                    "obligationId": obligation_id,
+                                    "question": question,
+                                }
+                                for obligation_id, question in questions
+                            ],
+                            "outcome": outcome,
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    if action_executions:
+        issue["actionExecutions"] = action_executions
+    return issue
+
+
+def _assess_with_grounding_output(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    issue: dict[str, Any],
+    answer: str,
+    resolutions: list[tuple[str, str, list[str]]],
+    unit_evidence_ids: list[str] | None = None,
+    verdict: str | None = None,
+) -> tuple[issue_agent.AutomationGroundingAssessment, str]:
+    answer_units = issue_agent._grounding_answer_units(answer)
+    evidence_ids = unit_evidence_ids or ["ticket"]
+    output = AutomationGroundingOutput(
+        verdict=verdict or (
+            "not_grounded"
+            if any(resolution == "not_covered" for _, resolution, _ in resolutions)
+            else "grounded"
+        ),
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=evidence_ids,
+            )
+            for unit in answer_units
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution=resolution,
+                answer_unit_ids=answer_unit_ids,
+            )
+            for obligation_id, resolution, answer_unit_ids in resolutions
+        ],
+    )
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(
+        usage_module,
+        "record_usage_from_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeGroundingAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            prompts.append(inputs["messages"][0]["content"])
+            return {"structured_response": output}
+
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: FakeGroundingAgent(),
+    )
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+    return result, prompts[0]
+
+
 def test_automation_draft_requires_independent_grounding_for_auto_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1417,12 +1531,12 @@ def test_grounding_gate_rejects_supported_answer_that_omits_one_customer_questio
         obligation_assessments=[
             AutomationGroundingObligationAssessment(
                 obligation_id="delivery:arrival",
-                covered=True,
+                resolution="answered",
                 answer_unit_ids=["u001"],
             ),
             AutomationGroundingObligationAssessment(
                 obligation_id="delivery:address",
-                covered=False,
+                resolution="not_covered",
                 answer_unit_ids=[],
             ),
         ],
@@ -1458,6 +1572,284 @@ def test_grounding_gate_rejects_supported_answer_that_omits_one_customer_questio
     assert result.status == "failed"
     assert result.reason_code == "incomplete_answer"
     assert result.uncovered_obligations == ("Can the delivery address be changed?",)
+    assert result.obligation_assessments == (
+        {
+            "obligationId": "delivery:arrival",
+            "resolution": "answered",
+            "covered": True,
+            "answerUnitIds": ["u001"],
+        },
+        {
+            "obligationId": "delivery:address",
+            "resolution": "not_covered",
+            "covered": False,
+            "answerUnitIds": [],
+        },
+    )
+
+
+def test_grounding_r11_c06_discuss_later_does_not_cover_three_gmbh_obligations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    questions = [
+        ("gmbh:steps", "Outline the preliminary formation steps."),
+        ("gmbh:documents", "Outline the typical formation documents."),
+        ("gmbh:capital", "Outline the capital requirement."),
+    ]
+    issue = _issue_with_grounding_obligations(
+        concern_id="gmbh-formation",
+        questions=questions,
+    )
+    answer = (
+        "During this consultation, we can discuss the preliminary formation steps, "
+        "typical documents, and capital requirements relevant to your situation."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (obligation_id, "not_covered", ["u001"])
+            for obligation_id, _question in questions
+        ],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == tuple(question for _, question in questions)
+    assert [item["resolution"] for item in result.obligation_assessments] == [
+        "not_covered",
+        "not_covered",
+        "not_covered",
+    ]
+    assert all(item["covered"] is False for item in result.obligation_assessments)
+
+
+def test_grounding_r10_c09_intake_and_assess_later_does_not_cover_rescheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    questions = [
+        ("reschedule:process", "What is the rescheduling process?"),
+        ("reschedule:availability", "What consultation slots are available?"),
+    ]
+    issue = _issue_with_grounding_obligations(
+        concern_id="reschedule-consultation",
+        questions=questions,
+    )
+    answer = (
+        "Please send your preferred dates and we can assess rescheduling and "
+        "availability during a later consultation."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (obligation_id, "not_covered", ["u001"])
+            for obligation_id, _question in questions
+        ],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == tuple(question for _, question in questions)
+
+
+def test_grounding_r10_c02_intake_prerequisites_do_not_cover_run_conflict_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="conflict-check",
+        questions=[("conflict:run", "Run the conflict check.")],
+    )
+    answer = (
+        "Please send the full legal names of the client, counterparties, and related "
+        "entities so that a conflict check can be performed later."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:run", "not_covered", ["u001"])],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == ("Run the conflict check.",)
+    assert result.obligation_assessments[0]["covered"] is False
+
+
+def test_grounding_explicit_pending_state_with_next_step_addresses_obligation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="conflict-check",
+        questions=[("conflict:run", "Run the conflict check.")],
+    )
+    answer = (
+        "The conflict check has not run; it is pending human review. "
+        "Next, our conflicts team will review the submitted names."
+    )
+    answer_unit_ids = [
+        unit["id"] for unit in issue_agent._grounding_answer_units(answer)
+    ]
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            ("conflict:run", "pending_or_unavailable", answer_unit_ids)
+        ],
+    )
+
+    assert result.verified is True
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": "conflict:run",
+            "resolution": "pending_or_unavailable",
+            "covered": True,
+            "answerUnitIds": answer_unit_ids,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence_id", "expected_verified", "expected_resolution"),
+    [
+        ("action:execution-conflict", True, "fulfilled_action"),
+        ("tool:conflict-check-tool", True, "fulfilled_action"),
+        ("ticket", False, "not_covered"),
+        ("tool:other-concern-check", False, "not_covered"),
+    ],
+)
+def test_grounding_fulfilled_action_requires_exact_success_evidence_from_same_concern(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_id: str,
+    expected_verified: bool,
+    expected_resolution: str,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="conflict-check",
+        questions=[("conflict:run", "Run the conflict check.")],
+        tool_evidence=[
+            {
+                "name": "conflict-check-tool",
+                "status": "success",
+                "responseFacts": {"status": "clear"},
+            }
+        ],
+        action_executions=[
+            {
+                "id": "execution-conflict",
+                "type": "runbook_webhook",
+                "status": "success",
+                "completedAt": "2026-07-18T10:00:00Z",
+                "metadata": {
+                    "source": "runbook",
+                    "concernId": "conflict-check",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "run_conflict_check",
+                        "label": "Run conflict check",
+                    },
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {"status": "clear"},
+                        },
+                    },
+                },
+            }
+        ],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": "other-concern",
+            "matched": True,
+            "intentName": "other-runbook",
+            "outcome": {
+                "toolEvidence": [
+                    {
+                        "name": "other-concern-check",
+                        "status": "success",
+                        "responseFacts": {"status": "complete"},
+                    }
+                ]
+            },
+        }
+    )
+    answer = "The conflict check is complete."
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:run", "fulfilled_action", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert '"action:execution-conflict"' in prompt
+    assert result.verified is expected_verified
+    assert result.obligation_assessments[0]["resolution"] == expected_resolution
+    assert result.obligation_assessments[0]["covered"] is expected_verified
+    if expected_verified:
+        assert result.uncovered_obligations == ()
+    else:
+        assert result.reason_code == "incomplete_answer"
+        assert result.uncovered_obligations == ("Run the conflict check.",)
+
+
+def test_grounding_prompt_defines_strict_obligation_resolution_contract() -> None:
+    prompt = issue_agent._GROUNDING_SYSTEM_PROMPT
+
+    assert "`answered`" in prompt
+    assert "`fulfilled_action`" in prompt
+    assert "`pending_or_unavailable`" in prompt
+    assert "`not_covered`" in prompt
+    assert "generic intake prerequisites" in prompt
+    assert "can be assessed or discussed later" in prompt
+    assert "unrelated future consultation" in prompt
+    assert "successful exact `tool:*` or `action:*` evidence ID" in prompt
+
+
+def test_grounding_obligation_schema_requires_resolution_and_derives_covered() -> None:
+    schema = AutomationGroundingObligationAssessment.model_json_schema()
+    assessment = AutomationGroundingObligationAssessment(
+        obligation_id="conflict:run",
+        resolution="pending_or_unavailable",
+    )
+
+    assert "resolution" in schema["required"]
+    assert "covered" not in schema["properties"]
+    assert assessment.model_dump()["covered"] is True
+
+
+def test_grounding_missing_obligation_assessment_is_reported_as_uncovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="conflict-check",
+        questions=[("conflict:run", "Run the conflict check.")],
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The request was received.",
+        resolutions=[],
+        verdict="grounded",
+    )
+
+    assert result.verified is False
+    assert result.status == "error"
+    assert result.uncovered_obligations == ("Run the conflict check.",)
 
 
 def test_grounding_gate_rejects_incomplete_unit_protocol(

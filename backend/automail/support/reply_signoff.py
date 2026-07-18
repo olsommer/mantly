@@ -22,8 +22,13 @@ _DANGLING_CLOSINGS = {
     "yours sincerely",
 }
 _SIGNER_PLACEHOLDER_RE = re.compile(
-    r"^\[(?:agent|responder|support|your)\s+name\]$",
-    re.IGNORECASE,
+    r"""^\[\s*(?:
+        (?:agent|responder|support|your)\s+name
+        |
+        (?:your\s+)?(?:law\s+)?(?:firm|company|organi[sz]ation)
+        (?:['’]s)?(?:\s+name)?
+    )\s*\]$""",
+    re.IGNORECASE | re.VERBOSE,
 )
 _SIGNATURE_ROLE_TERMS = {
     "department",

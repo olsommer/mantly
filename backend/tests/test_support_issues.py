@@ -7652,6 +7652,63 @@ def test_message_response_summary_marks_customer_last_message():
     assert done_summary["needsResponse"] is False
 
 
+def test_message_response_summary_chunks_large_issue_filters_and_merges(monkeypatch):
+    issue_ids = [f"issue-{index:03d}" for index in range(125)]
+    issue_records = [
+        {
+            "id": issue_id,
+            "status": "open",
+        }
+        for issue_id in issue_ids
+    ]
+    queried_chunks: list[list[str]] = []
+
+    def fake_list_all(collection: str, filter_str: str, **kwargs):
+        assert collection == "support_messages"
+        assert "project='project1'" in filter_str
+        assert "tenant='tenant1'" in filter_str
+        assert kwargs == {"sort": "occurred_at", "per_page": 1000}
+        chunk_ids = [
+            issue_id
+            for issue_id in issue_ids
+            if f"issue='{issue_id}'" in filter_str
+        ]
+        assert 0 < len(chunk_ids) <= issues._ISSUE_ID_FILTER_CHUNK_SIZE
+        queried_chunks.append(chunk_ids)
+        records = []
+        for issue_id in chunk_ids:
+            index = issue_ids.index(issue_id)
+            records.append({
+                "id": f"customer-{index}",
+                "issue": issue_id,
+                "direction": "customer",
+                "occurred_at": "2026-07-18T09:00:00Z",
+            })
+            if index % 2 == 0:
+                records.append({
+                    "id": f"agent-{index}",
+                    "issue": issue_id,
+                    "direction": "agent",
+                    "occurred_at": "2026-07-18T09:05:00Z",
+                })
+        return records
+
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+
+    result = issues._message_response_summary_by_issue(
+        issue_records,
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert [len(chunk) for chunk in queried_chunks] == [50, 50, 25]
+    assert [issue_id for chunk in queried_chunks for issue_id in chunk] == issue_ids
+    assert list(result) == issue_ids
+    assert result["issue-000"]["needsResponse"] is False
+    assert result["issue-001"]["needsResponse"] is True
+    assert result["issue-124"]["latestAgentMessageAt"] == "2026-07-18T09:05:00Z"
+
+
 def test_list_issues_includes_needs_response_summary(monkeypatch):
     def fake_list_all(collection: str, filter_str: str, **_kwargs):
         if collection == "support_issues":

@@ -19,7 +19,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from automail.support.knowledge_workspace import KnowledgeWorkspace
 from automail.support.pending_action_claims import (
@@ -42,13 +42,18 @@ _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v4"
+GROUNDING_GATE_VERSION = "automation-grounding-v5"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
 _AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
 LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
 BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
+_ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset({
+    "answered",
+    "fulfilled_action",
+    "pending_or_unavailable",
+})
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
@@ -222,8 +227,19 @@ class AutomationGroundingObligationAssessment(BaseModel):
     """Coverage assessment for one explicit customer answer obligation."""
 
     obligation_id: str
-    covered: bool
+    resolution: Literal[
+        "answered",
+        "fulfilled_action",
+        "pending_or_unavailable",
+        "not_covered",
+    ]
     answer_unit_ids: list[str] = Field(default_factory=list)
+
+    @computed_field(return_type=bool)
+    @property
+    def covered(self) -> bool:
+        """Compatibility projection; code still validates the resolution evidence."""
+        return self.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
 
 
 class AutomationGroundingOutput(BaseModel):
@@ -1123,22 +1139,21 @@ def _automatic_runbook_action_context(
             )
             if value
         }
+        result = _record_from(execution.get("result"))
+        proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
         execution_concern_id = _string_from(
-            metadata.get("concernId") or metadata.get("concern_id")
+            metadata.get("concernId")
+            or metadata.get("concern_id")
+            or proposed.get("concernId")
+            or proposed.get("concern_id")
         )
         if source_message_id and source_message_id not in execution_source_message_ids:
             continue
         if concern_ids and is_runbook_action and execution_concern_id not in concern_ids:
             continue
-        result = _record_from(execution.get("result"))
-        proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
         name = _string_from(proposed.get("name") or execution.get("actionKey"))
         label = _string_from(proposed.get("label") or execution.get("label") or name)
-        concern_id = _string_from(
-            execution_concern_id
-            or proposed.get("concernId")
-            or proposed.get("concern_id")
-        )
+        concern_id = execution_concern_id
         runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
         if status == "pending" and metadata.get("approvalRequired") is True:
             action_context = {
@@ -1208,6 +1223,10 @@ def _automatic_runbook_action_context(
             action_context["concernId"] = concern_id
         if runbook:
             action_context["runbook"] = runbook
+        if concern_id and name:
+            execution_id = _string_from(execution.get("id"))
+            evidence_scope = execution_id or f"{concern_id}:{name}"
+            action_context["evidenceId"] = f"action:{evidence_scope}"
         context.append(action_context)
         if len(context) >= 10:
             break
@@ -1399,6 +1418,58 @@ def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
         ):
             evidence_ids.append(evidence_id)
     return tuple(dict.fromkeys(evidence_ids))
+
+
+def _successful_action_evidence_ids_by_concern(
+    ticket: dict[str, Any],
+) -> dict[str, frozenset[str]]:
+    """Index exact successful tool/action evidence under its originating concern."""
+    evidence_by_concern: dict[str, set[str]] = {}
+    concerns = ticket.get("concerns")
+    if isinstance(concerns, list):
+        for raw_concern in concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(
+                concern.get("id")
+                or concern.get("concernId")
+                or concern.get("concern_id")
+            )
+            raw_evidence = concern.get("toolEvidence")
+            if not concern_id or not isinstance(raw_evidence, list):
+                continue
+            for raw_record in raw_evidence:
+                record = _record_from(raw_record)
+                name = _string_from(record.get("name"))
+                evidence_id = _string_from(record.get("evidenceId"))
+                if (
+                    name
+                    and evidence_id == f"tool:{name}"
+                    and _string_from(record.get("status")).lower() == "success"
+                    and isinstance(record.get("responseFacts"), (dict, list))
+                    and record.get("responseFacts")
+                ):
+                    evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+
+    raw_actions = ticket.get("runbookActions")
+    if isinstance(raw_actions, list):
+        for raw_action in raw_actions:
+            action = _record_from(raw_action)
+            concern_id = _string_from(
+                action.get("concernId")
+                or action.get("concern_id")
+            )
+            evidence_id = _string_from(action.get("evidenceId"))
+            if (
+                concern_id
+                and evidence_id.startswith("action:")
+                and _string_from(action.get("status")).lower() == "success"
+            ):
+                evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+
+    return {
+        concern_id: frozenset(evidence_ids)
+        for concern_id, evidence_ids in evidence_by_concern.items()
+    }
 
 
 def grounding_context_snapshots(
@@ -2066,6 +2137,9 @@ def assess_issue_automation_grounding(
         )
     )
     ticket_evidence = _automatic_ticket_context(issue)
+    successful_action_evidence_by_concern = (
+        _successful_action_evidence_ids_by_concern(ticket_evidence)
+    )
     expected_language = _latest_customer_language(messages)
     detected_answer_language = _detected_supported_language(answer)
     if expected_language != detected_answer_language:
@@ -2200,6 +2274,8 @@ def assess_issue_automation_grounding(
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]
         allowed_evidence_ids.extend(_automatic_tool_evidence_ids(ticket_evidence))
+        for evidence_ids in successful_action_evidence_by_concern.values():
+            allowed_evidence_ids.extend(evidence_ids)
         if message_evidence:
             allowed_evidence_ids.append("messages")
         if account_evidence:
@@ -2207,6 +2283,7 @@ def assess_issue_automation_grounding(
         if conversation_evidence:
             allowed_evidence_ids.append("conversation")
         allowed_evidence_ids.extend(citation_ids)
+        allowed_evidence_ids = list(dict.fromkeys(allowed_evidence_ids))
         prompt = _GROUNDING_USER_TEMPLATE.format(
             answer_sha256=answer_sha256,
             answer_units=_json(answer_units),
@@ -2318,6 +2395,20 @@ def assess_issue_automation_grounding(
             )
         if seen_unit_ids != set(expected_units):
             protocol_errors.append("Evaluator did not assess every answer unit exactly once")
+        supported_unit_evidence_ids = {
+            _string_from(item.get("unitId")): frozenset(
+                _string_from(evidence_id)
+                for evidence_id in item.get("evidenceIds", [])
+                if _string_from(evidence_id)
+            )
+            for item in clean_unit_assessments
+            if (
+                item.get("supported")
+                and item.get("evidenceIds")
+                and set(item.get("evidenceIds", [])).issubset(allowed_ids)
+            )
+        }
+        supported_units = set(supported_unit_evidence_ids)
 
         expected_obligations = {
             _string_from(obligation.get("id")): obligation
@@ -2360,21 +2451,39 @@ def assess_issue_automation_grounding(
                     "Answer obligation uses unknown answer-unit IDs: "
                     + ", ".join(unknown_unit_ids[:5])
                 )
-            supported_units = {
-                _string_from(item.get("unitId"))
-                for item in clean_unit_assessments
-                if item.get("supported") and item.get("evidenceIds")
-            }
-            covered = bool(
-                assessment.covered
-                and answer_unit_ids
+            requested_resolution = _string_from(assessment.resolution)
+            resolution = requested_resolution
+            linked_units_are_supported = bool(
+                answer_unit_ids
                 and not unknown_unit_ids
                 and set(answer_unit_ids).issubset(supported_units)
             )
-            if assessment.covered and not answer_unit_ids:
+            if (
+                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+                and not answer_unit_ids
+            ):
                 protocol_errors.append(
-                    f"Covered obligation has no answer-unit IDs: {obligation_id}"
+                    f"Addressed obligation has no answer-unit IDs: {obligation_id}"
                 )
+            if (
+                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+                and not linked_units_are_supported
+            ):
+                resolution = "not_covered"
+            if requested_resolution == "fulfilled_action" and linked_units_are_supported:
+                concern_id = _string_from(obligation.get("concernId"))
+                exact_action_evidence_ids = successful_action_evidence_by_concern.get(
+                    concern_id,
+                    frozenset(),
+                )
+                if not exact_action_evidence_ids or any(
+                    not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
+                        exact_action_evidence_ids
+                    )
+                    for unit_id in answer_unit_ids
+                ):
+                    resolution = "not_covered"
+            covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
             if not covered:
                 uncovered_obligations.append(
                     _string_from(obligation.get("question"))[:500]
@@ -2382,6 +2491,7 @@ def assess_issue_automation_grounding(
             clean_obligation_assessments.append(
                 {
                     "obligationId": obligation_id,
+                    "resolution": resolution,
                     "covered": covered,
                     "answerUnitIds": list(answer_unit_ids),
                 }
@@ -2389,6 +2499,11 @@ def assess_issue_automation_grounding(
         if seen_obligation_ids != set(expected_obligations):
             protocol_errors.append(
                 "Evaluator did not assess every answer obligation exactly once"
+            )
+            uncovered_obligations.extend(
+                _string_from(obligation.get("question"))[:500]
+                for obligation_id, obligation in expected_obligations.items()
+                if obligation_id not in seen_obligation_ids
             )
         used_citation_ids = tuple(
             citation_id for citation_id in citation_ids if citation_id in used_supported_evidence_ids

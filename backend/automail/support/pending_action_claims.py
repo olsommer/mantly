@@ -360,6 +360,20 @@ _FUTURE_ACTION_PATTERN = re.compile(
     rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:{'|'.join(_FUTURE_ACTIONS)})\b",
     re.IGNORECASE,
 )
+_CONTROLLED_SUPPORT_ACTOR_PATTERN = (
+    r"(?:our\s+team|(?:a|the)\s+specialist|(?:a|the)\s+human\s+agent|"
+    r"(?:our|the)\s+operations(?:\s+team)?|(?:a|the|our)\s+support\s+representative)"
+)
+_CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN = re.compile(
+    rf"\b{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:{'|'.join(_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
+_OPERATIONS_FUTURE_ACTION_PATTERN = re.compile(
+    rf"^\s*operations\s+(?:will|shall)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*(?:{'|'.join(_FUTURE_ACTIONS)})\b",
+    re.IGNORECASE,
+)
 _FUTURE_PASSIVE_ACTION_PATTERN = re.compile(
     rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
     rf"[^.!?\n]{{0,100}}?\b(?:will|shall)\s+"
@@ -492,6 +506,8 @@ _CLAIM_PATTERNS = (
 )
 _FUTURE_CLAIM_PATTERNS = (
     _FUTURE_ACTION_PATTERN,
+    _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN,
+    _OPERATIONS_FUTURE_ACTION_PATTERN,
     _FUTURE_PASSIVE_ACTION_PATTERN,
     _FUTURE_LIFECYCLE_PASSIVE_ACTION_PATTERN,
     _GERMAN_FUTURE_PATTERN,
@@ -531,6 +547,7 @@ _CONDITION_MARKERS = (
 _CONTINGENCY_TERMS = (
     r"approv\w*",
     r"authoriz\w*",
+    r"availab\w*",
     r"confirm\w*",
     r"review\w*",
     r"verif\w*",
@@ -656,10 +673,9 @@ def check_pending_action_claims(
     answer: str,
     runbook_actions: Iterable[Mapping[str, Any]],
 ) -> PendingActionClaimCheck:
-    """Block active/completed wording when any supplied runbook action awaits approval.
+    """Block definite active, completed, or future action claims awaiting approval.
 
-    Conditional, future, negative, and explicit pending wording do not match the
-    prohibited first-person, passive-completed, or active-state forms.
+    Conditional, contingent, negative, and explicit pending wording remains safe.
     """
 
     pending_actions = _pending_action_names(runbook_actions)

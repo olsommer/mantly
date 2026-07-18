@@ -84,6 +84,7 @@ AUTOMATIC_REPLY_SOURCES = {"agent_answer", "automation", "email_pipeline"}
 DELIVERY_CLAIM_LEASE_SECONDS = 900
 AUTOMATIC_REPLY_TERMINAL_ERROR = "Automatic reply requires an active unmerged ticket"
 ACTION_EXECUTION_STATUSES = {"pending", "running", "success", "failed", "skipped"}
+_ISSUE_ID_FILTER_CHUNK_SIZE = 50
 REPLY_MACRO_TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 DEFAULT_QUEUE_KEY = "support"
 DEFAULT_QUEUE_NAME = "Support"
@@ -1537,6 +1538,48 @@ def _issue_filter(
     return " && ".join(parts)
 
 
+def _clean_issue_ids(issue_ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(
+        clean_id
+        for issue_id in issue_ids
+        if (clean_id := _string_from(issue_id))
+    ))
+
+
+def _list_all_by_issue_ids(
+    collection: str,
+    issue_ids: list[str],
+    *,
+    tenant_id: str | None,
+    project_id: str,
+    sort: str,
+    per_page: int,
+    extra: str = "",
+) -> list[dict[str, Any]]:
+    """List issue-scoped records without exceeding PocketBase filter URL limits."""
+    clean_ids = _clean_issue_ids(issue_ids)
+    records: list[dict[str, Any]] = []
+    for offset in range(0, len(clean_ids), _ISSUE_ID_FILTER_CHUNK_SIZE):
+        chunk = clean_ids[offset:offset + _ISSUE_ID_FILTER_CHUNK_SIZE]
+        issue_filter = " || ".join(
+            f"issue='{_escape_pb(issue_id)}'" for issue_id in chunk
+        )
+        chunk_extra = f"({issue_filter})"
+        if extra:
+            chunk_extra = f"{chunk_extra} && ({extra})"
+        records.extend(_list_all(
+            collection,
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=chunk_extra,
+            ),
+            sort=sort,
+            per_page=per_page,
+        ))
+    return records
+
+
 def _issue_by_id(
     issue_id: str,
     *,
@@ -1728,13 +1771,16 @@ def _message_response_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    issue_ids = [_string_from(issue.get("id")) for issue in issues if _string_from(issue.get("id"))]
+    issue_ids = _clean_issue_ids([
+        _string_from(issue.get("id")) for issue in issues
+    ])
     if not issue_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in issue_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_messages",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        issue_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="occurred_at",
         per_page=max(200, min(len(issue_ids) * 20, 1000)),
     )
@@ -1833,21 +1879,25 @@ def _approval_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    clean_ids = [issue_id for issue_id in issue_ids if issue_id]
+    clean_ids = _clean_issue_ids(issue_ids)
     if not clean_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in clean_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_outbound_messages",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="-created",
         per_page=200,
     )
-    actions = _list_all(
+    actions = _list_all_by_issue_ids(
         "support_action_executions",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter}) && status='pending'"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="-created",
         per_page=200,
+        extra="status='pending'",
     )
     grouped: dict[str, list[dict[str, Any]]] = {}
     for rec in records:
@@ -1867,13 +1917,14 @@ def _ai_run_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    clean_ids = [issue_id for issue_id in issue_ids if issue_id]
+    clean_ids = _clean_issue_ids(issue_ids)
     if not clean_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in clean_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_ai_runs",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="-created",
         per_page=500,
     )
@@ -1899,13 +1950,14 @@ def _knowledge_gap_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    clean_ids = [issue_id for issue_id in issue_ids if issue_id]
+    clean_ids = _clean_issue_ids(issue_ids)
     if not clean_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in clean_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_knowledge_gaps",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="-created",
         per_page=500,
     )
@@ -2102,13 +2154,14 @@ def _csat_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    clean_ids = [issue_id for issue_id in issue_ids if issue_id]
+    clean_ids = _clean_issue_ids(issue_ids)
     if not clean_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in clean_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_csat_feedback",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="-received_at",
         per_page=200,
     )
@@ -2214,13 +2267,14 @@ def _sla_summary_by_issue(
     tenant_id: str | None,
     project_id: str,
 ) -> dict[str, dict[str, Any]]:
-    clean_ids = [issue_id for issue_id in issue_ids if issue_id]
+    clean_ids = _clean_issue_ids(issue_ids)
     if not clean_ids:
         return {}
-    issue_filter = " || ".join(f"issue='{_escape_pb(issue_id)}'" for issue_id in clean_ids)
-    records = _list_all(
+    records = _list_all_by_issue_ids(
         "support_sla_events",
-        _issue_filter(tenant_id=tenant_id, project_id=project_id, extra=f"({issue_filter})"),
+        clean_ids,
+        tenant_id=tenant_id,
+        project_id=project_id,
         sort="target_at",
         per_page=200,
     )

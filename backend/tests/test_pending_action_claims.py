@@ -69,6 +69,29 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
     assert result.claims == (answer,)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (
+            "A specialist will review your request and follow up with you "
+            "regarding the next steps for this."
+        ),
+        "A human agent will follow up with you shortly to assist further with this case.",
+        "Our team will contact you with an update.",
+        "Operations will investigate the delivery exception.",
+        "The operations team will open a warehouse ticket.",
+        "A support representative will arrange the replacement.",
+    ],
+)
+def test_pending_action_guard_blocks_controlled_support_actor_future_promises(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
 def test_pending_action_guard_blocks_exact_live_coordinated_triage_claims() -> None:
     answer = (
         "We have noted the critical deadline of 20 July 2026 and have escalated "
@@ -122,6 +145,28 @@ def test_pending_action_guard_blocks_exact_live_coordinated_triage_claims() -> N
     ],
 )
 def test_pending_action_guard_allows_conditional_future_negative_and_pending_language(answer: str) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.pending_actions == ("Open fulfillment investigation",)
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "A specialist will follow up once the action is approved.",
+        "A human agent will contact you if available.",
+        "A specialist is expected to follow up after review.",
+        "The carrier will update tracking tomorrow.",
+        "The customer will contact support after review.",
+        "A carrier representative will follow up tomorrow.",
+        "Carrier operations will update the tracking scan tomorrow.",
+    ],
+)
+def test_pending_action_guard_allows_contingent_or_external_actor_future_facts(
+    answer: str,
+) -> None:
     result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
 
     assert result.blocked is False

@@ -1,5 +1,7 @@
 """Focused tests for deterministic generated-reply sign-off cleanup."""
 
+import pytest
+
 from automail.support.issue_agent import _clean_answer
 
 
@@ -39,6 +41,59 @@ def test_agent_name_placeholder_and_closing_are_removed_without_project_signer()
     assert _clean_answer(answer, messages=_customer_message()) == (
         "We need the parcel photos before review."
     )
+
+
+def test_live_firm_name_placeholder_and_closing_are_removed() -> None:
+    answer = (
+        "Once we receive the requested information, we will route your intake "
+        "for lawyer review.\n\nSincerely,\n[Your Firm's Name]"
+    )
+
+    assert _clean_answer(answer, messages=_customer_message()) == (
+        "Once we receive the requested information, we will route your intake "
+        "for lawyer review."
+    )
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "[Firm Name]",
+        "[Your Law Firm’s Name]",
+        "[Your Company's Name]",
+        "[Your Organization’s Name]",
+        "[Your Organisation Name]",
+    ],
+)
+def test_bracketed_organization_placeholders_use_configured_signer(
+    placeholder: str,
+) -> None:
+    answer = f"We will route your intake for review.\n\nSincerely,\n{placeholder}"
+
+    assert _clean_answer(answer, signer_name="Helvetia Legal AG") == (
+        "We will route your intake for review.\n\nSincerely,\nHelvetia Legal AG"
+    )
+
+
+def test_bracketed_placeholder_in_substantive_content_is_not_removed() -> None:
+    answer = (
+        "The uploaded template contains the field [Your Firm's Name]. "
+        "Please leave that customer-provided field unchanged."
+    )
+    messages = [
+        {
+            "direction": "customer",
+            "body": "Please keep [Your Firm's Name] in my document template.",
+        }
+    ]
+
+    assert _clean_answer(answer, messages=messages) == answer
+
+
+def test_legitimate_configured_firm_name_is_preserved() -> None:
+    answer = "We will route your intake for review.\n\nSincerely,\nHelvetia Legal AG"
+
+    assert _clean_answer(answer, signer_name="Helvetia Legal AG") == answer
 
 
 def test_dangling_closing_is_completed_or_removed() -> None:

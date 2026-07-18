@@ -25,6 +25,7 @@ from automail.support.knowledge_workspace import KnowledgeWorkspace
 from automail.support.pending_action_claims import (
     PENDING_ACTION_CLAIM_REASON_CODE,
     check_pending_action_claims,
+    repair_pending_action_claims,
 )
 from automail.support.reply_signoff import clean_reply_signoff
 from automail.support.safety_guidance import (
@@ -50,7 +51,7 @@ _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_MODEL_CALL_LIMIT = 2
-GROUNDING_GATE_VERSION = "automation-grounding-v5"
+GROUNDING_GATE_VERSION = "automation-grounding-v6"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
@@ -84,6 +85,30 @@ _AUTOMATION_SYSTEM_PROMPT = (
 _AUTOMATION_USER_TEMPLATE = (_PROMPTS_DIR / "issue_automation_user_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_grounding_eval_system_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_USER_TEMPLATE = (_PROMPTS_DIR / "issue_grounding_eval_user_prompt.md").read_text(encoding="utf-8").strip()
+_GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION = """
+
+## Required Second-Pass Obligation Adjudication
+The previous result linked one or more evidence-supported answer units to an
+obligation but still marked that obligation `not_covered`. Reassess every answer
+obligation from scratch using the unchanged evidence and immutable answer units.
+
+Keep these two decisions separate:
+1. whether every assertion in an answer unit is supported by allowed evidence;
+2. whether supported units directly answer an obligation or explicitly state a
+   pending/unavailable result and concrete next step.
+
+Directly supplied status, last-event, ETA, limitation, or eligibility information
+is `answered` for the matching question. For a requested action, a supported reply
+that says the action cannot be done directly, is not confirmed or is pending human
+review, and gives the concrete next step is `pending_or_unavailable`. It must never
+be upgraded to `fulfilled_action` without successful exact same-concern action
+evidence. Generic acknowledgement, intake-only language, repetition of the request,
+or a promise to look into it remains `not_covered`.
+
+Do not assume the previous result was wrong and do not assume the reply is complete.
+Return the full required structured result, reassessing every unit and obligation
+exactly once.
+""".strip()
 
 
 class _AgentInvocationUsage:
@@ -256,6 +281,7 @@ class AutomationGroundingObligationAssessment(BaseModel):
         "not_covered",
     ]
     answer_unit_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
 
     @computed_field(return_type=bool)
     @property
@@ -331,6 +357,42 @@ def _grounding_retryable_protocol_errors(
         ):
             errors.append("Addressed obligation has no answer-unit IDs")
     return tuple(dict.fromkeys(errors))
+
+
+def _grounding_needs_obligation_reassessment(
+    structured: Any,
+    *,
+    expected_unit_ids: frozenset[str],
+    expected_obligation_ids: frozenset[str],
+    allowed_evidence_ids: frozenset[str],
+) -> bool:
+    """Detect a narrow semantic result worth one independent second pass.
+
+    The retry never converts a failure by itself. It is allowed only when the
+    first result is protocol-complete, every immutable answer unit is supported
+    by known evidence, and an uncovered obligation was nevertheless linked to
+    one or more real answer units. The final full validation remains authoritative.
+    """
+
+    if not expected_obligation_ids or not isinstance(structured, AutomationGroundingOutput):
+        return False
+    if _grounding_retryable_protocol_errors(
+        structured,
+        expected_unit_ids=expected_unit_ids,
+        expected_obligation_ids=expected_obligation_ids,
+    ):
+        return False
+    if any(_string_from(value) for value in structured.contradictions):
+        return False
+    for assessment in structured.unit_assessments:
+        evidence_ids = {evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value))}
+        if not assessment.supported or not evidence_ids or not evidence_ids.issubset(allowed_evidence_ids):
+            return False
+    return any(
+        assessment.resolution == "not_covered"
+        and any(_string_from(value) in expected_unit_ids for value in assessment.answer_unit_ids)
+        for assessment in structured.obligation_assessments
+    )
 
 
 def _string_from(value: Any) -> str:
@@ -624,6 +686,28 @@ _LANGUAGE_NAMES = {
     "fr": "French",
     "it": "Italian",
 }
+_PENDING_ACTION_REPAIR_NOTICES = {
+    "de": (
+        "Jede angefragte Aktion, die eine menschliche Prüfung erfordert, ist "
+        "ausstehend und weder als begonnen noch als abgeschlossen bestätigt."
+    ),
+    "en": (
+        "Any requested action that requires human review is pending and is not "
+        "confirmed as started or completed."
+    ),
+    "es": (
+        "Toda acción solicitada que requiera revisión humana está pendiente y no "
+        "se confirma como iniciada ni completada."
+    ),
+    "fr": (
+        "Toute action demandée nécessitant un contrôle humain est en attente et "
+        "n’est confirmée ni comme commencée ni comme terminée."
+    ),
+    "it": (
+        "Qualsiasi azione richiesta che necessiti di revisione umana è in sospeso "
+        "e non è confermata né come avviata né come completata."
+    ),
+}
 
 
 def _detected_supported_language(*values: str) -> str:
@@ -691,6 +775,88 @@ def _knowledge_failure_answer(
             "Please review this ticket manually before replying."
         ),
     }[language]
+
+
+def _battery_safety_failure_answer(
+    messages: list[dict[str, Any]] | None = None,
+    *,
+    language: str | None = None,
+) -> str:
+    """Return complete policy guidance when model generation cannot do so safely."""
+    language = language if language in _LANGUAGE_NAMES else _latest_customer_language(messages or [])
+    return {
+        "de": (
+            "Nicht berühren. Nicht benutzen. Nicht laden. Isolieren Sie den Artikel nur, "
+            "wenn dies sicher möglich ist, und halten Sie ihn nur wenn sicher von Hitze "
+            "und brennbaren Materialien fern. Nicht versenden, zurücksenden oder anderweitig "
+            "transportieren, bevor Sie bestätigte Gefahrgut-Anweisungen von einem Menschen "
+            "erhalten. Wenn Rauch, Feuer oder ungewöhnliche Hitze auftritt, entfernen Sie "
+            "sich und kontaktieren Sie den örtlichen Notdienst oder die Feuerwehr. Eine "
+            "menschliche Sicherheitsprüfung ist erforderlich, bevor eine Eskalation, ein "
+            "Ersatz, eine Rückerstattung, eine Abholung oder Rücksendung bestätigt werden "
+            "kann; dieser Entwurf bestätigt keine solche Aktion. Bewahren Sie vorhandene "
+            "Bestelldaten und bereits aufgenommene Fotos auf, aber bewegen oder berühren Sie "
+            "den Artikel nicht, um weitere Beweise zu sammeln."
+        ),
+        "fr": (
+            "Ne manipulez pas, n'utilisez pas et ne rechargez pas l'article. Isolez-le "
+            "uniquement si cela peut être fait en toute sécurité, et gardez-le à l'écart de "
+            "la chaleur et des matières inflammables uniquement si c'est sûr. Ne l'expédiez "
+            "pas, ne le retournez pas et ne le transportez pas avant d'avoir reçu d'une "
+            "personne des consignes confirmées pour les marchandises dangereuses. En cas de "
+            "fumée, d'incendie ou de chaleur inhabituelle, éloignez-vous et contactez les "
+            "services d'urgence locaux ou les pompiers. Un contrôle humain de sécurité est "
+            "requis avant de confirmer une escalade, un remplacement, un remboursement, un "
+            "enlèvement ou un retour ; ce brouillon ne confirme aucune de ces actions. "
+            "Conservez les informations de commande et les photos déjà prises, mais ne "
+            "manipulez ni ne déplacez l'article pour recueillir d'autres preuves."
+        ),
+        "es": (
+            "No manipule, use ni cargue el artículo. Aíslelo solo si puede hacerse de forma "
+            "segura y manténgalo alejado del calor y de materiales inflamables, solo si es "
+            "seguro. No lo envíe, devuelva ni transporte antes de recibir de una persona "
+            "instrucciones confirmadas de seguridad para mercancías peligrosas. Si hay humo, "
+            "fuego o calor inusual, aléjese y contacte los servicios de emergencia locales o "
+            "los bomberos. Se requiere una revisión humana de seguridad antes de confirmar "
+            "una escalada, sustitución, reembolso, recogida o devolución; este borrador no "
+            "confirma ninguna de esas acciones. Conserve los datos del pedido y las fotos ya "
+            "tomadas, pero no manipule ni mueva el artículo para reunir más pruebas."
+        ),
+        "it": (
+            "Non manipoli, non utilizzi e non ricarichi l'articolo. Lo isoli solo se può "
+            "farlo in sicurezza e lo tenga lontano dal calore e dai materiali infiammabili, "
+            "solo se è sicuro. Non lo spedisca, restituisca o trasporti prima di ricevere da "
+            "una persona istruzioni confermate di sicurezza per merci pericolose. In caso di "
+            "fumo, fuoco o calore insolito, si allontani e contatti i servizi di emergenza "
+            "locali o i vigili del fuoco. È necessaria una revisione umana della sicurezza "
+            "prima di confermare un'escalation, una sostituzione, un rimborso, un ritiro o un "
+            "reso; questa bozza non conferma nessuna di tali azioni. Conservi i dati "
+            "dell'ordine e le foto già scattate, ma non manipoli né sposti l'articolo per "
+            "raccogliere ulteriori prove."
+        ),
+        "en": (
+            "Stop handling, using, and charging the item immediately. Isolate it only if this "
+            "can be done safely, and keep it away from heat and flammable materials only if "
+            "safe. Do not ship, return, or otherwise transport it until a human provides "
+            "confirmed hazardous-goods instructions. If smoke, fire, or unusual heat is "
+            "present or develops, move away and contact local emergency services or the local "
+            "fire authority. No escalation, replacement, refund, collection, return, or other "
+            "business action has been confirmed. Human safety review is required before any "
+            "business next step. Keep existing order details and any photos already taken "
+            "available, but do not handle or move the item to collect more evidence."
+        ),
+    }[language]
+
+
+def _safety_aware_failure_answer(
+    *,
+    assessment: SafetyGuidanceAssessment,
+    ordinary_answer: str,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
+    if assessment.active:
+        return _battery_safety_failure_answer(messages)
+    return ordinary_answer
 
 
 def _article_context(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -1643,6 +1809,23 @@ def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, 
     )
 
 
+def repair_issue_automation_answer_action_state(
+    *,
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+    answer: str,
+) -> str:
+    """Repair residual action-progress claims against the latest durable ticket state."""
+    ticket = _automatic_ticket_context(issue)
+    language = _latest_customer_language(messages)
+    return repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=ticket.get("runbookActions", []),
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+        repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
+    )
+
+
 def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:
     """Validate a successful tool record against its exact enclosing scope."""
     name = _string_from(record.get("name"))
@@ -1900,7 +2083,11 @@ def draft_issue_agent_answer(
             model_reason="Knowledge agent capacity is temporarily exhausted.",
         )
         return IssueAgentDraft(
-            answer=_knowledge_failure_answer(question, messages),
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=_knowledge_failure_answer(question, messages),
+                messages=messages,
+            ),
             confidence="low",
             generation_mode="deterministic_fallback",
             error="Knowledge agent capacity is temporarily exhausted",
@@ -2097,7 +2284,11 @@ def draft_issue_agent_answer(
             model_reason=review_reason,
         )
         return IssueAgentDraft(
-            answer=_knowledge_failure_answer(question, messages),
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=_knowledge_failure_answer(question, messages),
+                messages=messages,
+            ),
             confidence="low",
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
@@ -2141,7 +2332,11 @@ def draft_issue_automation_answer(
             model_reason="Automatic answer capacity is temporarily exhausted.",
         )
         return IssueAgentDraft(
-            answer=fallback_answer,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=fallback_answer,
+                messages=messages,
+            ),
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error="Automatic answer capacity is temporarily exhausted",
@@ -2370,7 +2565,11 @@ def draft_issue_automation_answer(
             model_reason=review_reason,
         )
         return IssueAgentDraft(
-            answer=fallback_answer,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=fallback_answer,
+                messages=messages,
+            ),
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
@@ -2535,6 +2734,31 @@ def assess_issue_automation_grounding(
                 f"latest customer language {_LANGUAGE_NAMES[expected_language]}"
             ),
         )
+    missing_safety = (
+        missing_lithium_battery_safety_guidance(answer)
+        if safety_assessment.active
+        else ()
+    )
+    if missing_safety:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=SAFETY_GUIDANCE_MISSING_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            uncovered_obligations=(
+                safety_assessment.answer_obligation()["question"],
+            ),
+            unsupported_claims=missing_safety,
+            error=(
+                "Missing mandatory damaged-lithium-battery safety guidance: "
+                + ", ".join(missing_safety)
+            )[:1_000],
+        )
     pending_action_check = check_pending_action_claims(
         answer=answer,
         runbook_actions=ticket_evidence.get("runbookActions", []),
@@ -2578,31 +2802,6 @@ def assess_issue_automation_grounding(
             error=(
                 "Candidate answer contains unsupported business identifiers: "
                 + ", ".join(unsupported_identifiers[:20])
-            )[:1_000],
-        )
-    missing_safety = (
-        missing_lithium_battery_safety_guidance(answer)
-        if safety_assessment.active
-        else ()
-    )
-    if missing_safety:
-        return AutomationGroundingAssessment(
-            verified=False,
-            status="failed",
-            reason_code=SAFETY_GUIDANCE_MISSING_REASON_CODE,
-            checked_at=checked_at,
-            citation_ids=citation_ids,
-            context_snapshots=context_snapshots,
-            answer_sha256=answer_sha256,
-            answer_units=audit_answer_units,
-            answer_obligations=answer_obligations,
-            uncovered_obligations=(
-                safety_assessment.answer_obligation()["question"],
-            ),
-            unsupported_claims=missing_safety,
-            error=(
-                "Missing mandatory damaged-lithium-battery safety guidance: "
-                + ", ".join(missing_safety)
             )[:1_000],
         )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
@@ -2740,10 +2939,10 @@ def assess_issue_automation_grounding(
             if _string_from(obligation.get("id"))
         )
 
-        def invoke_once() -> dict[str, Any]:
+        def invoke_once(active_prompt: str) -> dict[str, Any]:
             with llm_stage("issue_automation_grounding"):
                 response = agent.invoke(
-                    {"messages": [{"role": "user", "content": prompt}]},
+                    {"messages": [{"role": "user", "content": active_prompt}]},
                     config=invoke_config,
                 )
                 record_usage_from_result(response, usage_context)
@@ -2751,20 +2950,35 @@ def assess_issue_automation_grounding(
 
         def invoke_agent() -> dict[str, Any]:
             response: dict[str, Any] = {}
+            active_prompt = prompt
             for attempt in range(GROUNDING_MODEL_CALL_LIMIT):
-                response = invoke_once()
+                response = invoke_once(active_prompt)
                 structured = response.get("structured_response") if isinstance(response, dict) else None
                 retryable_errors = _grounding_retryable_protocol_errors(
                     structured,
                     expected_unit_ids=expected_unit_ids_for_retry,
                     expected_obligation_ids=expected_obligation_ids_for_retry,
                 )
+                if retryable_errors and attempt + 1 < GROUNDING_MODEL_CALL_LIMIT:
+                    logger.warning(
+                        "Grounding evaluator returned malformed protocol output; retrying once: %s",
+                        "; ".join(retryable_errors),
+                    )
+                    continue
+                if attempt + 1 < GROUNDING_MODEL_CALL_LIMIT and _grounding_needs_obligation_reassessment(
+                    structured,
+                    expected_unit_ids=expected_unit_ids_for_retry,
+                    expected_obligation_ids=expected_obligation_ids_for_retry,
+                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                ):
+                    logger.warning(
+                        "Grounding evaluator linked supported units to an uncovered obligation; "
+                        "running one focused obligation reassessment"
+                    )
+                    active_prompt = prompt + "\n\n" + _GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION
+                    continue
                 if not retryable_errors or attempt + 1 >= GROUNDING_MODEL_CALL_LIMIT:
                     break
-                logger.warning(
-                    "Grounding evaluator returned malformed protocol output; retrying once: %s",
-                    "; ".join(retryable_errors),
-                )
             return response
 
         parent_usage_collector = current_collector()
@@ -2905,13 +3119,34 @@ def assess_issue_automation_grounding(
                 for unit_id in answer_unit_ids
                 for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
             }
-            has_cross_concern_evidence = any(
-                scoped_concern_ids != frozenset({obligation_concern_id})
-                for evidence_id in linked_evidence_ids
-                if (
-                    scoped_concern_ids
-                    := scoped_grounding_evidence_concerns.get(evidence_id)
+            requested_obligation_evidence_ids = tuple(
+                dict.fromkeys(evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value)))
+            )
+            unknown_obligation_evidence_ids = [
+                evidence_id
+                for evidence_id in requested_obligation_evidence_ids
+                if evidence_id not in linked_evidence_ids
+            ]
+            if unknown_obligation_evidence_ids:
+                protocol_errors.append(
+                    "Answer obligation uses evidence not attached to its answer units: "
+                    + ", ".join(unknown_obligation_evidence_ids[:5])
                 )
+            obligation_evidence_ids = set(requested_obligation_evidence_ids or linked_evidence_ids)
+            usable_obligation_evidence_ids = {
+                evidence_id
+                for evidence_id in obligation_evidence_ids
+                if (
+                    not (scoped_concern_ids := scoped_grounding_evidence_concerns.get(evidence_id))
+                    or scoped_concern_ids == frozenset({obligation_concern_id})
+                )
+            }
+            # A unit may make separately supported statements for several
+            # concerns. Filter foreign IDs from this obligation instead of
+            # rejecting the whole unit; at least one same-concern or global
+            # evidence source must remain.
+            obligation_has_usable_evidence = bool(usable_obligation_evidence_ids) and not (
+                unknown_obligation_evidence_ids
             )
             if (
                 requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
@@ -2925,21 +3160,25 @@ def assess_issue_automation_grounding(
                 and not linked_units_are_supported
             ):
                 resolution = "not_covered"
-            if (
-                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
-                and has_cross_concern_evidence
-            ):
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
                 resolution = "not_covered"
             if requested_resolution == "fulfilled_action" and linked_units_are_supported:
                 exact_action_evidence_ids = successful_action_evidence_by_concern.get(
                     obligation_concern_id,
                     frozenset(),
                 )
-                if not exact_action_evidence_ids or any(
-                    not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
-                        exact_action_evidence_ids
+                if (
+                    not exact_action_evidence_ids
+                    or (
+                        requested_obligation_evidence_ids
+                        and not obligation_evidence_ids.intersection(exact_action_evidence_ids)
                     )
-                    for unit_id in answer_unit_ids
+                    or any(
+                        not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
+                            exact_action_evidence_ids
+                        )
+                        for unit_id in answer_unit_ids
+                    )
                 ):
                     resolution = "not_covered"
             covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
@@ -2947,14 +3186,19 @@ def assess_issue_automation_grounding(
                 uncovered_obligations.append(
                     _string_from(obligation.get("question"))[:500]
                 )
-            clean_obligation_assessments.append(
-                {
-                    "obligationId": obligation_id,
-                    "resolution": resolution,
-                    "covered": covered,
-                    "answerUnitIds": list(answer_unit_ids),
-                }
-            )
+            clean_assessment = {
+                "obligationId": obligation_id,
+                "resolution": resolution,
+                "covered": covered,
+                "answerUnitIds": list(answer_unit_ids),
+            }
+            if requested_obligation_evidence_ids:
+                clean_assessment["evidenceIds"] = [
+                    evidence_id
+                    for evidence_id in requested_obligation_evidence_ids
+                    if evidence_id in usable_obligation_evidence_ids
+                ]
+            clean_obligation_assessments.append(clean_assessment)
         if seen_obligation_ids != set(expected_obligations):
             protocol_errors.append(
                 "Evaluator did not assess every answer obligation exactly once"

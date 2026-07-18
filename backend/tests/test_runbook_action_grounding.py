@@ -4,6 +4,7 @@ from automail.api.admin import actions as admin_actions
 from automail.db.pocketbase import issues
 from automail.support import issue_agent
 from automail.support.issue_agent import AutomationGroundingAssessment, IssueAgentDraft
+from automail.support.pending_action_claims import PENDING_ACTION_REPAIR_NOTICE
 
 
 def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypatch):
@@ -378,7 +379,7 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert reply_calls == []
 
 
-def test_channel_grounding_reloads_pending_actions_created_during_composition(monkeypatch):
+def test_channel_grounding_repairs_against_pending_actions_created_during_composition(monkeypatch):
     reply_calls, grounding_calls = _stub_channel_agent_answer(
         monkeypatch,
         verified=True,
@@ -455,17 +456,7 @@ def test_channel_grounding_reloads_pending_actions_created_during_composition(mo
         ),
     )
 
-    def assess_with_real_preflight(**kwargs):
-        grounding_calls.append(kwargs)
-        return issue_agent.assess_issue_automation_grounding(**kwargs)
-
     grounding_calls.clear()
-    monkeypatch.setattr(issues, "assess_issue_automation_grounding", assess_with_real_preflight)
-    monkeypatch.setattr(
-        issue_agent,
-        "create_agent",
-        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
-    )
 
     result = issues.create_issue_agent_answer(
         "issue1",
@@ -480,11 +471,11 @@ def test_channel_grounding_reloads_pending_actions_created_during_composition(mo
 
     assert len(issue_reads) == 2
     assert grounding_calls[0]["issue"] is fresh_issue
+    assert grounding_calls[0]["answer"] == PENDING_ACTION_REPAIR_NOTICE
     assert result is not None
-    assert result["draftBlockedReason"] == "pending_action_claim"
-    assert result["groundingGate"]["pendingActions"] == ["Open ticket"]
-    assert result["reply"] is None
-    assert reply_calls == []
+    assert result["draftBlockedReason"] == ""
+    assert result["reply"]["id"] == "reply1"
+    assert reply_calls[0]["body"] == PENDING_ACTION_REPAIR_NOTICE
 
 
 @pytest.mark.parametrize(

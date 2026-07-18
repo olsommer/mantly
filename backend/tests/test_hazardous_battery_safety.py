@@ -656,6 +656,127 @@ def test_automatic_answer_retries_missing_safety_and_forces_human_review(
     assert result.citation_ids == ()
 
 
+@pytest.mark.parametrize("language", ["en", "de", "fr", "es", "it"])
+def test_deterministic_battery_fallback_is_complete_localized_and_action_safe(
+    language: str,
+) -> None:
+    answer = issue_agent._battery_safety_failure_answer(language=language)
+
+    assert missing_lithium_battery_safety_guidance(answer) == ()
+    assert issue_agent._detected_supported_language(answer) == language
+    assert issue_agent.check_pending_action_claims(
+        answer=answer,
+        runbook_actions=[
+            {
+                "name": "open_ticket",
+                "label": "Open safety incident",
+                "status": "pending_approval",
+            }
+        ],
+    ).blocked is False
+
+
+def test_active_hazard_automation_capacity_fallback_replaces_generic_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoCapacity:
+        def acquire(self, *, blocking: bool, timeout: float) -> bool:
+            assert blocking is True
+            assert timeout == issue_agent.AUTOMATION_AGENT_SLOT_WAIT_SECONDS
+            return False
+
+    monkeypatch.setattr(issue_agent, "_AUTOMATION_AGENT_SLOTS", NoCapacity())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-1", "subject": "Leaking lithium battery"},
+        messages=_HAZARD_MESSAGES,
+        question="Prepare the safest supported response.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="We are reviewing this ticket and will keep you updated.",
+        fallback_confidence="low",
+    )
+
+    assert result.generation_mode == "deterministic_fallback"
+    assert result.answer != "We are reviewing this ticket and will keep you updated."
+    assert missing_lithium_battery_safety_guidance(result.answer) == ()
+    assert result.requires_human is True
+
+
+def test_active_hazard_knowledge_capacity_fallback_contains_safety_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoCapacity:
+        def acquire(self, *, blocking: bool) -> bool:
+            assert blocking is False
+            return False
+
+    monkeypatch.setattr(issue_agent, "_KNOWLEDGE_AGENT_SLOTS", NoCapacity())
+
+    result = issue_agent.draft_issue_agent_answer(
+        issue={"id": "issue-1", "subject": "Leaking lithium battery"},
+        messages=_HAZARD_MESSAGES,
+        question="Prepare the safest supported response.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="unused",
+        fallback_confidence="low",
+    )
+
+    assert result.generation_mode == "deterministic_fallback"
+    assert missing_lithium_battery_safety_guidance(result.answer) == ()
+    assert result.requires_human is True
+
+
+def test_active_hazard_failed_correction_uses_safe_deterministic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_issue_agent_runtime(monkeypatch)
+
+    class UnsafeAutomationAgent:
+        def invoke(
+            self,
+            _inputs: dict[str, Any],
+            *,
+            config: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer="We are reviewing this ticket and will keep you updated.",
+                    confidence="medium",
+                    requires_human=False,
+                )
+            }
+
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: UnsafeAutomationAgent(),
+    )
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-1", "subject": "Leaking lithium battery"},
+        messages=_HAZARD_MESSAGES,
+        question="Prepare the safest supported response.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="We are reviewing this ticket and will keep you updated.",
+        fallback_confidence="low",
+    )
+
+    assert result.generation_mode == "deterministic_fallback"
+    assert result.error.startswith(SAFETY_GUIDANCE_MISSING_REASON_CODE)
+    assert missing_lithium_battery_safety_guidance(result.answer) == ()
+    assert result.requires_human is True
+
+
 def test_grounding_fails_closed_before_model_when_safety_guidance_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -669,9 +790,29 @@ def test_grounding_fails_closed_before_model_when_safety_guidance_is_missing(
     monkeypatch.setattr(issue_agent, "create_agent", fail_create_agent)
 
     result = issue_agent.assess_issue_automation_grounding(
-        issue={"id": "issue-1", "subject": "Leaking lithium battery"},
+        issue={
+            "id": "issue-1",
+            "subject": "Leaking lithium battery",
+            "actionExecutions": [
+                {
+                    "type": "runbook_webhook",
+                    "status": "pending",
+                    "label": "Open safety incident",
+                    "metadata": {
+                        "source": "runbook",
+                        "approvalRequired": True,
+                    },
+                    "result": {
+                        "proposedAction": {
+                            "name": "open_ticket",
+                            "label": "Open safety incident",
+                        }
+                    },
+                }
+            ],
+        },
         messages=_HAZARD_MESSAGES,
-        answer="Please isolate the parcel and wait for our team.",
+        answer="We are reviewing this ticket. Please isolate the parcel and wait for our team.",
         articles=[],
         tenant_id="tenant-1",
         project_id="project-1",

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -22283,6 +22284,163 @@ def test_channel_auto_prepare_advances_and_finishes_source_message_progress(monk
         "composer",
         "grounding",
         "finalizing",
+        "completed",
+    ]
+    assert all(stage["status"] == "completed" for stage in progress["stages"])
+
+
+def test_email_channel_package_exposes_durable_progress_through_issue_api(monkeypatch):
+    """A slow email composer remains observable through the normal issue read."""
+    issue_record = {
+        "id": "issue1",
+        "project": "project1",
+        "tenant": "tenant1",
+        "source_email_id": "email1",
+        "channel": "email",
+        "source": "channel:email-main",
+        "status": "open",
+        "priority": "normal",
+        "subject": "Where is my order?",
+        "from_address": "customer@example.com",
+        "contact_email": "customer@example.com",
+        "contact_name": "Customer",
+        "message_count": 1,
+        "latest_message_at": "2026-07-18T10:00:00+00:00",
+        "metadata": {},
+    }
+    message_record = {
+        "id": "message1",
+        "issue": "issue1",
+        "source_message_id": "email1:0:email",
+        "direction": "customer",
+        "sender": "customer@example.com",
+        "body": "Where is my order?",
+        "message_kind": "email",
+        "metadata": {},
+        "occurred_at": "2026-07-18T10:00:00+00:00",
+    }
+    stored_runs: dict[str, dict] = {}
+    store_lock = threading.Lock()
+    composer_started = threading.Event()
+    release_composer = threading.Event()
+    worker_errors: list[BaseException] = []
+
+    def fake_first(collection: str, *_args, **_kwargs):
+        if collection == "support_issues":
+            return dict(issue_record)
+        if collection == "support_ai_runs":
+            with store_lock:
+                return dict(next(iter(stored_runs.values()))) if stored_runs else None
+        return None
+
+    def fake_list_all(collection: str, *_args, **_kwargs):
+        if collection == "support_ai_runs":
+            with store_lock:
+                return [dict(run) for run in stored_runs.values()]
+        if collection == "support_messages":
+            return [dict(message_record)]
+        if collection == "support_issues":
+            return [dict(issue_record)]
+        return []
+
+    def fake_post(path: str, data: dict):
+        if path == "/api/collections/support_ai_runs/records":
+            with store_lock:
+                stored_runs[data["id"]] = dict(data)
+            return dict(data)
+        return dict(data)
+
+    def fake_patch(path: str, data: dict):
+        prefix = "/api/collections/support_ai_runs/records/"
+        if path.startswith(prefix):
+            run_id = path.removeprefix(prefix)
+            with store_lock:
+                stored_runs[run_id] = {**stored_runs[run_id], **data}
+                return dict(stored_runs[run_id])
+        return dict(data)
+
+    def slow_package(*, processing_run, **_kwargs):
+        assert processing_run is not None
+        issues._advance_processing_run(
+            processing_run,
+            stage="composer",
+            label="Composing one customer answer",
+        )
+        composer_started.set()
+        assert release_composer.wait(timeout=3)
+        issues._finish_processing_run(
+            processing_run,
+            detail="Ticket package ready for review",
+        )
+        return {"reply": {"id": "reply1"}, "run": {"id": "answer-run1"}}
+
+    monkeypatch.setattr(issues, "generate_id", lambda: "progress-run1")
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "_list_all", fake_list_all)
+    monkeypatch.setattr(issues, "_post", fake_post)
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(issues, "_channel_auto_prepare_agent_reply", slow_package)
+    monkeypatch.setattr(issues, "_knowledge_suggestions_for_issue", lambda *_args, **_kwargs: [])
+
+    def run_package() -> None:
+        try:
+            issues._ensure_email_channel_autopilot_package(
+                issue=issue_record,
+                channel={
+                    "id": "channel1",
+                    "channelKey": "email-main",
+                    "type": "email",
+                    "config": {"autoPrepareAgentReply": True},
+                },
+                tenant_id="tenant1",
+                project_id="project1",
+                source="channel:email-main",
+                message_id="email1",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted in the parent thread
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=run_package)
+    worker.start()
+    assert composer_started.wait(timeout=3)
+
+    active_issue = issues.get_issue(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        actor_email="agent@example.com",
+        actor_role="admin",
+    )
+    assert active_issue is not None
+    active_run = next(run for run in active_issue["aiRuns"] if run["id"] == "progress-run1")
+    assert active_run["status"] == "processing"
+    assert active_run["source"] == "agent_progress"
+    assert active_run["metadata"]["processingClaim"]["token"]
+    assert active_run["metadata"]["processingProgress"]["stage"] == "composer"
+    assert active_run["metadata"]["processingProgress"]["status"] == "processing"
+
+    release_composer.set()
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert worker_errors == []
+
+    completed_issue = issues.get_issue(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        actor_email="agent@example.com",
+        actor_role="admin",
+    )
+    assert completed_issue is not None
+    completed_run = next(run for run in completed_issue["aiRuns"] if run["id"] == "progress-run1")
+    progress = completed_run["metadata"]["processingProgress"]
+    assert completed_run["status"] == "success"
+    assert progress["status"] == "completed"
+    assert progress["stage"] == "completed"
+    assert progress["detail"] == "Ticket package ready for review"
+    assert [stage["key"] for stage in progress["stages"]] == [
+        "automation",
+        "composer",
         "completed",
     ]
     assert all(stage["status"] == "completed" for stage in progress["stages"])

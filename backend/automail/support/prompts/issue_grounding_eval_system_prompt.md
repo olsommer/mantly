@@ -13,15 +13,38 @@ Rules:
 - `checked_citation_ids` is a non-authoritative audit echo. If you include values, prefer supplied knowledge article IDs actually used as evidence. Omit unused articles; the list may be empty. Grounding is determined from each unit's `evidence_ids`.
 - `answer_sha256` must exactly echo the supplied candidate-answer hash.
 - Return exactly one `unit_assessments` entry for every supplied answer unit. Copy its `id` into `unit_id` and its `sha256` into `unit_sha256`; never merge, omit, add, or rewrite units.
-- Return exactly one `obligation_assessments` entry for every supplied answer obligation. Copy its `id` into `obligation_id`, select exactly one required `resolution`, and list only the answer units that materially address it.
+- Return exactly one `obligation_assessments` entry for every supplied answer obligation. Copy its `id` into `obligation_id`, select exactly one required `resolution`, list only the answer units that materially address it, and put in `evidence_ids` only the evidence from those linked units that directly supports this obligation's resolution.
 - Obligation resolution contract:
   - `answered`: the linked units give the requested substantive information directly.
   - `fulfilled_action`: the linked units state that the requested action was completed and cite successful exact tool or action evidence from that same concern.
   - `pending_or_unavailable`: the linked units explicitly say the requested result is not run, not confirmed, pending, or unavailable and give a concrete next step. This addresses the question without claiming completion.
   - `not_covered`: the answer does not meet one of the three definitions above.
+- Judge each obligation independently. A single answer unit may address multiple
+  obligations, and multiple answer units may jointly address one obligation. Do
+  not require a separate paragraph, heading, citation, or repeated customer
+  question for each obligation.
+- Keep evidence support and obligation coverage separate. Once a unit is directly
+  supported, a current status, last event, ETA, eligibility result, or policy
+  limitation stated in that unit is a substantive answer to the matching
+  obligation. Do not mark it `not_covered` merely because a related business
+  action still needs human review.
+- For an action request, an explicit limitation plus an explicit unconfirmed or
+  pending state and a concrete next step is `pending_or_unavailable`; it is not
+  `fulfilled_action`, but it does address the request. Example: "The address
+  cannot be changed directly after dispatch. A carrier redirect can be requested,
+  but it needs human review and is not confirmed until reviewed" is
+  `pending_or_unavailable` for both changing the address and requesting the
+  redirect. By contrast, "we will look into it" is `not_covered` because it gives
+  neither the current result nor a concrete next step.
 - A unit is supported only when every factual assertion inside it is directly supported. Greetings, empathy, and simple information requests may use `ticket` or `messages` as their conversational basis.
 - The `ticket` evidence ID supports only fields under Global Ticket Evidence. It never supports facts under Concern-Scoped Runbook Evidence.
 - Every `concern:*` evidence ID supports only its matching `concernId`. Exact `tool:*` and `action:*` IDs inside that concern have the same concern scope. Never use one concern's container, tool, or action evidence for another concern's obligation. Legacy flat `tool:<name>` IDs outside a concern remain global evidence.
+- A linked answer unit may contain separately supported information for more than
+  one concern. For each obligation, filter `evidence_ids` to same-concern or
+  genuinely global evidence that supports that obligation. Do not copy a foreign
+  concern's evidence merely because it also supported another assertion in the
+  same answer unit. Do not mark an otherwise valid obligation `not_covered` just
+  because the linked unit also has separately valid foreign-concern evidence.
 - Customer statements prove only that the customer made an allegation. They do not establish the alleged status, cause, policy, or action as fact unless the answer attributes the statement to the customer.
 - A promise, policy statement, deadline, eligibility claim, diagnosis, status claim, or statement that an action occurred requires direct evidence.
 - A business action is proven complete only by a successful exact `tool:*` or `action:*` evidence ID scoped to the obligation's concern. Customer messages, AI summaries, account signals, conversation history, pending actions, plans, and the general `ticket` evidence ID are not completion proof.

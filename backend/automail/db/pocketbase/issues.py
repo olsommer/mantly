@@ -33,6 +33,7 @@ from automail.support.issue_agent import (
     grounding_context_snapshots,
     grounding_evidence_snapshot,
     grounding_text_sha256,
+    repair_issue_automation_answer_action_state,
 )
 from automail.support.issue_fields import draft_issue_field_values
 from automail.support.issue_triage import IssueTriageSuggestion, draft_issue_triage
@@ -91,6 +92,10 @@ DELIVERY_CLAIM_LEASE_SECONDS = 900
 # Router + up to three concerns may each consume all configured LLM retries.
 # One hour stays above that bounded worst case without requiring a heartbeat.
 DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS = 3_600
+DURABLE_PROCESSING_RUN_KINDS = frozenset({
+    "direct_channel_runbooks",
+    "email_channel_ticket_package",
+})
 AUTOMATIC_REPLY_TERMINAL_ERROR = "Automatic reply requires an active unmerged ticket"
 ACTION_EXECUTION_STATUSES = {"pending", "running", "success", "failed", "skipped"}
 _ISSUE_ID_FILTER_CHUNK_SIZE = 50
@@ -7008,7 +7013,7 @@ def expire_stale_direct_channel_processing_runs_for_scope(
     lease_seconds: int = DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS,
     source: str = "scheduler",
 ) -> dict[str, Any]:
-    """Terminalize abandoned direct-channel work without replaying its tools."""
+    """Terminalize abandoned durable ticket processing without replaying it."""
     clean_limit = max(1, min(int(limit or 200), 500))
     now = _now_utc()
     now_iso = now.isoformat()
@@ -7030,7 +7035,8 @@ def expire_stale_direct_channel_processing_runs_for_scope(
     items: list[dict[str, Any]] = []
     for candidate in records:
         metadata = _parse(candidate.get("metadata"), dict)
-        if _string_from(metadata.get("kind")) != "direct_channel_runbooks":
+        processing_kind = _string_from(metadata.get("kind"))
+        if processing_kind not in DURABLE_PROCESSING_RUN_KINDS:
             continue
         if inspected >= clean_limit:
             break
@@ -7058,7 +7064,7 @@ def expire_stale_direct_channel_processing_runs_for_scope(
             if (
                 not latest
                 or _string_from(latest.get("status")).lower() != "processing"
-                or _string_from(latest_metadata.get("kind")) != "direct_channel_runbooks"
+                or _string_from(latest_metadata.get("kind")) != processing_kind
                 or not _direct_processing_is_stale(
                     latest,
                     now=now,
@@ -7081,19 +7087,28 @@ def expire_stale_direct_channel_processing_runs_for_scope(
                     **claim,
                     "expiredAt": now_iso,
                 }
-            expired_metadata["processingExpiry"] = {
+            processing_expiry = {
                 "version": 1,
                 "expiredAt": now_iso,
                 "leaseSeconds": max(1, int(lease_seconds)),
                 "source": _string_from(source) or "scheduler",
                 "replayed": False,
             }
+            email_package = processing_kind == "email_channel_ticket_package"
+            if email_package:
+                processing_expiry["kind"] = processing_kind
+            expired_metadata["processingExpiry"] = processing_expiry
+            expired_summary = (
+                "Email ticket processing expired; manual review required"
+                if email_package
+                else "Processing lease expired; manual review required"
+            )
             _patch(
                 f"/api/collections/support_ai_runs/records/{run_id}",
                 {
                     "status": "failed",
                     "requires_human": True,
-                    "summary": "Processing lease expired; manual review required",
+                    "summary": expired_summary,
                     "metadata": expired_metadata,
                     "completed_at": now_iso,
                 },
@@ -7104,34 +7119,58 @@ def expire_stale_direct_channel_processing_runs_for_scope(
                     f"/api/collections/support_issues/records/{issue_id}",
                     {"requires_human": True},
                 )
+                event_type = (
+                    "email_channel_processing_expired"
+                    if email_package
+                    else "direct_processing_expired"
+                )
+                event_metadata = {
+                    "aiRunId": run_id,
+                    "leaseSeconds": max(1, int(lease_seconds)),
+                    "source": _string_from(source) or "scheduler",
+                    "replayed": False,
+                }
+                if email_package:
+                    event_metadata["processingKind"] = processing_kind
                 _record_issue_event(
                     issue_id=issue_id,
-                    event_type="direct_processing_expired",
+                    event_type=event_type,
                     tenant_id=run_tenant_id,
                     project_id=run_project_id,
                     actor_email="processing-sweeper",
-                    title="Automatic processing expired",
-                    body="No tools were replayed. Manual review is required.",
-                    metadata={
-                        "aiRunId": run_id,
-                        "leaseSeconds": max(1, int(lease_seconds)),
-                        "source": _string_from(source) or "scheduler",
-                        "replayed": False,
-                    },
+                    title=(
+                        "Email ticket processing expired"
+                        if email_package
+                        else "Automatic processing expired"
+                    ),
+                    body=(
+                        "Ticket package processing stopped. No processing was replayed. "
+                        "Manual review is required."
+                        if email_package
+                        else "No tools were replayed. Manual review is required."
+                    ),
+                    metadata=event_metadata,
                     record_id=_stable_record_id(
                         "support_issue_event",
                         run_project_id,
                         issue_id,
                         run_id,
-                        "direct_processing_expired",
+                        event_type,
                     ),
                 )
             expired += 1
-            items.append({"runId": run_id, "issueId": issue_id, "status": "failed"})
+            item = {
+                "runId": run_id,
+                "issueId": issue_id,
+                "status": "failed",
+            }
+            if email_package:
+                item["kind"] = processing_kind
+            items.append(item)
         except Exception as exc:
             failed += 1
             items.append({"runId": run_id, "issueId": "", "status": "failed", "error": str(exc)})
-            logger.warning("Could not expire stale direct-channel run %s", run_id, exc_info=True)
+            logger.warning("Could not expire stale processing run %s", run_id, exc_info=True)
     return {
         "inspected": inspected,
         "expired": expired,
@@ -11720,6 +11759,14 @@ def _create_issue_agent_answer(
         and _string_from(clean_automation_context.get("source")) == "channel_autopilot"
     )
     if automatic_draft_requires_grounding:
+        # The refreshed issue is authoritative for pending runbook/triage
+        # actions. Repair only the exact unsafe sentence units before hashing,
+        # grounding, persisting, or exposing the candidate draft.
+        answer = repair_issue_automation_answer_action_state(
+            issue=issue,
+            messages=messages,
+            answer=answer,
+        )
         _require_processing_claim(processing_run)
         _advance_processing_run(
             processing_run,
@@ -13652,6 +13699,35 @@ def _ensure_email_channel_autopilot_package(
             detail="Ticket identifier unavailable",
         )
         return None
+    processing_run = _processing_run_from_issue(issue)
+    if processing_run is None:
+        # Email-channel runbooks finish before the Inbox ticket is persisted, so
+        # unlike the direct-channel adapters there is no source run to carry the
+        # slower triage/composer/grounding stages. Persist a dedicated audit run
+        # before starting that work so concurrent Inbox reads can render live
+        # progress. Keep it out of the ``channel:*`` runbook namespace: an empty
+        # progress-only run must never shadow the completed runbook result used
+        # by the response composer.
+        processing_run = _start_processing_run(
+            issue_id=issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_key=_key_from(f"email-channel-progress:{source}:{message_id}:{issue_id}"),
+            source="agent_progress",
+            kind="email_channel_ticket_package",
+            stage="automation",
+            label="Preparing ticket package",
+            metadata={
+                "channel": source,
+                "messageId": message_id,
+                "sourceMessageId": message_id,
+                "processingClaim": {
+                    "version": 1,
+                    "token": secrets.token_hex(16),
+                    "claimedAt": _now_iso(),
+                },
+            },
+        )
     result = _channel_auto_prepare_agent_reply(
         channel=channel,
         issue_id=issue_id,
@@ -13662,7 +13738,7 @@ def _ensure_email_channel_autopilot_package(
         on_update=on_update,
         automation_result=automation_result,
         context=context,
-        processing_run=_processing_run_from_issue(issue),
+        processing_run=processing_run,
     )
     if not isinstance(result, dict):
         return None

@@ -1338,6 +1338,55 @@ def _assess_with_grounding_output(
     return result, prompts[0]
 
 
+def _assess_with_grounding_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    issue: dict[str, Any],
+    answer: str,
+    outputs: list[AutomationGroundingOutput],
+) -> tuple[issue_agent.AutomationGroundingAssessment, list[str]]:
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(
+        usage_module,
+        "record_usage_from_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeGroundingAgent:
+        def invoke(
+            self,
+            inputs: dict[str, Any],
+            *,
+            config: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_grounding"
+            prompts.append(inputs["messages"][0]["content"])
+            return {"structured_response": outputs[len(prompts) - 1]}
+
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: FakeGroundingAgent(),
+    )
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+    return result, prompts
+
+
 def test_automation_draft_requires_independent_grounding_for_auto_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2037,6 +2086,90 @@ def _two_concern_shared_tool_grounding_issue() -> dict[str, Any]:
     return issue
 
 
+def test_grounding_filters_mixed_unit_evidence_per_obligation_concern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The first concern status is inactive.",
+        resolutions=[("first:status", "answered", ["u001"])],
+        unit_evidence_ids=[
+            "tool:first-concern:shared-status",
+            "tool:second-concern:shared-status",
+        ],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+@pytest.mark.parametrize(
+    ("obligation_evidence_ids", "expected_verified"),
+    [
+        (["tool:second-concern:shared-status"], False),
+        (
+            [
+                "tool:first-concern:shared-status",
+                "tool:second-concern:shared-status",
+            ],
+            True,
+        ),
+    ],
+)
+def test_grounding_filters_explicit_foreign_obligation_evidence_from_mixed_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    obligation_evidence_ids: list[str],
+    expected_verified: bool,
+) -> None:
+    issue = _two_concern_shared_tool_grounding_issue()
+    answer = "The first concern status is inactive."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[
+                    "tool:first-concern:shared-status",
+                    "tool:second-concern:shared-status",
+                ],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id="first:status",
+                resolution="answered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=obligation_evidence_ids,
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output],
+    )
+
+    assert len(prompts) == 1
+    assert result.verified is expected_verified
+    if expected_verified:
+        assert result.obligation_assessments[0]["resolution"] == "answered"
+        assert result.obligation_assessments[0]["evidenceIds"] == [
+            "tool:first-concern:shared-status"
+        ]
+    else:
+        assert result.reason_code == "incomplete_answer"
+        assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
 def _successful_grounding_action(
     execution_id: str,
     concern_id: str,
@@ -2392,6 +2525,219 @@ def test_grounding_retries_unknown_obligation_protocol_once_with_identical_input
     else:
         assert result.status == "error"
         assert "unknown answer-obligation ID" in result.error
+
+
+def test_grounding_reassesses_supported_multi_concern_status_and_safe_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shipment_concern_id = "concern-shipment"
+    address_concern_id = "concern-address"
+    shipment_evidence_id = f"tool:{shipment_concern_id}:lookup-shipment"
+    address_evidence_id = f"tool:{address_concern_id}:lookup-order-shipment"
+    obligations = [
+        ("shipment:status", "Give the current shipment status."),
+        ("shipment:event", "Give the last carrier event."),
+        ("shipment:eta", "Give the estimated delivery date."),
+    ]
+    issue = _issue_with_grounding_obligations(
+        concern_id=shipment_concern_id,
+        questions=obligations,
+        tool_evidence=[
+            {
+                "name": "lookup-shipment",
+                "status": "success",
+                "responseFacts": {
+                    "orderId": "ZF-20991",
+                    "trackingNumber": "UPS1Z999AA10123456784",
+                    "status": "In transit",
+                    "lastEvent": "Departed from facility",
+                    "lastLocation": "UPS Koeln Hub",
+                    "lastEventTime": "07:15",
+                    "estimatedDelivery": "next business day",
+                },
+            }
+        ],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": address_concern_id,
+            "matched": True,
+            "intentName": "address-change",
+            "answerObligations": [
+                {
+                    "obligationId": "address:change",
+                    "question": "Change the address today and confirm it.",
+                },
+                {
+                    "obligationId": "address:redirect",
+                    "question": "Request a carrier redirect.",
+                },
+            ],
+            "outcome": {
+                "toolEvidence": [
+                    {
+                        "name": "lookup-order-shipment",
+                        "status": "success",
+                        "responseFacts": {
+                            "orderId": "ZF-20991",
+                            "trackingNumber": "UPS1Z999AA10123456784",
+                            "status": "In transit",
+                            "directAddressChangeAllowed": False,
+                            "carrierRedirectAvailable": True,
+                            "carrier": "UPS",
+                            "requiresHumanReview": True,
+                            "requestedAddress": "24 New Street, Zurich 8001",
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    answer = (
+        "Hello Noah,\n\n"
+        "ZenFulfillment is handling your order ZF-20991. "
+        "Your shipment, with tracking number UPS1Z999AA10123456784, is currently In transit. "
+        "The last carrier event recorded was 'Departed from facility' from UPS Koeln Hub today at 07:15. "
+        "We estimate delivery for the next business day.\n\n"
+        "Regarding your request to change the delivery address for ZF-20991 to 24 New Street, "
+        "Zurich 8001: Since your shipment is already in transit, ZenFulfillment cannot directly "
+        "change the address. We can submit a request for a carrier redirect to UPS, but this action "
+        "requires human review and is subject to carrier availability and approval. We cannot confirm "
+        "an address change until it is verified by a human operator or a tool confirms the change.\n\n"
+        "We will keep you updated as soon as we have more information regarding the redirect request."
+    )
+    units = {unit["id"]: unit for unit in issue_agent._grounding_answer_units(answer)}
+    assert list(units) == [f"u{index:03d}" for index in range(1, 10)]
+    unit_evidence = {
+        "u001": ["ticket"],
+        "u002": [shipment_evidence_id, address_evidence_id],
+        "u003": [shipment_evidence_id, address_evidence_id],
+        "u004": [shipment_evidence_id, address_evidence_id],
+        "u005": [shipment_evidence_id, address_evidence_id],
+        "u006": [shipment_evidence_id, address_evidence_id],
+        "u007": [shipment_evidence_id, address_evidence_id],
+        "u008": [address_evidence_id],
+        "u009": [address_evidence_id],
+    }
+    obligation_units = {
+        "shipment:status": ["u003"],
+        "shipment:event": ["u004"],
+        "shipment:eta": ["u005"],
+        "address:change": ["u006", "u007", "u008"],
+        "address:redirect": ["u007", "u009"],
+    }
+    obligation_evidence = {
+        "shipment:status": [shipment_evidence_id],
+        "shipment:event": [shipment_evidence_id],
+        "shipment:eta": [shipment_evidence_id],
+        "address:change": [address_evidence_id],
+        "address:redirect": [address_evidence_id],
+    }
+
+    def output(*, corrected: bool) -> AutomationGroundingOutput:
+        return AutomationGroundingOutput(
+            verdict="grounded" if corrected else "not_grounded",
+            answer_sha256=issue_agent.grounding_text_sha256(answer),
+            unit_assessments=[
+                AutomationGroundingUnitAssessment(
+                    unit_id=unit_id,
+                    unit_sha256=unit["sha256"],
+                    supported=True,
+                    evidence_ids=unit_evidence[unit_id],
+                )
+                for unit_id, unit in units.items()
+            ],
+            obligation_assessments=[
+                AutomationGroundingObligationAssessment(
+                    obligation_id=obligation_id,
+                    resolution=(
+                        ("pending_or_unavailable" if obligation_id.startswith("address:") else "answered")
+                        if corrected
+                        else "not_covered"
+                    ),
+                    answer_unit_ids=obligation_units[obligation_id],
+                    evidence_ids=obligation_evidence[obligation_id],
+                )
+                for obligation_id in obligation_units
+            ],
+        )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output(corrected=False), output(corrected=True)],
+    )
+
+    assert len(prompts) == 2
+    assert prompts[0] != prompts[1]
+    assert "Required Second-Pass Obligation Adjudication" in prompts[1]
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert [assessment["resolution"] for assessment in result.obligation_assessments] == [
+        "answered",
+        "answered",
+        "answered",
+        "pending_or_unavailable",
+        "pending_or_unavailable",
+    ]
+    assert all(
+        assessment["evidenceIds"] == obligation_evidence[assessment["obligationId"]]
+        for assessment in result.obligation_assessments
+    )
+
+
+def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="shipment",
+        questions=[
+            ("shipment:status", "What is the current shipment status?"),
+            ("shipment:eta", "When will it arrive?"),
+        ],
+    )
+    answer = "Thanks for your message. We will look into it and get back to you."
+    units = issue_agent._grounding_answer_units(answer)
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=["ticket"],
+            )
+            for unit in units
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"] for unit in units],
+                evidence_ids=["ticket"],
+            )
+            for obligation_id in ("shipment:status", "shipment:eta")
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output, output],
+    )
+
+    assert len(prompts) == 2
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (
+        "What is the current shipment status?",
+        "When will it arrive?",
+    )
 
 
 @pytest.mark.parametrize("failure_kind", ["unsupported", "unknown_evidence"])

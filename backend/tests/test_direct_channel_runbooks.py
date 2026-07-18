@@ -637,6 +637,98 @@ def test_expiry_sweeper_terminalizes_without_replay_or_key_change(monkeypatch):
     assert stale_run["metadata"]["processingClaim"]["expiredAt"]
     assert ("/api/collections/support_issues/records/issue1", {"requires_human": True}) in patches
     assert len(events) == 1
+    assert events[0]["event_type"] == "direct_processing_expired"
+    assert events[0]["title"] == "Automatic processing expired"
+    assert events[0]["body"] == "No tools were replayed. Manual review is required."
+    assert events[0]["record_id"]
+
+
+def test_expiry_sweeper_terminalizes_stale_email_ticket_package(monkeypatch):
+    stale_run = {
+        "id": "email-progress-stale",
+        "issue": "issue-email",
+        "run_key": "email-package-key",
+        "source": "agent_progress",
+        "status": "processing",
+        "requires_human": False,
+        "metadata": {
+            "kind": "email_channel_ticket_package",
+            "processingClaim": {"version": 1, "token": "email-owner-1"},
+            "processingProgress": {
+                "status": "processing",
+                "stage": "composer",
+                "updatedAt": "2026-07-17T00:00:00+00:00",
+                "stages": [
+                    {
+                        "key": "composer",
+                        "label": "Composing one customer answer",
+                        "status": "processing",
+                    }
+                ],
+            },
+        },
+        "started_at": "2026-07-17T00:00:00+00:00",
+        "tenant": "tenant1",
+        "project": "project1",
+    }
+    patches: list[tuple[str, dict]] = []
+    events: list[dict] = []
+
+    def fake_patch(path, data):
+        patches.append((path, data))
+        if path.endswith("/email-progress-stale"):
+            stale_run.update(data)
+        return data
+
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: [stale_run])
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda collection, *_args, **_kwargs: stale_run
+        if collection == "support_ai_runs"
+        else None,
+    )
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(issues, "_record_issue_event", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(
+        issues,
+        "_channel_auto_prepare_agent_reply",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("expiry must not replay email ticket processing")
+        ),
+    )
+
+    result = issues.expire_stale_direct_channel_processing_runs_for_scope(
+        tenant_id="tenant1",
+        project_id="project1",
+        lease_seconds=1,
+    )
+
+    assert result["inspected"] == 1
+    assert result["expired"] == 1
+    assert result["items"] == [
+        {
+            "runId": "email-progress-stale",
+            "issueId": "issue-email",
+            "status": "failed",
+            "kind": "email_channel_ticket_package",
+        }
+    ]
+    assert stale_run["status"] == "failed"
+    assert stale_run["requires_human"] is True
+    assert stale_run["summary"] == "Email ticket processing expired; manual review required"
+    expiry = stale_run["metadata"]["processingExpiry"]
+    assert expiry["kind"] == "email_channel_ticket_package"
+    assert expiry["replayed"] is False
+    assert stale_run["metadata"]["processingClaim"]["expiredAt"]
+    assert stale_run["metadata"]["processingProgress"]["status"] == "failed"
+    assert issues._processing_claim_is_active(stale_run) is False
+    assert ("/api/collections/support_issues/records/issue-email", {"requires_human": True}) in patches
+    assert len(events) == 1
+    assert events[0]["event_type"] == "email_channel_processing_expired"
+    assert events[0]["title"] == "Email ticket processing expired"
+    assert events[0]["metadata"]["processingKind"] == "email_channel_ticket_package"
+    assert events[0]["metadata"]["replayed"] is False
     assert events[0]["record_id"]
 
 

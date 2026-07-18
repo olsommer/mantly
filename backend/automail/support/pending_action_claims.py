@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 PENDING_ACTION_CLAIM_REASON_CODE = "pending_action_claim"
+PENDING_ACTION_REPAIR_NOTICE = (
+    "Any requested action that requires human review is pending and is not "
+    "confirmed as started or completed."
+)
 
 _PROGRESSIVE_ACTIONS = (
     r"initiating",
@@ -852,3 +856,69 @@ def check_pending_action_claims(
         pending_actions=pending_actions,
         claims=tuple(claims[:20]),
     )
+
+
+def repair_pending_action_claims(
+    *,
+    answer: str,
+    runbook_actions: Iterable[Mapping[str, Any]],
+    tool_evidence: Iterable[Mapping[str, Any]] = (),
+    repair_notice: str = PENDING_ACTION_REPAIR_NOTICE,
+) -> str:
+    """Remove only unsafe answer units and state the remaining action status.
+
+    The existing guard remains authoritative: normal answers are returned byte-for-byte,
+    while a blocked answer loses only the exact sentence-like units that the guard marks
+    unsafe. The neutral replacement is intentionally explicit about both pending and
+    unconfirmed state. A final guard pass falls back to that notice alone if joining the
+    preserved units ever creates another unsafe reading.
+    """
+
+    action_records = tuple(runbook_actions)
+    evidence_records = tuple(tool_evidence)
+    initial = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=action_records,
+        tool_evidence=evidence_records,
+    )
+    if not initial.blocked:
+        return answer
+
+    tracking_identifiers = (
+        ()
+        if _has_pending_tracking_read(action_records)
+        else _successful_readonly_tracking_identifiers(evidence_records)
+    )
+    unsafe_spans = [
+        match.span()
+        for match in _ANSWER_UNIT_PATTERN.finditer(answer)
+        if (unit := match.group(0).strip())
+        and _has_unsafe_claim(unit, tracking_identifiers=tracking_identifiers)
+    ]
+
+    cursor = 0
+    preserved_parts: list[str] = []
+    for start, end in unsafe_spans:
+        preserved_parts.append(answer[cursor:start])
+        cursor = end
+    preserved_parts.append(answer[cursor:])
+    preserved = "".join(preserved_parts).strip()
+    preserved = re.sub(r"[ \t]+\n", "\n", preserved)
+    preserved = re.sub(r"\n[ \t]+\n", "\n\n", preserved)
+    preserved = re.sub(r"\n{3,}", "\n\n", preserved)
+    notice = repair_notice.strip() or PENDING_ACTION_REPAIR_NOTICE
+    repaired = f"{preserved}\n\n{notice}" if preserved else notice
+
+    final = check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=action_records,
+        tool_evidence=evidence_records,
+    )
+    if not final.blocked:
+        return repaired
+    fallback = check_pending_action_claims(
+        answer=notice,
+        runbook_actions=action_records,
+        tool_evidence=evidence_records,
+    )
+    return PENDING_ACTION_REPAIR_NOTICE if fallback.blocked else notice

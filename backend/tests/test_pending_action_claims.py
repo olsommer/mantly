@@ -2,7 +2,9 @@ import pytest
 
 from automail.support.pending_action_claims import (
     PENDING_ACTION_CLAIM_REASON_CODE,
+    PENDING_ACTION_REPAIR_NOTICE,
     check_pending_action_claims,
+    repair_pending_action_claims,
 )
 
 
@@ -514,3 +516,95 @@ def test_pending_action_guard_allows_multilingual_negative_or_conditional_claims
 
     assert result.blocked is False
     assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We will provide you with updates once the investigation is underway.",
+        "We are initiating a warehouse verification.",
+        (
+            "Your request for a refund will be reviewed once the warehouse "
+            "verification is complete."
+        ),
+        "We are escalating this immediately to our warehouse team.",
+        "A human agent will follow up to confirm authorization.",
+    ],
+)
+def test_pending_action_repair_replaces_live_residual_claims_with_neutral_state(
+    answer: str,
+) -> None:
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == PENDING_ACTION_REPAIR_NOTICE
+    assert answer not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_repair_preserves_safe_units_and_removes_only_unsafe_units() -> None:
+    safe_status = (
+        "Order ZF-10482 remains in transit with an estimated delivery on the next "
+        "business day."
+    )
+    unsafe_action = "We are initiating a warehouse verification."
+    safe_evidence_request = "Please retain the outer packaging and take clear photos."
+    answer = (
+        f"{safe_status}\n\n"
+        f"{unsafe_action}\n\n"
+        f"{safe_evidence_request}"
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == (
+        f"{safe_status}\n\n"
+        f"{safe_evidence_request}\n\n"
+        f"{PENDING_ACTION_REPAIR_NOTICE}"
+    )
+    assert unsafe_action not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_repair_preserves_normal_answer_byte_for_byte() -> None:
+    answer = (
+        "  The request is pending human review.\n\n"
+        "We can open the investigation after approval.  "
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == answer
+
+
+def test_pending_action_repair_accepts_a_localized_safe_notice() -> None:
+    notice = (
+        "Jede angefragte Aktion, die eine menschliche Prüfung erfordert, ist "
+        "ausstehend und weder als begonnen noch als abgeschlossen bestätigt."
+    )
+
+    repaired = repair_pending_action_claims(
+        answer="Wir haben den Fall eskaliert.",
+        runbook_actions=_actions(),
+        repair_notice=notice,
+    )
+
+    assert repaired == notice
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False

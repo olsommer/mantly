@@ -946,6 +946,290 @@ def test_latest_customer_language_does_not_use_identity_metadata() -> None:
     assert issue_agent._latest_customer_language(messages) == "en"
 
 
+def _pending_action_obligation_issue(
+    *,
+    questions: list[str],
+    pending: bool = True,
+) -> dict[str, Any]:
+    concern_id = "concern-b2b-urgent"
+    return {
+        "id": "issue-b2b-urgent",
+        "subject": "P1 B2B SLA incident",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": "message-b2b-urgent"},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": concern_id,
+                            "matched": True,
+                            "intentName": "b2b-sla-urgent",
+                            "answerObligations": [
+                                {
+                                    "obligationId": f"{concern_id}:obligation-{index}",
+                                    "question": question,
+                                }
+                                for index, question in enumerate(questions, start=1)
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": (
+            [
+                {
+                    "type": "runbook_webhook",
+                    "status": "pending",
+                    "label": "Open P1 incident ticket",
+                    "metadata": {
+                        "source": "runbook",
+                        "approvalRequired": True,
+                        "sourceMessageId": "message-b2b-urgent",
+                        "concernId": concern_id,
+                        "runbook": "b2b-sla-urgent",
+                    },
+                    "result": {
+                        "proposedAction": {
+                            "name": "open_ticket",
+                            "label": "Open P1 incident ticket",
+                        }
+                    },
+                }
+            ]
+            if pending
+            else []
+        ),
+    }
+
+
+_EXECUTIVE_ESCALATION_PENDING_NOTICE = (
+    "Executive escalation is not confirmed. A related next step for your request "
+    "remains pending human review."
+)
+
+
+def test_action_state_repair_answers_only_omitted_e09_obligation() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Confirm executive escalation",
+            "Guarantee inventory and dispatch",
+            "Confirm SLA compensation",
+            "State the exact data you need",
+        ]
+    )
+    answer = (
+        "We are unable to guarantee inventory and dispatch or confirm SLA "
+        "compensation at this time.\n\n"
+        "Please provide the affected orders, quantities, campaign deadline, and "
+        "operational impact.\n\n"
+        "Any requested action that requires human review is pending and is not "
+        "confirmed as started or completed."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Confirm executive escalation, guarantee inventory and dispatch, "
+                    "confirm SLA compensation, and state the exact data you need."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer + "\n\n" + _EXECUTIVE_ESCALATION_PENDING_NOTICE
+    assert "Inventory and dispatch is not confirmed" not in repaired
+    assert "SLA compensation is not confirmed" not in repaired
+
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_action_state_repair_is_noop_when_subject_is_already_answered() -> None:
+    answer = _EXECUTIVE_ESCALATION_PENDING_NOTICE
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm executive escalation"]
+        ),
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+def test_action_state_repair_is_noop_without_pending_human_action() -> None:
+    answer = "We have received your request."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm executive escalation"],
+            pending=False,
+        ),
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+def test_action_state_repair_ignores_unscoped_pending_triage() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation"]
+    )
+    action = issue["actionExecutions"][0]
+    action["type"] = "agent_triage"
+    action["metadata"]["source"] = "agent_triage"
+    action["metadata"].pop("concernId")
+    action["metadata"]["automationContext"] = {
+        "messageId": "message-b2b-urgent"
+    }
+    answer = "We have received the P1 incident report."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+def test_action_state_repair_preserves_topic_only_policy_mention() -> None:
+    answer = "Our executive escalation criteria apply to P1 incidents."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm executive escalation"]
+        ),
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+def test_action_state_repair_preserves_positive_topic_answer_byte_for_byte() -> None:
+    answer = "Shipment status is in transit."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm shipment status"]
+        ),
+        messages=[{"direction": "customer", "body": "Confirm shipment status."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Confirm you have escalated it",
+        "Confirm you escalated it",
+    ],
+)
+def test_action_state_repair_ignores_pronoun_only_confirmation_clause(
+    question: str,
+) -> None:
+    answer = "We have received your escalation request."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=[question]
+        ),
+        messages=[
+            {
+                "direction": "customer",
+                "body": question + ".",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "Escalated it is not confirmed" not in repaired
+
+
+def test_action_state_repair_does_not_cross_concern_boundaries() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation"]
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": "concern-refund",
+            "matched": True,
+            "intentName": "refund-request",
+            "answerObligations": [
+                {
+                    "obligationId": "concern-refund:obligation-1",
+                    "question": "Confirm refund authorization",
+                }
+            ],
+        }
+    )
+    answer = _EXECUTIVE_ESCALATION_PENDING_NOTICE
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm executive escalation and refund authorization.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
+def test_action_state_repair_localizes_missing_obligation_notice() -> None:
+    answer = "Wir benötigen dafür eine menschliche Prüfung."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"]
+        ),
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Bitte bestätigen Sie die Eskalation an die Geschäftsleitung. "
+                    "Vielen Dank für Ihre Hilfe mit dieser Anfrage."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == (
+        answer
+        + "\n\nFür die Eskalation an die Geschäftsleitung liegt keine Bestätigung "
+        "vor. Ein damit verbundener nächster Schritt für Ihre Anfrage wartet "
+        "weiterhin auf menschliche Prüfung."
+    )
+    ticket = issue_agent._automatic_ticket_context(
+        _pending_action_obligation_issue(
+            questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"]
+        )
+    )
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
 def test_automation_draft_retries_once_for_pending_action_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1385,6 +1669,53 @@ def _assess_with_grounding_outputs(
         project_id="project-1",
     )
     return result, prompts
+
+
+def test_repaired_e09_notice_is_hashed_and_grounded_to_its_concern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "concern-b2b-urgent"
+    obligation_id = f"{concern_id}:obligation-1"
+    evidence_id = f"concern:{concern_id}"
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation"]
+    )
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer="",
+    )
+    answer_units = issue_agent._grounding_answer_units(repaired)
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=repaired,
+        resolutions=[
+            (
+                obligation_id,
+                "pending_or_unavailable",
+                [answer_units[0]["id"]],
+            )
+        ],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert repaired == _EXECUTIVE_ESCALATION_PENDING_NOTICE
+    assert len(answer_units) == 2
+    assert result.verified is True
+    assert result.answer_sha256 == issue_agent.grounding_text_sha256(repaired)
+    assert result.obligation_assessments[0]["resolution"] == "pending_or_unavailable"
+    assert result.obligation_assessments[0]["covered"] is True
+    assert all(
+        assessment["evidenceIds"] == [evidence_id]
+        for assessment in result.unit_assessments
+    )
+    assert any(
+        snapshot["id"] == "ticket:scoped"
+        for snapshot in result.context_snapshots
+    )
+    assert evidence_id in prompt
 
 
 def test_automation_draft_requires_independent_grounding_for_auto_send(

@@ -708,6 +708,120 @@ _PENDING_ACTION_REPAIR_NOTICES = {
         "e non è confermata né come avviata né come completata."
     ),
 }
+_ACTION_STATE_OBLIGATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "de": (
+        re.compile(
+            r"^\s*(?:bitte\s+)?(?:bestätigen|garantieren|versichern)"
+            r"(?:\s+sie)?\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:können|könnten)\s+sie\s+(?:bitte\s+)?"
+            r"(?P<subject>.+?)\s+(?:bestätigen|garantieren|versichern)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "en": (
+        re.compile(
+            r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+            r"(?:confirm|guarantee|ensure)\s+(?:that\s+)?"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "es": (
+        re.compile(
+            r"^\s*(?:por\s+favor[,]?\s+)?"
+            r"(?:confirme|confirmar|garantice|garantizar|asegure|asegurar)\s+"
+            r"(?:que\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "fr": (
+        re.compile(
+            r"^\s*(?:veuillez\s+)?"
+            r"(?:confirmer|confirmez|garantir|garantissez|assurer|assurez)\s+"
+            r"(?:que\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "it": (
+        re.compile(
+            r"^\s*(?:per\s+favore[,]?\s+)?"
+            r"(?:confermare|confermi|garantire|garantisca|assicurare|assicuri)\s+"
+            r"(?:che\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+}
+_ACTION_STATE_PENDING_NOTICES = {
+    "de": (
+        "Für {subject} liegt keine Bestätigung vor. Ein damit verbundener nächster "
+        "Schritt für Ihre Anfrage wartet weiterhin auf menschliche Prüfung."
+    ),
+    "en": (
+        "{subject} is not confirmed. A related next step for your request remains "
+        "pending human review."
+    ),
+    "es": (
+        "No hay confirmación para {subject}. Un siguiente paso relacionado con su "
+        "solicitud sigue pendiente de revisión humana."
+    ),
+    "fr": (
+        "Aucune confirmation n’est disponible pour {subject}. Une prochaine étape "
+        "connexe de votre demande reste en attente d’un contrôle humain."
+    ),
+    "it": (
+        "Non c’è una conferma per {subject}. Un passaggio successivo collegato alla "
+        "richiesta resta in attesa di revisione umana."
+    ),
+}
+_ACTION_STATE_SUBJECT_STOP_WORDS = frozenset({
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "been",
+    "can",
+    "could",
+    "das",
+    "dass",
+    "de",
+    "der",
+    "die",
+    "el",
+    "en",
+    "et",
+    "for",
+    "für",
+    "have",
+    "has",
+    "i",
+    "il",
+    "in",
+    "is",
+    "it",
+    "la",
+    "le",
+    "les",
+    "lo",
+    "of",
+    "or",
+    "our",
+    "que",
+    "that",
+    "the",
+    "to",
+    "und",
+    "we",
+    "whether",
+    "will",
+    "would",
+    "you",
+    "your",
+})
 
 
 def _detected_supported_language(*values: str) -> str:
@@ -1809,21 +1923,141 @@ def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, 
     )
 
 
+def _action_state_obligation_subject(
+    question: str,
+    *,
+    language: str,
+) -> str:
+    """Extract the customer-visible topic from an explicit state request."""
+    for pattern in _ACTION_STATE_OBLIGATION_PATTERNS.get(language, ()):
+        match = pattern.fullmatch(question)
+        if match is None:
+            continue
+        raw_subject = match.group("subject").strip()
+        if re.match(r"^you\b", raw_subject, flags=re.IGNORECASE):
+            return ""
+        subject = raw_subject.strip(" \t\r\n.,;:!?\"'“”‘’")
+        if _action_state_subject_tokens(subject):
+            return subject[:240]
+    return ""
+
+
+def _action_state_subject_tokens(value: str) -> frozenset[str]:
+    """Return stable topic tokens for conservative answer-presence checks."""
+    return frozenset(
+        word
+        for word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
+        if word not in _ACTION_STATE_SUBJECT_STOP_WORDS
+    )
+
+
+def _pending_action_obligation_notices(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> tuple[str, ...]:
+    """Build safe notices only for omitted topics with same-scope pending work."""
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    pending_actions = [
+        action
+        for raw_action in actions
+        if (
+            (action := _record_from(raw_action))
+            and _string_from(action.get("status")).lower().replace("-", "_")
+            == "pending_approval"
+        )
+    ]
+    if not pending_actions:
+        return ()
+
+    pending_concern_ids = {
+        concern_id
+        for action in pending_actions
+        if (
+            concern_id := _string_from(
+                action.get("concernId") or action.get("concern_id")
+            )
+        )
+    }
+    if not pending_concern_ids:
+        return ()
+
+    answer_tokens = _action_state_subject_tokens(answer)
+    notices: list[str] = []
+    seen_subjects: set[frozenset[str]] = set()
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(
+            concern.get("id")
+            or concern.get("concernId")
+            or concern.get("concern_id")
+        )
+        if concern_id not in pending_concern_ids:
+            continue
+        raw_obligations = concern.get("answerObligations")
+        if not isinstance(raw_obligations, list):
+            continue
+        for raw_obligation in raw_obligations[:10]:
+            obligation = _record_from(raw_obligation)
+            question = _string_from(
+                obligation.get("question")
+                or obligation.get("text")
+                or (raw_obligation if isinstance(raw_obligation, str) else "")
+            )
+            subject = _action_state_obligation_subject(
+                question,
+                language=language,
+            )
+            subject_tokens = _action_state_subject_tokens(subject)
+            if (
+                not subject_tokens
+                or subject_tokens in seen_subjects
+                or not subject_tokens.isdisjoint(answer_tokens)
+            ):
+                continue
+            seen_subjects.add(subject_tokens)
+            rendered_subject = (
+                subject[:1].upper() + subject[1:]
+                if language == "en"
+                else subject
+            )
+            notices.append(
+                _ACTION_STATE_PENDING_NOTICES[language].format(
+                    subject=rendered_subject,
+                )
+            )
+            answer_tokens = answer_tokens.union(subject_tokens)
+    return tuple(notices)
+
+
 def repair_issue_automation_answer_action_state(
     *,
     issue: dict[str, Any],
     messages: list[dict[str, Any]],
     answer: str,
 ) -> str:
-    """Repair residual action-progress claims against the latest durable ticket state."""
+    """Repair action claims and omitted action-state answers from durable state."""
     ticket = _automatic_ticket_context(issue)
     language = _latest_customer_language(messages)
-    return repair_pending_action_claims(
+    repaired = repair_pending_action_claims(
         answer=answer,
         runbook_actions=ticket.get("runbookActions", []),
         tool_evidence=_automatic_tool_evidence_records(ticket),
         repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
     )
+    notices = _pending_action_obligation_notices(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    )
+    if not notices:
+        return repaired
+    clean_answer = repaired.rstrip()
+    return "\n\n".join((clean_answer, *notices)) if clean_answer else "\n\n".join(notices)
 
 
 def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:

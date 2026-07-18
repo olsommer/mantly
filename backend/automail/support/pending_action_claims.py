@@ -146,6 +146,31 @@ _ACTION_STATE_SUBJECTS = (
 _ACTION_STATE_SUBJECT_PATTERN = (
     rf"(?:[a-z][a-z0-9-]*\s+){{0,3}}(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
 )
+_CONFIRMATION_ACTION_STATE_MODIFIERS = (
+    r"executive",
+    r"urgent",
+    r"internal",
+    r"human",
+    r"manual",
+    r"warehouse",
+    r"support",
+    r"delivery",
+    r"fulfillment",
+    r"customer",
+    r"refund",
+    r"cancell?ation",
+    r"replacement",
+    r"return",
+    r"address",
+    r"order",
+    r"contract",
+    r"subscription",
+    r"carrier",
+)
+_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN = (
+    rf"(?:(?:{'|'.join(_CONFIRMATION_ACTION_STATE_MODIFIERS)})\s+){{0,2}}"
+    rf"(?:{'|'.join(_ACTION_STATE_SUBJECTS)})"
+)
 _LIFECYCLE_STATE_SUBJECTS = (
     r"order",
     r"contract",
@@ -364,8 +389,65 @@ _ACTIVE_INTERNAL_REVIEW_STATE_PATTERN = re.compile(
 )
 _ACTION_COMPLETION_STATE_PATTERN = re.compile(
     rf"\b(?:a|an|the|this|your|our)\s+{_ACTION_STATE_SUBJECT_PATTERN}\b"
-    r"[^.!?\n]{0,80}?\b(?:is|are|was|were)\s+"
+    r"[^.!?\n,;:]{0,80}?\b(?:is|are|was|were)\s+"
     r"(?:(?:already|successfully|now)\s+)*(?:complete|completed|done)\b",
+    re.IGNORECASE,
+)
+_CONFIRMED_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b"
+    r"[^.!?\n]{0,80}?\b(?:is|are|was|were)\s+"
+    r"(?!(?:not|never)\b)(?:(?:already|successfully|now)\s+)*confirmed\b",
+    re.IGNORECASE,
+)
+_PERFECT_CONFIRMED_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b"
+    r"[^.!?\n,;:]{0,80}?\b(?:has|have|had)\s+"
+    r"(?!(?:not|never)\b)(?:(?:already|successfully|now)\s+)*been\s+"
+    r"(?:(?:already|successfully|now)\s+)*confirmed\b",
+    re.IGNORECASE,
+)
+_CONFIRMING_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:we\s+are|we['’]re|i\s+am|i['’]m)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}confirming\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_CAN_CONFIRM_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:we|i)\s+can\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}confirm\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_CONFIRM_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:we|i)\s+{_ACTION_MODIFIER_PATTERN}confirm\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_CONFIRMED_BY_SUPPORT_PATTERN = re.compile(
+    rf"\b(?:we\s+have|we['’]ve|i\s+have|i['’]ve|we|i)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}confirmed\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_FUTURE_CONFIRM_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:we\s+will|we['’]ll|i\s+will|i['’]ll)\s+"
+    rf"(?:(?:soon|shortly|now|immediately)\s+)*confirm\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_FUTURE_PASSIVE_CONFIRM_ACTION_STATE_PATTERN = re.compile(
+    rf"\b(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b"
+    r"[^.!?\n,;:]{0,80}?\b(?:will|shall)\s+"
+    r"(?!(?:not|never)\b)(?:(?:soon|shortly|now|immediately)\s+)*be\s+"
+    r"(?:(?:already|successfully|now)\s+)*confirmed\b",
     re.IGNORECASE,
 )
 _FUTURE_ACTION_PATTERN = re.compile(
@@ -382,6 +464,13 @@ _FUTURE_NECESSITY_ACTION_PATTERN = re.compile(
 _CONTROLLED_SUPPORT_ACTOR_PATTERN = (
     r"(?:our\s+team|(?:a|the)\s+specialist|(?:a|the)\s+human\s+agent|"
     r"(?:our|the)\s+operations(?:\s+team)?|(?:a|the|our)\s+support\s+representative)"
+)
+_CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN = re.compile(
+    rf"\b{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}confirm\s+"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?"
+    rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
 )
 _FUTURE_UPDATE_PROMISE_PATTERN = re.compile(
     rf"\b(?:(?:we|i)\s+will|(?:we|i)['’]ll|"
@@ -525,6 +614,11 @@ _CLAIM_PATTERNS = (
     _ACTIVE_STATE_PATTERN,
     _ACTIVE_INTERNAL_REVIEW_STATE_PATTERN,
     _ACTION_COMPLETION_STATE_PATTERN,
+    _CONFIRMED_ACTION_STATE_PATTERN,
+    _PERFECT_CONFIRMED_ACTION_STATE_PATTERN,
+    _CONFIRMING_ACTION_STATE_PATTERN,
+    _CONFIRM_ACTION_STATE_PATTERN,
+    _CONFIRMED_BY_SUPPORT_PATTERN,
     _GERMAN_COMPLETED_PATTERN,
     _GERMAN_PASSIVE_PATTERN,
     _FRENCH_COMPLETED_PATTERN,
@@ -549,6 +643,10 @@ _FUTURE_CLAIM_PATTERNS = (
     _SPANISH_FUTURE_PASSIVE_PATTERN,
     _ITALIAN_FUTURE_PATTERN,
     _ITALIAN_FUTURE_PASSIVE_PATTERN,
+    _FUTURE_CONFIRM_ACTION_STATE_PATTERN,
+    _FUTURE_PASSIVE_CONFIRM_ACTION_STATE_PATTERN,
+    _CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN,
+    _CAN_CONFIRM_ACTION_STATE_PATTERN,
 )
 _CONDITION_MARKERS = (
     r"after",
@@ -663,6 +761,10 @@ _COORDINATED_ACTION_TAIL_PATTERN = re.compile(
     rf"(?:(?:we|i)(?:['’](?:ve|re))?\s+)?"
     rf"(?:(?:have|are|will)\s+)?{_ACTION_MODIFIER_PATTERN}"
     rf"(?:{'|'.join((*_PROGRESSIVE_ACTIONS, *_COMPLETED_ACTIONS, *_FUTURE_ACTIONS))})\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_CONFIRMATION_SCOPE_BREAK_PATTERN = re.compile(
+    r"[;:.!?]|\b(?:but|however|whereas)\b",
     re.IGNORECASE,
 )
 
@@ -819,6 +921,17 @@ def _has_unsafe_claim(
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(unit):
             if _FUTURE_CONDITION_PREFIX_PATTERN.search(unit[:match.start()]):
+                continue
+            if (
+                pattern in {
+                    _CONFIRMED_ACTION_STATE_PATTERN,
+                    _PERFECT_CONFIRMED_ACTION_STATE_PATTERN,
+                }
+                and unit.lstrip().lower().startswith("no ")
+                and not _NEGATIVE_CONFIRMATION_SCOPE_BREAK_PATTERN.search(
+                    unit[:match.end()]
+                )
+            ):
                 continue
             if (
                 pattern is _ACTION_COMPLETION_STATE_PATTERN

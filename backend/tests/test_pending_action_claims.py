@@ -98,6 +98,71 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
     assert result.claims == (answer,)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We are confirming executive escalation.",
+        "We confirmed executive escalation.",
+        "We have confirmed executive escalation.",
+        "Executive escalation is confirmed.",
+        "Executive escalation has been confirmed.",
+        "The escalation had been confirmed.",
+        "Executive escalation will be confirmed.",
+        "A human agent will confirm executive escalation.",
+        "I confirm executive escalation.",
+        "We confirm executive escalation.",
+        "We will confirm executive escalation.",
+        "We can confirm executive escalation.",
+        "I can confirm executive escalation.",
+        "We can now confirm executive escalation.",
+        (
+            "No escalation was requested, but executive escalation has been "
+            "confirmed."
+        ),
+        "No escalation was requested; executive escalation has been confirmed.",
+    ],
+)
+def test_pending_action_guard_blocks_unsupported_confirmation_state(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We cannot confirm executive escalation.",
+        "We can't confirm executive escalation.",
+        "We can not confirm executive escalation.",
+        "Executive escalation is not confirmed.",
+        "Executive escalation has not been confirmed.",
+        "The escalation had not been confirmed.",
+        "Executive escalation will not be confirmed.",
+        "After review, executive escalation will be confirmed.",
+        "A human agent will not confirm executive escalation.",
+        "After review, a human agent will confirm executive escalation.",
+        "We do not confirm executive escalation.",
+        (
+            "No escalation, replacement, refund, collection, return, or other "
+            "business action has been confirmed."
+        ),
+        "Executive escalation is pending confirmation.",
+        "After review we can confirm executive escalation.",
+        "We confirmed tracking UPS1Z999AA10123456784.",
+        "We confirmed your email address.",
+        "We will confirm the tracking status.",
+    ],
+)
+def test_pending_action_guard_allows_safe_confirmation_state(answer: str) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
 def test_pending_action_guard_blocks_exact_live_b2b_escalation_claim() -> None:
     answer = (
         "This urgent B2B SLA incident has been escalated for human operations review."
@@ -581,6 +646,23 @@ def test_pending_action_repair_replaces_live_residual_claims_with_neutral_state(
 
     assert repaired == PENDING_ACTION_REPAIR_NOTICE
     assert answer not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_repair_removes_unsupported_e09_confirmation() -> None:
+    safe_status = "We cannot confirm SLA compensation."
+    answer = f"Executive escalation is confirmed. {safe_status}"
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == f"{safe_status}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+    assert "Executive escalation is confirmed" not in repaired
     assert check_pending_action_claims(
         answer=repaired,
         runbook_actions=_actions(),

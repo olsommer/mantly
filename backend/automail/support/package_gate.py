@@ -252,6 +252,17 @@ REQUIRED_BACKEND_FILES: tuple[PackageRequirement, ...] = (
             "runInTransaction",
             "processing_claim_token",
             "retry_policy_version",
+            "support_channel_webhook_claims_helpers.js",
+        ),
+    ),
+    PackageRequirement(
+        "pocketbase-runtime",
+        "pocketbase/pb_hooks/support_channel_webhook_claims_helpers.js",
+        (
+            "module.exports",
+            "support_channel_webhook_events",
+            "publicRecord",
+            "RETRY_POLICY_VERSION",
         ),
     ),
     PackageRequirement(

@@ -2,60 +2,36 @@
 
 /** Transactional generic channel-webhook claims and token-fenced completion. */
 
-const CHANNEL_EVENT_COLLECTION = "support_channel_webhook_events";
-const RETRY_POLICY_VERSION = 1;
-
-function text(value) {
-    return value == null ? "" : String(value).trim();
-}
-
-function jsonObject(record, field) {
-    try {
-        const parsed = JSON.parse(toString(record.get(field)) || "{}");
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch (_) {
-        return {};
-    }
-}
-
-function conflict(message) {
-    throw new ApiError(409, message);
-}
-
-function inScope(record, projectId, tenantId) {
-    return record.getString("project") === projectId
-        && (!tenantId || record.getString("tenant") === tenantId);
-}
-
 routerAdd(
     "POST",
     "/api/mantly/support-channel-webhooks/{id}/claim",
     (e) => {
+        const channelWebhooks = require(`${__hooks}/support_channel_webhook_claims_helpers.js`);
         const id = e.request.pathValue("id");
         const body = e.requestInfo().body || {};
-        const projectId = text(body.project_id);
-        const tenantId = text(body.tenant_id);
+        const projectId = channelWebhooks.text(body.project_id);
+        const tenantId = channelWebhooks.text(body.tenant_id);
         const retryPolicyVersion = Number(body.retry_policy_version) || 0;
         const allowFailed = body.allow_failed === true;
         const maxAttempts = Math.max(1, Math.min(5, Number(body.max_attempts) || 3));
         const leaseSeconds = Math.max(60, Math.min(3600, Number(body.lease_seconds) || 900));
-        const workerId = text(body.worker_id).slice(0, 200);
-        if (!id || !projectId || retryPolicyVersion !== RETRY_POLICY_VERSION) {
+        const workerId = channelWebhooks.text(body.worker_id).slice(0, 200);
+        if (!id || !projectId || retryPolicyVersion !== channelWebhooks.RETRY_POLICY_VERSION) {
             throw new BadRequestError("invalid_channel_webhook_claim");
         }
 
         let response = null;
         e.app.runInTransaction((txApp) => {
-            const before = txApp.findRecordById(CHANNEL_EVENT_COLLECTION, id);
-            if (!inScope(before, projectId, tenantId)) {
-                conflict("channel_webhook_claim_scope_changed");
+            const before = txApp.findRecordById(channelWebhooks.CHANNEL_EVENT_COLLECTION, id);
+            if (!channelWebhooks.inScope(before, projectId, tenantId)) {
+                channelWebhooks.conflict("channel_webhook_claim_scope_changed");
             }
             const priorStatus = before.getString("status").toLowerCase();
             if (["processed", "skipped", "unmatched"].indexOf(priorStatus) >= 0) {
                 response = {
                     claimed: false,
                     state: priorStatus,
-                    event: before.publicExport(),
+                    event: channelWebhooks.publicRecord(before),
                 };
                 return;
             }
@@ -93,17 +69,17 @@ routerAdd(
             }).execute();
 
             if (claim.rowsAffected() !== 1) {
-                const current = txApp.findRecordById(CHANNEL_EVENT_COLLECTION, id);
+                const current = txApp.findRecordById(channelWebhooks.CHANNEL_EVENT_COLLECTION, id);
                 response = {
                     claimed: false,
                     state: current.getString("status") || "received",
-                    event: current.publicExport(),
+                    event: channelWebhooks.publicRecord(current),
                 };
                 return;
             }
 
-            const event = txApp.findRecordById(CHANNEL_EVENT_COLLECTION, id);
-            const priorResult = jsonObject(before, "result");
+            const event = txApp.findRecordById(channelWebhooks.CHANNEL_EVENT_COLLECTION, id);
+            const priorResult = channelWebhooks.jsonObject(before, "result");
             const priorClaim = priorResult._webhookClaim
                 && typeof priorResult._webhookClaim === "object"
                 && !Array.isArray(priorResult._webhookClaim)
@@ -146,7 +122,7 @@ routerAdd(
                 attempt: Number(event.get("processing_attempt")) || priorAttempt + 1,
                 claimed_at: claimedAt,
                 lease_expires_at: expiresAt,
-                event: event.publicExport(),
+                event: channelWebhooks.publicRecord(event),
             };
         });
         return e.json(200, response);
@@ -158,10 +134,11 @@ routerAdd(
     "POST",
     "/api/mantly/support-channel-webhooks/{id}/complete",
     (e) => {
+        const channelWebhooks = require(`${__hooks}/support_channel_webhook_claims_helpers.js`);
         const id = e.request.pathValue("id");
         const body = e.requestInfo().body || {};
-        const token = text(body.claim_token);
-        const target = text(body.status).toLowerCase();
+        const token = channelWebhooks.text(body.claim_token);
+        const target = channelWebhooks.text(body.status).toLowerCase();
         if (!id || !token || ["failed", "processed", "skipped", "unmatched"].indexOf(target) < 0) {
             throw new BadRequestError("invalid_channel_webhook_completion");
         }
@@ -174,7 +151,7 @@ routerAdd(
             ).bind({ id, token }).execute();
 
             if (guard.rowsAffected() !== 1) {
-                const current = txApp.findRecordById(CHANNEL_EVENT_COLLECTION, id);
+                const current = txApp.findRecordById(channelWebhooks.CHANNEL_EVENT_COLLECTION, id);
                 if (
                     current.getString("processing_claim_token") === token
                     && current.getString("status") === target
@@ -183,15 +160,15 @@ routerAdd(
                         completed: true,
                         idempotent: true,
                         state: target,
-                        event: current.publicExport(),
+                        event: channelWebhooks.publicRecord(current),
                     };
                     return;
                 }
-                conflict("channel_webhook_completion_fence_conflict");
+                channelWebhooks.conflict("channel_webhook_completion_fence_conflict");
             }
 
-            const event = txApp.findRecordById(CHANNEL_EVENT_COLLECTION, id);
-            const currentResult = jsonObject(event, "result");
+            const event = txApp.findRecordById(channelWebhooks.CHANNEL_EVENT_COLLECTION, id);
+            const currentResult = channelWebhooks.jsonObject(event, "result");
             const incomingResult = body.result
                 && typeof body.result === "object"
                 && !Array.isArray(body.result)
@@ -206,11 +183,11 @@ routerAdd(
             }
             event.set("status", target);
             event.set("result", incomingResult);
-            event.set("error", text(body.error));
+            event.set("error", channelWebhooks.text(body.error));
             event.set("processed_at", new DateTime().string());
             event.set("processing_claim_expires_at", "");
             event.set("processing_retry_safe", target === "failed" && body.retry_safe === true);
-            const outboundMessageId = text(body.outbound_message_id);
+            const outboundMessageId = channelWebhooks.text(body.outbound_message_id);
             if (outboundMessageId) {
                 event.set("outbound_message", outboundMessageId);
             }
@@ -220,7 +197,7 @@ routerAdd(
                 completed: true,
                 idempotent: false,
                 state: target,
-                event: event.publicExport(),
+                event: channelWebhooks.publicRecord(event),
             };
         });
         return e.json(200, response);

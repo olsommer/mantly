@@ -1,0 +1,545 @@
+schema_version: 1
+id: lawyer
+name: Swiss law firm
+case_id_prefix: L
+description: >-
+  A lawyer and legal-operations lead tests Mantly as the intake and support
+  system for a Swiss commercial law firm.
+operator:
+  role: Partner responsible for intake and legal operations
+  perspective: >-
+    Protect confidentiality and professional duties while giving prospective
+    and existing clients a precise, useful next step.
+  goals:
+    - Keep intake, conflicts, deadlines, billing, documents, and scheduling auditable.
+    - Answer every customer question in one integrated response.
+    - Use reviewed firm knowledge and verified matter facts without inventing legal conclusions.
+  risk_boundaries:
+    - Never imply mandate acceptance, conflict clearance, representation, or a legal outcome.
+    - Never claim a deadline, appointment, billing exception, or operational action changed without proof.
+    - Keep substantive discussion paused only as a pending human action unless verified complete.
+business:
+  name: Alpine Legal QA
+  industry: Swiss commercial law firm
+  locale: en-CH
+  timezone: Europe/Zurich
+test_policy:
+  channel: email
+  require_human_approval: true
+  allow_external_send: false
+  allow_external_actions: false
+  require_grounding: true
+  require_progress_audit: true
+  require_idempotency_replay: true
+  processing_stages:
+    - runbooks
+    - automation
+    - triage
+    - ticket_fields
+    - composer
+    - grounding
+    - saving
+    - finalizing
+    - completed
+seed:
+  knowledge:
+    - id: law-intake-conflicts
+      title: QA Legal Intake and Conflict Checks
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        Before confidential facts or documents are accepted, collect the names of the prospective client, every adverse party, relevant affiliates, and a short non-confidential matter description. A conflict review is a human-controlled step. No mandate exists until the firm confirms clearance and both sides complete the engagement process. Do not give substantive advice during preliminary intake.
+      tags: [qa, legal-intake, conflicts]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: law-fees-retainer
+      title: QA Billing and Retainer Rules
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        The standard initial consultation fee is CHF 350 excluding VAT. The standard advance retainer is CHF 5,000 unless a lawyer approves another amount. Instalment plans, hardship waivers, due-date changes, and fee exceptions require human billing review and are not effective until explicitly approved.
+      tags: [qa, billing, retainer]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: law-secure-documents
+      title: QA Secure Document Submission
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        Prospective clients should upload readable copies through the secure intake portal after receiving an intake reference. Common PDF and image formats are accepted. Do not send irreplaceable originals by ordinary email or post. Keep originals safe and bring or deliver them only after a lawyer confirms the handling method. Submission does not mean the documents were reviewed or the matter was accepted.
+      tags: [qa, documents, secure-intake]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: law-gmbh-formation
+      title: QA Swiss GmbH Formation Overview
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        A preliminary Swiss GmbH formation discussion normally covers company name and domicile, founders and quota shares, management and signing authority, articles of association, capital payment evidence, notarial incorporation, and commercial-register filing. The statutory share capital is CHF 20,000 and must be fully paid in. Typical working documents include founder identification, address and purpose details, ownership information, draft articles, and capital confirmation. Name availability and engagement acceptance require separate verification.
+      tags: [qa, gmbh, formation]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: law-consultation-scheduling
+      title: QA Consultation Scheduling
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        A requested consultation time is only a preference until the calendar system or a human confirms it. Rescheduling requests should preserve the existing appointment, record the requested alternative, and remain pending human approval. Urgent deadline requests must be escalated without promising availability, representation, extensions, or outcomes.
+      tags: [qa, consultation, scheduling]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+  tool_fixtures:
+    - id: conflict-helvetia-pending
+      tool: conflict_check_lookup
+      input:
+        parties: [Helvetia Systems AG, Helvetia Holdings SA]
+      result:
+        status: requires_human_review
+        cleared: false
+        reference: CONFLICT-QA-101
+    - id: conflict-northlake-pending
+      tool: conflict_check_lookup
+      input:
+        parties: [Northlake AG, Marco Steiner]
+      result:
+        status: possible_prior_relationship
+        cleared: false
+        reference: CONFLICT-QA-102
+    - id: invoice-qa-law-204
+      tool: invoice_lookup
+      input:
+        invoice_id: QA-LAW-204
+      result:
+        status: open
+        due_date: "2026-07-25"
+        currency: CHF
+        payment_plan: null
+        waiver: null
+    - id: matter-mat-2026-104
+      tool: matter_lookup
+      input:
+        matter_id: MAT-2026-104
+      result:
+        status: Awaiting counterparty response
+        next_deadline: "2026-08-05"
+        responsible_lawyer: Dr Nora Keller
+    - id: matter-mat-2026-221
+      tool: matter_lookup
+      input:
+        matter_id: MAT-2026-221
+      result:
+        status: open
+        potential_conflict_status: pending_review
+        substantive_discussion_paused: false
+    - id: consultation-2026-07-21
+      tool: calendar_lookup
+      input:
+        customer: Lukas Gerber
+      result:
+        current_start: "2026-07-21T14:00:00+02:00"
+        requested_start: null
+        confirmed: true
+runbooks:
+  - key: law-conflict-intake
+    purpose: Collect non-confidential party data and prepare a human conflict review.
+    proposed_actions: [open_conflict_review]
+  - key: law-urgent-deadline
+    purpose: Capture an asserted deadline and prepare urgent human triage.
+    proposed_actions: [open_urgent_legal_triage]
+  - key: law-secure-documents
+    purpose: Explain safe document submission without claiming receipt or review.
+    proposed_actions: [create_secure_intake_request]
+  - key: law-billing-review
+    purpose: Answer verified fee facts and prepare billing exceptions for review.
+    proposed_actions: [request_payment_plan_review, request_waiver_review]
+  - key: law-gmbh-formation
+    purpose: Give reviewed general formation information and offer consultation intake.
+    proposed_actions: [request_formation_consultation]
+  - key: law-matter-status
+    purpose: Retrieve approved matter facts for an authenticated existing client.
+    proposed_actions: []
+  - key: law-potential-conflict
+    purpose: Record and escalate a potential conflict without drawing a conclusion.
+    proposed_actions: [record_potential_conflict, open_conflict_review, pause_substantive_discussion]
+  - key: law-consultation-reschedule
+    purpose: Prepare an appointment change while preserving the confirmed booking.
+    proposed_actions: [request_consultation_reschedule]
+  - key: law-inheritance-intake
+    purpose: Explain safe handling of original estate documents and open intake.
+    proposed_actions: [create_secure_intake_request]
+knowledge_checks:
+  - id: K01
+    question: >-
+      Based only on reviewed knowledge and verified ticket facts, explain the
+      standard consultation fee, retainer, and whether invoice QA-LAW-204's due
+      date or any waiver is confirmed.
+    expected_citation_ids: [law-fees-retainer]
+    must_cover:
+      - Standard consultation fee and retainer.
+      - Difference between the recorded invoice due date and an approved exception.
+    must_mark_unverified:
+      - Any payment plan, hardship waiver, due-date change, or mandate approval.
+    create_draft: false
+cases:
+  - id: L01
+    title: New client intake and conflict check
+    inbound:
+      from_name: Sophie Mueller
+      from_address: sophie.mueller@example.test
+      subject: New client intake and conflict check
+      body: >-
+        I may need advice about a failed software implementation. Opposing party
+        Helvetia Systems AG and parent Helvetia Holdings SA. Before confidential
+        facts or documents, explain the intake and conflict-check process. Do not
+        imply mandate acceptance or give substantive advice.
+      attachments: []
+    concerns:
+      - key: confidential-intake
+        runbook_key: law-conflict-intake
+        answer_obligations:
+          - Explain the non-confidential intake information required.
+          - Explain that conflict clearance and engagement acceptance are pending.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Names and non-confidential facts needed for conflict review.
+        - Safe next step before documents or substantive facts are shared.
+      must_not_claim:
+        - Conflict clearance, mandate acceptance, confidentiality, or substantive advice.
+      knowledge_ids: [law-intake-conflicts]
+      tool_fixture_ids: [conflict-helvetia-pending]
+      pending_actions: [open_conflict_review]
+      idempotency: &replay
+        processed_on_replay: 0
+        skipped_on_replay: 1
+        state_unchanged: true
+  - id: L02
+    title: Adverse-party conflict check before disclosure
+    inbound:
+      from_name: Daniel Frei
+      from_address: daniel.frei@example.test
+      subject: Adverse-party conflict check before disclosure
+      body: >-
+        I am considering a claim against Northlake AG and shareholder Marco
+        Steiner. Your firm may have advised Northlake. Run a conflict check before
+        confidential facts or advice. Tell me only the safe next intake step; do
+        not imply you can act.
+      attachments: []
+    concerns:
+      - key: adverse-party-conflict
+        runbook_key: law-conflict-intake
+        answer_obligations:
+          - State the safe non-confidential intake step.
+          - Treat the possible prior relationship as pending human review.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - The conflict review is not complete.
+        - What Daniel may safely provide next.
+      must_not_claim:
+        - That the firm can act, has no conflict, or formed a mandate.
+      knowledge_ids: [law-intake-conflicts]
+      tool_fixture_ids: [conflict-northlake-pending]
+      pending_actions: [open_conflict_review]
+      idempotency: *replay
+  - id: L03
+    title: Urgent court deadline and consultation request
+    inbound:
+      from_name: Mara Schmid
+      from_address: mara.schmid@example.test
+      subject: Urgent court deadline and consultation request
+      body: >-
+        Zurich Commercial Court response due 20 July 2026 at 12:00. I need an
+        urgent consultation today. Identify and escalate the deadline, explain
+        the triage information needed, and do not promise an extension,
+        representation, or outcome.
+      attachments: []
+    concerns:
+      - key: asserted-court-deadline
+        runbook_key: law-urgent-deadline
+        answer_obligations:
+          - Repeat the deadline as customer-provided and request source documents.
+          - Explain urgent human triage and consultation availability limits.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - The asserted date, court, matter identifiers, service date, and documents needed.
+        - Urgent review remains pending.
+      must_not_claim:
+        - An independently verified deadline, booked consultation, extension, representation, or outcome.
+      knowledge_ids: [law-consultation-scheduling]
+      tool_fixture_ids: []
+      pending_actions: [open_urgent_legal_triage]
+      idempotency: *replay
+  - id: L04
+    title: Secure document submission for contract review
+    inbound:
+      from_name: Jonas Meier
+      from_address: jonas.meier@example.test
+      subject: Secure document submission for contract review
+      body: >-
+        I have a signed contract, email correspondence, and a 120-page annex.
+        What secure submission route and formats should I use, and should I send
+        originals? Do not say anything was reviewed or accepted.
+      attachments: []
+    concerns:
+      - key: secure-document-intake
+        runbook_key: law-secure-documents
+        answer_obligations:
+          - Explain the secure route, accepted working formats, and original-document handling.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Secure portal, readable copies, and safe preservation of originals.
+      must_not_claim:
+        - Receipt, review, acceptance, or a formed engagement.
+      knowledge_ids: [law-secure-documents]
+      tool_fixture_ids: []
+      pending_actions: [create_secure_intake_request]
+      idempotency: *replay
+  - id: L05
+    title: Fees, invoice due date, and exception requests
+    inbound:
+      from_name: Lea Baumann
+      from_address: lea.baumann@example.test
+      subject: Fees retainer invoice due date and waiver request
+      body: >-
+        What are the initial consultation fee and retainer? Invoice QA-LAW-204
+        says due 25 July 2026; confirm the recorded due date. I want an instalment
+        plan and hardship waiver. Explain the review process; do not claim a
+        waiver, plan, invoice change, or mandate was approved.
+      attachments: []
+    concerns:
+      - key: standard-fees
+        runbook_key: law-billing-review
+        answer_obligations:
+          - State reviewed consultation-fee and retainer facts.
+      - key: invoice-status
+        runbook_key: law-billing-review
+        answer_obligations:
+          - State the tool-recorded due date and distinguish it from a changed due date.
+      - key: billing-exceptions
+        runbook_key: law-billing-review
+        answer_obligations:
+          - Explain that instalment and waiver requests require human review.
+    expected:
+      minimum_concern_count: 2
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Standard fee and retainer.
+        - Recorded invoice due date.
+        - Separate pending review for the plan and waiver.
+      must_not_claim:
+        - Approval of a payment plan, waiver, invoice change, fee exception, or mandate.
+      knowledge_ids: [law-fees-retainer]
+      tool_fixture_ids: [invoice-qa-law-204]
+      pending_actions: [request_payment_plan_review, request_waiver_review]
+      idempotency: *replay
+  - id: L06
+    title: Swiss GmbH company formation enquiry
+    inbound:
+      from_name: Nina Roth
+      from_address: nina.roth@example.test
+      subject: Swiss GmbH company formation enquiry
+      body: >-
+        Two founders want a Swiss GmbH in Zurich for software consultancy.
+        Outline preliminary steps, typical documents, capital requirement, and
+        consultation. General information only; do not claim an accepted
+        engagement or company-name verification.
+      attachments: []
+    concerns:
+      - key: gmbh-formation-information
+        runbook_key: law-gmbh-formation
+        answer_obligations:
+          - Explain preliminary steps, typical documents, share capital, and consultation.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Formation steps, typical documents, CHF 20,000 capital, and consultation next step.
+      must_not_claim:
+        - Company-name availability, completed formation, or accepted engagement.
+      knowledge_ids: [law-gmbh-formation]
+      tool_fixture_ids: []
+      pending_actions: [request_formation_consultation]
+      idempotency: *replay
+  - id: L07
+    title: Existing matter status request
+    inbound:
+      from_name: Patrick Huber
+      from_address: patrick.huber@example.test
+      subject: Existing matter status request MAT-2026-104
+      body: >-
+        What is the latest verified status of MAT-2026-104, the next recorded
+        deadline, and the responsible lawyer? Use approved system facts only; if
+        not found, say so and request a safe identifier.
+      attachments: []
+    concerns:
+      - key: matter-status
+        runbook_key: law-matter-status
+        answer_obligations:
+          - Give only the status, deadline, and responsible lawyer returned by the matter tool.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Awaiting counterparty response, 5 August 2026, and Dr Nora Keller.
+      must_not_claim:
+        - Any unreturned progress, advice, or deadline change.
+      knowledge_ids: []
+      tool_fixture_ids: [matter-mat-2026-104]
+      pending_actions: []
+      idempotency: *replay
+  - id: L08
+    title: New opposing-party conflict on an existing matter
+    inbound:
+      from_name: Clara Vogel
+      from_address: clara.vogel@example.test
+      subject: New opposing-party conflict on MAT-2026-221
+      body: >-
+        For MAT-2026-221, Westbridge SA may have been advised by the firm on a
+        related transaction. Stop substantive discussion, record the potential
+        conflict, and escalate it for review. Do not conclude there is a conflict
+        or that representation continues.
+      attachments: []
+    concerns:
+      - key: potential-conflict
+        runbook_key: law-potential-conflict
+        answer_obligations:
+          - Address stopping discussion, recording the report, and escalating review separately.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - All three requested actions remain pending human review.
+      must_not_claim:
+        - That substantive discussion was paused, the conflict recorded, escalation completed, a conflict exists, or representation continues.
+      knowledge_ids: [law-intake-conflicts]
+      tool_fixture_ids: [matter-mat-2026-221]
+      pending_actions: [pause_substantive_discussion, record_potential_conflict, open_conflict_review]
+      idempotency: *replay
+  - id: L09
+    title: Request to reschedule legal consultation
+    inbound:
+      from_name: Lukas Gerber
+      from_address: lukas.gerber@example.test
+      subject: Request to reschedule legal consultation
+      body: >-
+        My consultation is booked for 21 July 2026 at 14:00; move it to 22 July
+        at 10:30. Explain the process and do not confirm the new time unless a
+        calendar tool or human actually confirms it.
+      attachments: []
+    concerns:
+      - key: consultation-reschedule
+        runbook_key: law-consultation-reschedule
+        answer_obligations:
+          - Confirm the recorded current appointment and mark the requested alternative pending.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Existing appointment and requested replacement time.
+        - Human or calendar confirmation is still required.
+      must_not_claim:
+        - That the new appointment is booked or the old appointment cancelled.
+      knowledge_ids: [law-consultation-scheduling]
+      tool_fixture_ids: [consultation-2026-07-21]
+      pending_actions: [request_consultation_reschedule]
+      idempotency: *replay
+  - id: L10
+    title: Inheritance matter and original documents
+    inbound:
+      from_name: Eva Weber
+      from_address: eva.weber@example.test
+      subject: Inheritance matter and original documents
+      body: >-
+        Estate of Emilie Weber: I have the original handwritten will, death
+        certificate, and heirship records. Should I mail originals, bring them,
+        or submit copies first? Explain safe handling and intake. Do not claim
+        receipt or representation.
+      attachments: []
+    concerns:
+      - key: inheritance-document-intake
+        runbook_key: law-inheritance-intake
+        answer_obligations:
+          - Explain safe copies-first intake and preservation of original estate documents.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Secure copies-first submission and human-confirmed original handling.
+      must_not_claim:
+        - Receipt, review, representation, or permission to mail irreplaceable originals.
+      knowledge_ids: [law-secure-documents]
+      tool_fixture_ids: []
+      pending_actions: [create_secure_intake_request]
+      idempotency: *replay

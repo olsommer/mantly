@@ -15,6 +15,8 @@ from automail.pipeline.intent.intents_factory import get_intent_body
 
 logger = logging.getLogger(__name__)
 
+MAX_ROUTED_CONCERNS = 6
+
 _intents_dir_override: ContextVar[Any | None] = ContextVar(
     "intent_router_intents_dir",
     default=None,
@@ -53,17 +55,17 @@ def no_match(reason: str = "") -> str:
 def route_concerns(
     concerns: Annotated[
         list[ConcernRoute],
-        Field(min_length=1, max_length=3),
+        Field(min_length=1, max_length=MAX_ROUTED_CONCERNS),
     ],
 ) -> str:
-    """Route one to three independent email concerns to configured intents.
+    """Route one to six independent email concerns to configured intents.
 
     Set ``intent_name`` to null for a concern that has no matching runbook.
     ``source_text`` must be the smallest useful excerpt from the incoming email.
     """
     intents_dir = _intents_dir_override.get()
     routed: list[dict[str, Any]] = []
-    for concern in concerns[:3]:
+    for concern in concerns[:MAX_ROUTED_CONCERNS]:
         item = concern.model_dump()
         intent_name = str(concern.intent_name or "").strip()
         if intent_name and get_intent_body(intent_name, intents_dir=intents_dir) is None:

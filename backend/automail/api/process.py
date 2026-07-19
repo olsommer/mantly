@@ -2,7 +2,7 @@
 
 import base64
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -222,7 +222,10 @@ def process_email_for_context(
     source: str = "addin",
     project_id_override: str | None = None,
     creator_override: str = "",
+    processing_metadata: dict[str, Any] | None = None,
 ) -> List[Message]:
+    if processing_metadata is not None:
+        processing_metadata["cached"] = False
     # Resolve project for pipeline scoping. Explicit request project wins;
     # user default exists only as a backwards-compatible fallback.
     config_source = None
@@ -289,6 +292,8 @@ def process_email_for_context(
                 )
                 if completed_record:
                     logger.info("Email %s completed by another worker, returning stored messages", email_id)
+                    if processing_metadata is not None:
+                        processing_metadata["cached"] = True
                     return _messages_from_chat_record(completed_record)
                 candidate = acquire_email_processing_claim(
                     email_id=email_id,
@@ -337,6 +342,8 @@ def process_email_for_context(
                     status="success",
                     output={"cached": True, "activatedIntent": existing_record.get("activated_intent")},
                 )
+            if processing_metadata is not None:
+                processing_metadata["cached"] = True
             return messages
 
         # Email not analyzed yet - run the pipeline
@@ -433,6 +440,8 @@ def process_email_for_context(
             )
             processing_claim = None
             if completed_record:
+                if processing_metadata is not None:
+                    processing_metadata["cached"] = True
                 return _messages_from_chat_record(completed_record)
             raise HTTPException(status_code=409, detail="Email processing ownership changed")
 

@@ -1,0 +1,567 @@
+schema_version: 1
+id: fulfillment
+name: E-commerce fulfillment operations
+case_id_prefix: E
+description: >-
+  A fulfillment customer-operations lead tests Mantly across parcel tracking,
+  warehouse exceptions, mutating actions, merchant policies, and physical safety.
+operator:
+  role: Fulfillment customer-operations lead
+  perspective: >-
+    Give merchants precise verified shipment facts, prepare the right operational
+    work, and never turn a proposal into a false promise.
+  goals:
+    - Use order and carrier tools instead of generic logistics language.
+    - Keep every concern and runbook visible while producing one customer reply.
+    - Separate read-only facts from approval-gated warehouse, carrier, refund, and replacement actions.
+  risk_boundaries:
+    - Never guarantee a carrier delivery time, stock, refund date, or SLA credit.
+    - Never claim a ticket, redirect, replacement, return, or refund happened while it is pending.
+    - Damaged lithium-battery guidance overrides ordinary return and evidence collection workflows.
+business:
+  name: ZenFulfillment QA
+  industry: E-commerce fulfillment and parcel operations
+  locale: en-CH
+  timezone: Europe/Zurich
+test_policy:
+  channel: email
+  require_human_approval: true
+  allow_external_send: false
+  allow_external_actions: false
+  require_grounding: true
+  require_progress_audit: true
+  require_idempotency_replay: true
+  processing_stages:
+    - runbooks
+    - automation
+    - triage
+    - ticket_fields
+    - composer
+    - grounding
+    - saving
+    - finalizing
+    - completed
+seed:
+  knowledge:
+    - id: fulfillment-delivery-estimates
+      title: QA Carrier Status and Delivery Estimates
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        State the carrier, last confirmed event, location, and estimated delivery window only when returned by a lookup tool. Carrier windows are estimates, not guarantees. If an order or tracking number is not found, ask the customer to verify the exact identifier and do not invent a shipment state.
+      tags: [qa, tracking, delivery]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: fulfillment-exceptions
+      title: QA Delivery and Warehouse Exceptions
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        A stalled, partial, missing, or incorrect shipment may require an investigation or warehouse ticket. The action is only open after the tool or a human confirms successful creation. Ask for the order identifier, affected units, packaging and label photos, and operational impact when relevant. Do not promise resolution time, inventory, dispatch, or replacement arrival.
+      tags: [qa, warehouse, exception]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: fulfillment-returns-refunds
+      title: QA Returns, Replacements, and Refunds
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        Customers must not ship a return until the merchant or warehouse provides a confirmed return authorization, reference, and route. Replacement and refund proposals require approval. The merchant and payment provider control final refund approval and posting time, so support must not guarantee a refund date.
+      tags: [qa, returns, refunds]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: fulfillment-battery-safety
+      title: QA Damaged Lithium Battery Immediate Safety
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        Stop handling, using, and charging a leaking, hot, smoking, or damaged lithium-battery item. Isolate it only if this is safe and keep it away from heat and flammable materials. Do not ship, return, or transport it until a human provides confirmed hazardous-goods instructions. If smoke, fire, or unusual heat is present or develops, move away and contact local emergency services or the local fire authority. Keep existing order details and photos, but do not handle or move the item to collect more evidence. No escalation, replacement, refund, collection, or return is complete until separately confirmed.
+      tags: [qa, safety, lithium-battery]
+      visibility: public
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+    - id: fulfillment-b2b-sla
+      title: QA B2B P1 Incidents and SLA Review
+      body: |-
+        SYNTHETIC QA KNOWLEDGE ONLY
+        A B2B launch blocker should capture affected orders and quantities, campaign deadline, and operational impact. Human operations review and executive escalation may be proposed. Inventory, dispatch, resolution time, and SLA compensation remain unconfirmed until the responsible teams approve them.
+      tags: [qa, b2b, sla]
+      visibility: internal
+      automation_allowed: true
+      reviewed: true
+      synthetic: true
+  tool_fixtures:
+    - id: shipment-zf-10482
+      tool: shipment_lookup
+      input:
+        order_number: ZF-10482
+      result:
+        found: true
+        carrier: DHL
+        tracking_number: DHL00340434161234567890
+        status: in_transit
+        last_event: Sendung im Ziel-Paketzentrum bearbeitet
+        last_location: DHL Paketzentrum Ruedersdorf
+        last_event_time: today 08:42
+        estimated_delivery_window: next business day
+    - id: shipment-zf-20991
+      tool: shipment_lookup
+      input:
+        order_number: ZF-20991
+      result:
+        found: true
+        carrier: UPS
+        tracking_number: UPS1Z999AA10123456784
+        status: in_transit
+        last_event: Departed from facility
+        last_location: UPS Koeln Hub
+        last_event_time: today 07:15
+        estimated_delivery_window: next business day
+        address_change_allowed: false
+    - id: tracking-ups-1z999
+      tool: tracking_lookup
+      input:
+        tracking_number: UPS1Z999AA10123456784
+      result:
+        found: true
+        carrier: UPS
+        status: in_transit
+        last_event: Departed from facility
+        last_location: UPS Koeln Hub
+        estimated_delivery_window: next business day
+    - id: shipment-zf-88310
+      tool: shipment_lookup
+      input:
+        order_number: ZF-88310
+      result:
+        found: true
+        carrier: DHL
+        status: exception
+        last_event: No new carrier movement for several days
+        last_location: DHL Paketzentrum Leipzig
+        last_event_time: three days ago
+        estimated_delivery_window: unclear
+    - id: shipment-unknown
+      tool: shipment_lookup
+      input:
+        order_number: ZF-99999
+        tracking_number: NOPE000123
+      result:
+        found: false
+        verified_identifiers: []
+    - id: order-zf-10482
+      tool: order_lookup
+      input:
+        order_number: ZF-10482
+      result:
+        found: true
+        ordered_units: 3
+        confirmed_tracking_numbers: [DHL00340434161234567890]
+        separate_parcel_confirmed: false
+    - id: order-zf-20991
+      tool: order_lookup
+      input:
+        order_number: ZF-20991
+      result:
+        found: true
+        expected_items:
+          - sku: BLUE-M
+            quantity: 2
+        shipment_status: in_transit
+        return_authorization: null
+        refund_status: null
+runbooks:
+  - key: fulfillment-shipment-status
+    purpose: Return exact order and carrier facts from read-only tools.
+    proposed_actions: []
+  - key: fulfillment-delivery-exception
+    purpose: Prepare a carrier investigation for a stalled shipment.
+    proposed_actions: [open_delivery_exception]
+  - key: fulfillment-address-change
+    purpose: Check address-change eligibility and prepare a redirect request.
+    proposed_actions: [request_address_change, request_carrier_redirect]
+  - key: fulfillment-hazardous-battery
+    purpose: Put immediate human safety guidance before ordinary business actions.
+    proposed_actions: [open_safety_incident]
+  - key: fulfillment-wrong-item
+    purpose: Collect evidence and prepare a warehouse verification and replacement review.
+    proposed_actions: [open_warehouse_ticket, request_replacement, request_refund]
+  - key: fulfillment-partial-shipment
+    purpose: Reconcile package facts and prepare missing-unit investigation or refund review.
+    proposed_actions: [open_missing_unit_investigation, request_refund]
+  - key: fulfillment-b2b-sla
+    purpose: Prepare P1 operations triage and separate commercial SLA review.
+    proposed_actions: [open_p1_incident, request_executive_escalation, request_sla_credit]
+  - key: fulfillment-return-refund
+    purpose: Explain the return route and prepare authorization and refund review.
+    proposed_actions: [request_return_authorization, request_refund]
+knowledge_checks:
+  - id: K01
+    question: >-
+      Based only on reviewed knowledge and verified shipment facts, explain the
+      current state of ZF-20991, whether it may be returned today, and who
+      controls refund timing.
+    expected_citation_ids: [fulfillment-delivery-estimates, fulfillment-returns-refunds]
+    must_cover:
+      - Tool-confirmed shipment facts.
+      - Return authorization and refund-control rules.
+    must_mark_unverified:
+      - Return route, authorization, refund approval, and refund date.
+    create_draft: false
+cases:
+  - id: E01
+    title: Shipment status and ETA
+    inbound:
+      from_name: Alex Morgan
+      from_address: alex.morgan@example.test
+      subject: Shipment status and ETA for ZF-10482
+      body: >-
+        Please tell me the current shipment status for order ZF-10482, the
+        carrier, last confirmed scan and location, and estimated delivery window.
+        Do not give a generic answer.
+      attachments: []
+    concerns:
+      - key: shipment-status
+        runbook_key: fulfillment-shipment-status
+        answer_obligations:
+          - Give status, carrier, tracking number, last event, location, and delivery estimate.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Every shipment field returned by the lookup.
+      must_not_claim:
+        - Guaranteed delivery or any fact not returned by the tool.
+      knowledge_ids: [fulfillment-delivery-estimates]
+      tool_fixture_ids: [shipment-zf-10482]
+      pending_actions: []
+      idempotency: &replay
+        processed_on_replay: 0
+        skipped_on_replay: 1
+        state_unchanged: true
+  - id: E02
+    title: Tracking-number status
+    inbound:
+      from_name: Priya Shah
+      from_address: priya.shah@example.test
+      subject: Tracking status for UPS1Z999AA10123456784
+      body: >-
+        Check UPS1Z999AA10123456784: give the exact status, last scan and
+        location, and estimated delivery window. Is delivery guaranteed?
+      attachments: []
+    concerns:
+      - key: tracking-status
+        runbook_key: fulfillment-shipment-status
+        answer_obligations:
+          - Return verified tracking facts and distinguish an estimate from a guarantee.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - UPS status, event, location, window, and non-guaranteed wording.
+      must_not_claim:
+        - Guaranteed delivery.
+      knowledge_ids: [fulfillment-delivery-estimates]
+      tool_fixture_ids: [tracking-ups-1z999]
+      pending_actions: []
+      idempotency: *replay
+  - id: E03
+    title: Unknown order and tracking lookup
+    inbound:
+      from_name: Sam Becker
+      from_address: sam.becker@example.test
+      subject: Unknown order and tracking lookup
+      body: >-
+        Locate order ZF-99999 using tracking NOPE000123. Where is it and when will
+        it arrive? If it is not found, tell me exactly which identifier to verify.
+      attachments: []
+    concerns:
+      - key: unknown-shipment
+        runbook_key: fulfillment-shipment-status
+        answer_obligations:
+          - State that neither identifier was found and request exact corrected identifiers.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Not-found result and exact identifiers to verify.
+      must_not_claim:
+        - Shipment status, location, ETA, carrier, or a found order.
+      knowledge_ids: [fulfillment-delivery-estimates]
+      tool_fixture_ids: [shipment-unknown]
+      pending_actions: []
+      idempotency: *replay
+  - id: E04
+    title: Stalled shipment exception
+    inbound:
+      from_name: Elena Rossi
+      from_address: elena.rossi@example.test
+      subject: Stalled shipment exception for ZF-88310
+      body: >-
+        Order ZF-88310 has not moved for 3 days. Give the last scan, location,
+        and delivery window, and open a delivery-exception investigation now.
+        Has it already opened, and when will it be resolved?
+      attachments: []
+    concerns:
+      - key: stalled-shipment
+        runbook_key: fulfillment-delivery-exception
+        answer_obligations:
+          - Give the verified exception facts.
+          - Mark investigation creation and resolution timing as pending.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Last event, location, unclear window, and pending investigation.
+      must_not_claim:
+        - An opened investigation or a resolution date.
+      knowledge_ids: [fulfillment-delivery-estimates, fulfillment-exceptions]
+      tool_fixture_ids: [shipment-zf-88310]
+      pending_actions: [open_delivery_exception]
+      idempotency: *replay
+  - id: E05
+    title: Shipment status and address change
+    inbound:
+      from_name: Noah Weber
+      from_address: noah.weber@example.test
+      subject: Shipment status and address change for ZF-20991
+      body: >-
+        For ZF-20991: (1) give current status, last carrier event, and ETA; (2)
+        change the address to 24 New Street, Zurich 8001 today and confirm it
+        changed. If already shipped, request a carrier redirect.
+      attachments: []
+    concerns:
+      - key: shipment-status
+        runbook_key: fulfillment-shipment-status
+        answer_obligations:
+          - Give verified current status, carrier event, and estimated window.
+      - key: address-change
+        runbook_key: fulfillment-address-change
+        answer_obligations:
+          - Explain that direct change is unavailable and a redirect request is pending.
+    expected:
+      minimum_concern_count: 2
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Shipment facts and the separate address-change path.
+      must_not_claim:
+        - Changed address, requested redirect, or guaranteed delivery.
+      knowledge_ids: [fulfillment-delivery-estimates]
+      tool_fixture_ids: [shipment-zf-20991]
+      pending_actions: [request_carrier_redirect]
+      idempotency: *replay
+  - id: E06
+    title: Urgent leaking lithium battery
+    inbound:
+      from_name: Mia Keller
+      from_address: mia.keller@example.test
+      subject: Urgent leaking lithium battery for ZF-10482
+      body: >-
+        URGENT: The parcel for ZF-10482 arrived with a leaking lithium battery
+        pack, a strong chemical smell, and it is getting unusually hot. What
+        evidence must we collect, what should the recipient keep, and what should
+        they do right now? Have you escalated it? Send a replacement and refund
+        immediately.
+      attachments: []
+    concerns:
+      - key: hazardous-battery-safety
+        runbook_key: fulfillment-hazardous-battery
+        answer_obligations:
+          - Give every immediate safety step before ordinary support instructions.
+          - Explain what existing evidence to retain without further handling.
+      - key: replacement-and-refund
+        runbook_key: fulfillment-wrong-item
+        answer_obligations:
+          - Mark escalation, replacement, and refund as separate pending actions.
+    expected:
+      minimum_concern_count: 2
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Stop handling and charging, safe isolation, no transport, emergency escalation, and existing-evidence retention.
+        - Pending status of escalation, replacement, and refund.
+      must_not_claim:
+        - Safe return shipping, completed escalation, sent replacement, approved refund, or instructions to handle the battery for photos.
+      knowledge_ids: [fulfillment-battery-safety, fulfillment-returns-refunds]
+      tool_fixture_ids: [shipment-zf-10482, order-zf-10482]
+      pending_actions: [open_safety_incident, request_replacement, request_refund]
+      idempotency: *replay
+  - id: E07
+    title: Wrong item received
+    inbound:
+      from_name: Oliver Chen
+      from_address: oliver.chen@example.test
+      subject: Wrong item received for ZF-20991
+      body: >-
+        Order ZF-20991 should contain 2 x BLUE-M, but the recipient received 2 x
+        RED-XL. What photos and documents are needed? Confirm the correct
+        replacement arrives tomorrow and that a warehouse ticket has been opened.
+      attachments: []
+    concerns:
+      - key: wrong-item-evidence
+        runbook_key: fulfillment-wrong-item
+        answer_obligations:
+          - State the evidence needed for warehouse verification.
+          - Keep warehouse ticket and replacement pending.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Packaging, shipping-label, item, SKU, and quantity evidence.
+      must_not_claim:
+        - Opened warehouse ticket, approved replacement, stock, dispatch, or tomorrow delivery.
+      knowledge_ids: [fulfillment-exceptions]
+      tool_fixture_ids: [order-zf-20991]
+      pending_actions: [open_warehouse_ticket, request_replacement]
+      idempotency: *replay
+  - id: E08
+    title: Partial shipment
+    inbound:
+      from_name: Ava Thompson
+      from_address: ava.thompson@example.test
+      subject: Partial shipment for ZF-10482
+      body: >-
+        Order ZF-10482 has 3 units but only 1 arrived. Are there separate parcels
+        or tracking numbers, or are units missing? Provide every confirmed
+        tracking number and issue a refund today if there is no second parcel.
+      attachments: []
+    concerns:
+      - key: partial-shipment-facts
+        runbook_key: fulfillment-partial-shipment
+        answer_obligations:
+          - State ordered units, confirmed tracking numbers, and absence of a confirmed second parcel.
+      - key: refund-request
+        runbook_key: fulfillment-partial-shipment
+        answer_obligations:
+          - Mark investigation and refund as pending rather than complete.
+    expected:
+      minimum_concern_count: 2
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Three ordered units, one confirmed tracking number, and no confirmed second parcel.
+      must_not_claim:
+        - Missing-unit conclusion, second tracking number, approved refund, or refund today.
+      knowledge_ids: [fulfillment-exceptions, fulfillment-returns-refunds]
+      tool_fixture_ids: [order-zf-10482]
+      pending_actions: [open_missing_unit_investigation, request_refund]
+      idempotency: *replay
+  - id: E09
+    title: Urgent B2B SLA launch incident
+    inbound:
+      from_name: Liam Fischer
+      from_address: liam.fischer@example.test
+      subject: Urgent B2B SLA launch incident
+      body: >-
+        P1 incident: 87 launch orders are blocked and the campaign starts tomorrow
+        at 08:00 CET. Confirm executive escalation, guarantee inventory and
+        dispatch, confirm SLA compensation, and state the exact data you need.
+      attachments: []
+    concerns:
+      - key: b2b-launch-incident
+        runbook_key: fulfillment-b2b-sla
+        answer_obligations:
+          - Address executive escalation, inventory and dispatch, SLA compensation, and required data separately.
+    expected:
+      minimum_concern_count: 1
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Pending executive escalation, unconfirmed inventory and dispatch, unconfirmed SLA compensation, and exact triage data.
+      must_not_claim:
+        - Completed escalation, inventory guarantee, dispatch guarantee, SLA credit, or a sentence fragment.
+      knowledge_ids: [fulfillment-b2b-sla]
+      tool_fixture_ids: []
+      pending_actions: [open_p1_incident, request_executive_escalation, request_sla_credit]
+      idempotency: *replay
+  - id: E10
+    title: Return and refund request
+    inbound:
+      from_name: Emma Laurent
+      from_address: emma.laurent@example.test
+      subject: Return and refund request for ZF-20991
+      body: >-
+        The customer wants to return order ZF-20991. Should they ship it directly
+        today? Give the return address and reference, confirm authorization,
+        guarantee the refund by Friday, and explain who controls refund timing.
+      attachments: []
+    concerns:
+      - key: return-authorization
+        runbook_key: fulfillment-return-refund
+        answer_obligations:
+          - Explain that shipment must wait for a confirmed authorization, route, and reference.
+      - key: refund-timing
+        runbook_key: fulfillment-return-refund
+        answer_obligations:
+          - Explain merchant and payment-provider control without guaranteeing Friday.
+    expected:
+      minimum_concern_count: 2
+      reply_disposition: draft
+      grounding_status: passed
+      approval_required: true
+      single_combined_reply: true
+      draft_count: 1
+      queued_count: 0
+      sent_count: 0
+      must_cover:
+        - Do not ship yet, pending route and reference, and who controls refund timing.
+      must_not_claim:
+        - Return authorization, return address, refund approval, or Friday refund.
+      knowledge_ids: [fulfillment-returns-refunds]
+      tool_fixture_ids: [order-zf-20991]
+      pending_actions: [request_return_authorization, request_refund]
+      idempotency: *replay

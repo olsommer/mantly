@@ -180,10 +180,8 @@ def test_ingest_email_webhook_processes_message_and_records_sync_run(monkeypatch
         return []
 
     monkeypatch.setattr(ingestion, "process_email_for_context", fake_process)
-    monkeypatch.setattr(
-        ingestion,
-        "get_issue_by_chat_id",
-        lambda chat_id, **_kwargs: {
+    def fake_get_issue(chat_id, **_kwargs):
+        return {
             "id": f"issue:{chat_id}",
             "metadata": {
                 "ticketCreationMode": "per_message",
@@ -199,8 +197,9 @@ def test_ingest_email_webhook_processes_message_and_records_sync_run(monkeypatch
                     "sourceMessageId": chat_id,
                 },
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(ingestion, "get_issue_by_chat_id", fake_get_issue)
     monkeypatch.setattr(
         ingestion,
         "record_channel_sync_run",
@@ -244,7 +243,69 @@ def test_ingest_email_webhook_processes_message_and_records_sync_run(monkeypatch
     assert sync_runs[0]["channel_id"] == "channel1"
     assert sync_runs[0]["source"] == "email-webhook"
     assert sync_runs[0]["result"]["status"] == "success"
-    assert sync_runs[0]["result"]["items"][0]["resolver"]["sourceMessageId"] == "channel:email:support:provider-msg-1"
+    assert sync_runs[0]["result"]["items"][0]["resolver"]["sourceMessageId"] == (
+        "channel:email:support:provider-msg-1"
+    )
+
+
+def test_ingest_email_webhook_reports_replay_as_skipped(monkeypatch):
+    sync_runs: list[dict] = []
+    issue = {
+        "id": "issue-existing",
+        "metadata": {
+            "ticketCreationMode": "per_thread",
+            "sourceIssueId": "channel:email:support:provider-msg-1",
+            "sourceMessageId": "provider-msg-1",
+            "resolver": {
+                "provider": "email",
+                "resolverAction": "updated",
+            },
+        },
+    }
+    monkeypatch.setattr(
+        ingestion,
+        "get_channel_by_key",
+        lambda *_args, **_kwargs: {
+            "id": "channel1",
+            "channelKey": "email:support",
+            "type": "email",
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(ingestion, "get_issue_by_chat_id", lambda *_args, **_kwargs: issue)
+    def fake_cached_process(*_args, **kwargs):
+        kwargs["processing_metadata"]["cached"] = True
+        return []
+
+    monkeypatch.setattr(ingestion, "process_email_for_context", fake_cached_process)
+    monkeypatch.setattr(
+        ingestion,
+        "record_channel_sync_run",
+        lambda **kwargs: sync_runs.append(kwargs),
+    )
+
+    result = ingestion.ingest_email_webhook(
+        "email:support",
+        tenant_id="tenant1",
+        project_id="project1",
+        payload={
+            "email": {
+                "messageId": "provider-msg-1",
+                "threadId": "thread-1",
+                "subject": "Need help",
+                "fromAddress": "customer@example.com",
+                "body": "Please help.",
+            },
+        },
+    )
+
+    assert result["status"] == "skipped"
+    assert result["processed"] == 0
+    assert result["failed"] == 0
+    assert result["skipped"] == 1
+    assert result["items"][0]["issueId"] == "issue-existing"
+    assert result["items"][0]["messageId"] == "provider-msg-1"
+    assert sync_runs[0]["result"] == result
 
 
 def test_sync_support_channel_migrates_legacy_inbound_cursor(monkeypatch):

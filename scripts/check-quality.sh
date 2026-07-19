@@ -7,7 +7,13 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-${TMPDIR:-/tmp}/isarai-email-agent-uv-cache
 echo "== Backend Ruff =="
 (
   cd "$ROOT/backend"
-  uv run ruff check automail tests
+  uv run ruff check automail tests ../e2e
+)
+
+echo "== Backend pytest =="
+(
+  cd "$ROOT/backend"
+  uv run pytest -q
 )
 
 echo "== Backend Pyright =="

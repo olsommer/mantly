@@ -461,12 +461,14 @@ def ingest_email_webhook(
     actor = actor_email or _string(record.get("creator") or record.get("actorEmail")) or "email-webhook"
     item: dict[str, Any] = {
         "id": message.id,
+        "messageId": message.message_id or message.id,
         "emailId": logical_email_id,
         "subject": message.subject,
         "status": "processed",
         "issueId": "",
     }
     try:
+        processing_metadata: dict[str, Any] = {}
         process_email_for_context(
             ProcessEmailRequest(
                 email=Email(
@@ -489,19 +491,22 @@ def ingest_email_webhook(
             source=f"channel:{clean_channel_key}",
             project_id_override=project_id,
             creator_override=actor,
+            processing_metadata=processing_metadata,
         )
         issue = get_issue_by_chat_id(logical_email_id, tenant_id=tenant_id, project_id=project_id)
         item["issueId"] = issue.get("id", "") if issue else ""
         item.update(_issue_resolver_result(issue))
+        was_cached = processing_metadata.get("cached") is True
+        item["status"] = "skipped" if was_cached else "processed"
         result = {
             "channelId": channel_id,
             "channelKey": clean_channel_key,
             "adapter": "email_webhook",
             "cursorKey": "",
-            "status": "success",
-            "processed": 1,
+            "status": "skipped" if was_cached else "success",
+            "processed": 0 if was_cached else 1,
             "failed": 0,
-            "skipped": 0,
+            "skipped": 1 if was_cached else 0,
             "cursorValue": message.cursor_value or message.id,
             "items": [item],
             "error": "",

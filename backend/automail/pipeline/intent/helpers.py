@@ -2,6 +2,7 @@
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,12 +14,16 @@ from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attem
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.integrations.http_tool import _make_http_tool, current_generated_attachments, raw_tool_to_definition
 from automail.models import ConcernRoute, Email, IdentityResult, IntentAction
+from automail.pipeline.intent.activate_intent import MAX_ROUTED_CONCERNS
 from automail.pipeline.intent.intents_factory import (
     get_intent_frontmatters,
     get_intent_tools,
 )
 
 logger = logging.getLogger(__name__)
+
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+_ACTION_SELECTION_PROMPT = (_PROMPTS_DIR / "action_selection.md").read_text(encoding="utf-8").strip()
 
 
 def _retry_exception(retry_state: RetryCallState) -> BaseException | str:
@@ -154,7 +159,7 @@ def _find_routed_concerns(messages: list[Any]) -> list[ConcernRoute] | None:
         return []
 
     concerns: list[ConcernRoute] = []
-    for raw in raw_concerns[:3]:
+    for raw in raw_concerns[:MAX_ROUTED_CONCERNS]:
         if not isinstance(raw, dict):
             continue
         try:
@@ -338,6 +343,9 @@ def _build_process_user_message(
             )
             extra = f" (uses: {', '.join(mapped_fields)})" if mapped_fields else ""
             parts.append(f"- **{a.name}**: {desc}{extra}")
+
+    if actions:
+        parts.extend(["", _ACTION_SELECTION_PROMPT])
 
     parts.extend([
         "",

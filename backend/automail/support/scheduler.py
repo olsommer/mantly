@@ -15,6 +15,7 @@ from automail.db.pocketbase.client import (
     record_delivery_run,
     run_sla_breach_escalations_for_scope,
 )
+from automail.support.channel_test_jobs import run_queued_channel_test_jobs
 from automail.support.crm import sync_support_crm_connectors_for_scope
 from automail.support.ingestion import sync_support_channels_for_scope
 
@@ -25,11 +26,13 @@ _delivery_started = False
 _crm_started = False
 _sla_started = False
 _processing_expiry_started = False
+_channel_test_jobs_started = False
 _lock = threading.Lock()
 _delivery_lock = threading.Lock()
 _crm_lock = threading.Lock()
 _sla_lock = threading.Lock()
 _processing_expiry_lock = threading.Lock()
+_channel_test_jobs_lock = threading.Lock()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -193,6 +196,17 @@ def run_scheduled_support_processing_expiry(
     )
 
 
+def run_scheduled_channel_test_jobs(
+    *,
+    limit: int = 25,
+    stale_minutes: int = 16,
+) -> dict[str, Any]:
+    return run_queued_channel_test_jobs(
+        limit=max(1, min(limit, 200)),
+        stale_minutes=max(1, stale_minutes),
+    )
+
+
 def _loop_sync(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
     while True:
         started = time.monotonic()
@@ -304,6 +318,27 @@ def _loop_processing_expiry(
             )
         except Exception:
             logger.warning("Support processing expiry run failed", exc_info=True)
+        elapsed = time.monotonic() - started
+        time.sleep(max(1, interval_seconds - int(elapsed)))
+
+
+def _loop_channel_test_jobs(interval_seconds: int, limit: int, stale_minutes: int) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            result = run_scheduled_channel_test_jobs(
+                limit=limit,
+                stale_minutes=stale_minutes,
+            )
+            if result.get("inspected"):
+                logger.info(
+                    "Admin channel test job recovery: inspected=%s started=%s skipped=%s",
+                    result.get("inspected"),
+                    result.get("started"),
+                    result.get("skipped"),
+                )
+        except Exception:
+            logger.warning("Admin channel test job recovery failed", exc_info=True)
         elapsed = time.monotonic() - started
         time.sleep(max(1, interval_seconds - int(elapsed)))
 
@@ -445,4 +480,28 @@ def start_support_processing_expiry_scheduler() -> bool:
         interval_seconds,
         project_id or "*",
     )
+    return True
+
+
+def start_channel_test_job_scheduler() -> bool:
+    """Start default-on recovery for durably queued admin test messages."""
+
+    global _channel_test_jobs_started
+    interval_seconds = _int_env("SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS", 5)
+    if interval_seconds <= 0:
+        return False
+    limit = _int_env("SUPPORT_CHANNEL_TEST_JOB_LIMIT", 25)
+    stale_minutes = _int_env("SUPPORT_CHANNEL_TEST_JOB_STALE_MINUTES", 16)
+    with _channel_test_jobs_lock:
+        if _channel_test_jobs_started:
+            return True
+        thread = threading.Thread(
+            target=_loop_channel_test_jobs,
+            args=(interval_seconds, limit, stale_minutes),
+            daemon=True,
+            name="channel-test-job-scheduler",
+        )
+        thread.start()
+        _channel_test_jobs_started = True
+    logger.info("Admin channel test job scheduler started interval=%ss", interval_seconds)
     return True

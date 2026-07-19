@@ -1963,11 +1963,13 @@ export interface SupportChannelSyncResult {
 }
 
 export interface SupportChannelTestMessageResult {
+    accepted?: boolean;
     status: string;
     processed: number;
     failed: number;
     skipped: number;
     unmatched?: number;
+    error?: string;
     payload: Record<string, unknown>;
     items: Array<{
         eventId?: string;
@@ -1977,6 +1979,13 @@ export interface SupportChannelTestMessageResult {
         messageId?: string;
         error?: string;
     }>;
+    runId?: string;
+    jobEventId?: string;
+    eventId?: string;
+    messageId?: string;
+    issueId?: string;
+    sourceIssueId?: string;
+    sourceMessageId?: string;
 }
 
 export interface SupportChannelSmokeResult extends SupportChannelTestMessageResult {
@@ -3869,6 +3878,12 @@ export const api = {
         },
     ): Promise<ApiResponse<SupportChannelTestMessageResult>> => {
         return apiClient.post(`${p(projectId)}/channels/${encodeURIComponent(channelId)}/test-message`, data);
+    },
+    getChannelTestMessageJob: async (
+        projectId: string,
+        runId: string,
+    ): Promise<ApiResponse<SupportChannelTestMessageResult>> => {
+        return apiClient.get(`${p(projectId)}/channels/test-message-jobs/${encodeURIComponent(runId)}`);
     },
     smokeChannel: async (
         projectId: string,

@@ -38,6 +38,7 @@ from automail.models import (
     VerifiedFact,
 )
 from automail.pipeline.intent.activate_intent import (
+    MAX_ROUTED_CONCERNS,
     activate_intent,
     no_match,
     route_concerns,
@@ -209,6 +210,58 @@ def _merge_action_fills(actions: list[IntentAction], output: IntentProcessingOut
     return len(fills_by_name)
 
 
+def _select_applicable_actions(
+    actions: list[IntentAction],
+    output: IntentProcessingOutput,
+) -> list[IntentAction]:
+    """Filter configured actions using the runbook's explicit selection.
+
+    Missing or unknown selections fail closed before any action outcome reaches
+    grounding or approval consumers. Valid selections preserve configured order
+    and collapse duplicate names.
+    """
+    if _action_selection_error(actions, output):
+        return []
+
+    selected_names = {
+        name.strip()
+        for name in output.selected_action_names
+        if name.strip()
+    }
+    selected: list[IntentAction] = []
+    seen: set[str] = set()
+    for action in actions:
+        if action.name not in selected_names or action.name in seen:
+            continue
+        selected.append(action)
+        seen.add(action.name)
+    return selected
+
+
+def _action_selection_error(
+    actions: list[IntentAction],
+    output: IntentProcessingOutput,
+) -> str:
+    if not actions:
+        return ""
+    if output.selected_action_names is None:
+        return "Runbook action selection was missing; all configured actions were suppressed."
+    configured_names = {action.name for action in actions}
+    invalid_names = sorted(
+        {
+            str(name).strip()
+            for name in output.selected_action_names
+            if not str(name).strip() or str(name).strip() not in configured_names
+        }
+    )
+    if invalid_names:
+        return (
+            "Runbook action selection contained unknown action names; all configured "
+            "actions were suppressed."
+        )
+    return ""
+
+
 def _default_open_ticket_task(email: Email) -> str:
     subject = " ".join(email.subject.split())
     body = " ".join(email.body.split())
@@ -377,7 +430,7 @@ def _route_concerns_call_is_invalid(messages: list[Any]) -> bool:
         return False
 
     raw_concerns = args.get("concerns")
-    if not isinstance(raw_concerns, list) or not 1 <= len(raw_concerns) <= 3:
+    if not isinstance(raw_concerns, list) or not 1 <= len(raw_concerns) <= MAX_ROUTED_CONCERNS:
         return True
     for raw_concern in raw_concerns:
         if not isinstance(raw_concern, dict):
@@ -505,7 +558,7 @@ def _run_intent_router_agent(
     if routed:
         canonical_names = {name.casefold(): name for name in known_intents}
         normalized: list[ConcernRoute] = []
-        for concern in routed[:3]:
+        for concern in routed[:MAX_ROUTED_CONCERNS]:
             intent_name = str(concern.intent_name or "").strip()
             canonical_name = canonical_names.get(intent_name.casefold()) if intent_name else None
             reason = concern.reason.strip()
@@ -1217,6 +1270,8 @@ def _build_routed_concern_outcome(
     requires_review = get_intent_require_review(intent_name, intents_dir=intents_dir)
     focused_email, processing_email = _concern_processing_email(email, route)
     output: IntentProcessingOutput | IntentReviewOutput = IntentReviewOutput()
+    applicable_actions = intent_result.actions
+    action_selection_error = ""
     fills_count = 0
 
     if _intent_needs_processing(
@@ -1237,8 +1292,10 @@ def _build_routed_concern_outcome(
             project_id,
         )
         if intent_result.actions and isinstance(output, IntentProcessingOutput):
-            fills_count = _merge_action_fills(intent_result.actions, output)
-            fills_count += _ensure_open_ticket_action_task(intent_result.actions, focused_email)
+            action_selection_error = _action_selection_error(intent_result.actions, output)
+            applicable_actions = _select_applicable_actions(intent_result.actions, output)
+            fills_count = _merge_action_fills(applicable_actions, output)
+            fills_count += _ensure_open_ticket_action_task(applicable_actions, focused_email)
     else:
         logger.info("Intent '%s' requires no tool or action processing", intent_name)
 
@@ -1248,13 +1305,15 @@ def _build_routed_concern_outcome(
         review_reasons.append("Intent is configured to require human review.")
     if output.requires_human:
         review_reasons.append(output.requires_human_reason or "Intent processing requires human review.")
+    if action_selection_error:
+        review_reasons.append(action_selection_error)
     requires_human_reason = "; ".join(_dedupe_strings(review_reasons)) or None
 
     logger.info(
         "Runbook outcome: concern=%s, intent=%s, actions=%d, fills=%d, evidence=%d",
         concern_id,
         intent_name,
-        len(intent_result.actions),
+        len(applicable_actions),
         fills_count,
         len(tool_evidence),
     )
@@ -1268,8 +1327,8 @@ def _build_routed_concern_outcome(
         intent_name=intent_name,
         status="requires_human" if requires_human_reason else "ready",
         summary=output.summary or route.summary,
-        actions=intent_result.actions,
-        action_outcomes=_action_outcomes(intent_result.actions),
+        actions=applicable_actions,
+        action_outcomes=_action_outcomes(applicable_actions),
         verified_facts=_verified_facts(tool_evidence),
         tool_evidence=tool_evidence,
         missing_information=output.missing_information,
@@ -1637,7 +1696,7 @@ def run_intent_agent(
     tenant_id: str | None = None,
     project_id: str | None = None,
 ) -> tuple[IntentResult, AgentResponse | None]:
-    """Classify up to three concerns and execute each matched runbook."""
+    """Classify up to six concerns and execute each matched runbook."""
     known_intents = get_known_intent_names(intents_dir=intents_dir)
     if not known_intents:
         logger.info("No intents configured; skipping intent phase")
@@ -1669,7 +1728,7 @@ def run_intent_agent(
 
     executions: list[ConcernExecutionResult] = []
     occurrences: dict[str, int] = {}
-    for route in routes[:3]:
+    for route in routes[:MAX_ROUTED_CONCERNS]:
         concern_id = _concern_id(email, route, occurrences)
         executions.append(
             _execute_routed_concern_result(

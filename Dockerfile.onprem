@@ -101,6 +101,7 @@ COPY backend/pb_migrations/ ./pb_migrations/
 # Manifest template for the download endpoint
 RUN mkdir -p /app/backend/resources
 COPY demo /app/demo
+COPY e2e/ /app/e2e/
 COPY addin/manifest.xml /app/backend/resources/manifest.xml
 
 # Copy icon assets for Outlook manifest

@@ -11,7 +11,7 @@ available intent descriptions below.
 ## Available Intents
 {intents_list}
 
-Call `route_concerns` exactly once with between one and three concerns.
+Call `route_concerns` exactly once with between one and six concerns.
 
 - Keep concerns separate when they can require different runbooks, actions, or
   customer-facing decisions.
@@ -35,7 +35,7 @@ Call `route_concerns` exactly once with between one and three concerns.
   same runbook repeatedly.
 - The same intent may appear more than once when the email contains distinct
   instances, such as requests about two different orders.
-- If more than three concerns exist, combine only closely related concerns and
-  keep the three most operationally important concern groups.
+- If more than six concerns exist, combine only closely related concerns and
+  keep the six most operationally important concern groups.
 
 Never invent intent names. Never answer the email. Never draft response prose.

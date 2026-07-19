@@ -199,19 +199,22 @@ def test_overlapping_connected_email_runs_pipeline_store_and_sync_once(monkeypat
     )
 
     results: list[list[Any]] = []
+    processing_metadata: list[dict[str, Any]] = []
     errors: list[BaseException] = []
 
     def process() -> None:
         try:
-            results.append(
-                process_email_for_context(
-                    _request(),
-                    tenant_id=None,
-                    payload=None,
-                    source="channel:email-main",
-                    project_id_override="project-1",
-                )
+            metadata: dict[str, Any] = {}
+            result = process_email_for_context(
+                _request(),
+                tenant_id=None,
+                payload=None,
+                source="channel:email-main",
+                project_id_override="project-1",
+                processing_metadata=metadata,
             )
+            results.append(result)
+            processing_metadata.append(metadata)
         except BaseException as exc:
             errors.append(exc)
 
@@ -238,6 +241,7 @@ def test_overlapping_connected_email_runs_pipeline_store_and_sync_once(monkeypat
     assert [message.model_dump() for message in results[0]] == [
         message.model_dump() for message in results[1]
     ]
+    assert sorted(item["cached"] for item in processing_metadata) == [False, True]
     assert counts == {"pipeline": 1, "store": 1, "sync": 1, "recorder": 1}
     assert len(store.records) == 1
     assert next(iter(store.records.values()))["status"] == "completed"

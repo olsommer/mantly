@@ -37,6 +37,7 @@ workflow builder or a legacy helpdesk with an AI sidebar.
 | `landing/` | React/Vite marketing site |
 | `pocketbase/` | PocketBase image and startup logic |
 | `demo/` | Demo fixtures, actions, pipelines, and sample data |
+| `e2e/` | Reusable test personas, synthetic knowledge, tool facts, and lifecycle expectations |
 | `deploy/` | Customer deployment assets |
 | `docs/` | Product, implementation, and deployment documentation |
 | `scripts/` | Quality, release, packaging, and smoke-test tooling |

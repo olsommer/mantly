@@ -58,6 +58,7 @@ services:
       PB_PUBLIC_URL: "${PB_PUBLIC_URL:-${PUBLIC_URL}/pb}"
       ADDIN_ID: "${ADDIN_ID:-}"
       ENABLE_DEMO_MODE: "${ENABLE_DEMO_MODE:-false}"
+      ENABLE_E2E_FIXTURES: "${ENABLE_E2E_FIXTURES:-false}"
 
       # ── LLM ────────────────────────────────────────────────────────────
       # Free uses the Mantly-managed key. Paid tenants can BYOK in settings.

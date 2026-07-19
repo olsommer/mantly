@@ -64,6 +64,7 @@ COPY backend/ ./
 RUN mkdir -p /app/backend/resources
 COPY brand.json /app/brand.json
 COPY demo /app/demo
+COPY e2e/ /app/e2e/
 COPY addin/manifest.xml /app/backend/resources/manifest.xml
 
 # Copy icon assets for Outlook manifest

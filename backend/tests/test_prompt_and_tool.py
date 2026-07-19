@@ -665,7 +665,7 @@ class TestRequireHumanReview:
             pytest.param(
                 [{"name": "open-ticket", "label": "Open ticket", "type": "button"}],
                 [],
-                IntentProcessingOutput(),
+                IntentProcessingOutput(selected_action_names=["open-ticket"]),
                 id="action",
             ),
         ],
@@ -1196,7 +1196,12 @@ class TestIntentAttachmentContext:
             }],
         )
         monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
-        monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", lambda *_args, **_kwargs: IntentProcessingOutput())
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent._run_processing_agent",
+            lambda *_args, **_kwargs: IntentProcessingOutput(
+                selected_action_names=["open_claim"]
+            ),
+        )
 
         intent_result, agent_response = run_intent_agent(email=_make_email(body="Please open a claim."))
 

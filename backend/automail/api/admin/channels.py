@@ -16,7 +16,7 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import Field
 
@@ -50,6 +50,7 @@ from automail.db.pocketbase.client import (
     upsert_crm_connector,
 )
 from automail.models import CamelCaseModel
+from automail.support.channel_test_jobs import enqueue_channel_test_message, get_channel_test_job_status
 from automail.support.crm import sync_support_crm_connector, sync_support_crm_connectors, validate_crm_connector
 from automail.support.delivery import send_support_channel_reply
 from automail.support.ingestion import ingest_email_webhook, sync_support_channel, sync_support_channels
@@ -9125,7 +9126,10 @@ async def sync_channel(channel_id: str, ctx: ProjectEditorDep, auth: AuthDep, li
         raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 400, detail=str(exc)) from exc
 
 
-@router.post("/projects/{pid}/channels/{channel_id}/test-message")
+@router.post(
+    "/projects/{pid}/channels/{channel_id}/test-message",
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def test_channel_message(channel_id: str, body: ChannelTestMessageInput, ctx: ProjectEditorDep) -> dict[str, Any]:
     channel = get_channel(
         channel_id,
@@ -9144,16 +9148,26 @@ async def test_channel_message(channel_id: str, body: ChannelTestMessageInput, c
     channel_type = str(channel.get("type") or "webhook").strip() or "webhook"
     payload, _event_id, _message_id = _generic_test_message_payload(channel_key, channel_type, body)
     try:
-        result = ingest_channel_webhook(
-            channel_key,
+        return enqueue_channel_test_message(
+            channel=channel,
             payload=payload,
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
-            source="admin-test",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"payload": payload, **result}
+
+
+@router.get("/projects/{pid}/channels/test-message-jobs/{job_id}")
+async def channel_test_message_job(job_id: str, ctx: ProjectViewerDep) -> dict[str, Any]:
+    result = get_channel_test_job_status(
+        job_id,
+        tenant_id=ctx.tenant_id,
+        project_id=ctx.project_id,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Channel test message job not found")
+    return result
 
 
 def _run_channel_smoke(

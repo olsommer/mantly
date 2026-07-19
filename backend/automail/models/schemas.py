@@ -263,10 +263,14 @@ class RunbookProcessingDetails(BaseModel):
 class IntentProcessingOutput(RunbookProcessingDetails):
     """Structured output for the intent-processing stage (Stage B).
 
-    The LLM fills action values and decides whether human review is needed.
+    The LLM selects applicable actions, fills action values, and decides whether
+    human review is needed.
     Action *definitions* (type, webhook, etc.) still come from INTENT.md
-    frontmatter — the LLM only provides initial_value fills.
+    frontmatter — the LLM only selects definitions and provides initial_value
+    fills. A null selection is invalid and fails closed; an explicit empty list
+    suppresses every configured action.
     """
+    selected_action_names: Optional[list[str]] = None
     action_fills: list[ActionFill] = Field(default_factory=list)
 
 

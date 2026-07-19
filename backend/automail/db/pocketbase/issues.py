@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
@@ -89,9 +90,15 @@ ISSUE_PRIORITIES = {"low", "normal", "high", "urgent"}
 OUTBOUND_STATUSES = {"draft", "queued", "sent", "failed"}
 AUTOMATIC_REPLY_SOURCES = {"agent_answer", "automation", "email_pipeline"}
 DELIVERY_CLAIM_LEASE_SECONDS = 900
-# Router + up to three concerns may each consume all configured LLM retries.
+# Router + up to six concerns may each consume all configured LLM retries.
 # One hour stays above that bounded worst case without requiring a heartbeat.
 DIRECT_CHANNEL_PROCESSING_LEASE_SECONDS = 3_600
+CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS = 20
+CHANNEL_WEBHOOK_REPLAY_POLL_INTERVAL_SECONDS = 0.025
+CHANNEL_WEBHOOK_TERMINAL_STATUSES = frozenset({"failed", "processed", "skipped", "unmatched"})
+CHANNEL_WEBHOOK_CLAIM_LEASE_SECONDS = 900
+CHANNEL_WEBHOOK_RETRY_POLICY_VERSION = 1
+CHANNEL_WEBHOOK_MAX_PROCESSING_ATTEMPTS = 3
 DURABLE_PROCESSING_RUN_KINDS = frozenset({
     "direct_channel_runbooks",
     "email_channel_ticket_package",
@@ -3583,6 +3590,12 @@ def _normalize_channel_webhook_event(rec: dict[str, Any]) -> dict[str, Any]:
         "result": _parse(rec.get("result"), dict),
         "receivedAt": rec.get("received_at") or "",
         "processedAt": rec.get("processed_at") or "",
+        "processingClaimToken": rec.get("processing_claim_token", ""),
+        "processingClaimedAt": rec.get("processing_claimed_at") or "",
+        "processingClaimExpiresAt": rec.get("processing_claim_expires_at") or "",
+        "processingAttempt": int(rec.get("processing_attempt") or 0),
+        "processingRetrySafe": _bool_from(rec.get("processing_retry_safe")),
+        "retryPolicyVersion": int(rec.get("retry_policy_version") or 0),
         "created": rec.get("created", ""),
         "updated": rec.get("updated", ""),
     }
@@ -4987,15 +5000,32 @@ def _record_default_assignment(
     assignee_email: str,
     tenant_id: str | None,
     project_id: str,
+    idempotent: bool = False,
 ) -> None:
     if not assignee_email:
         return
+    if idempotent:
+        existing = _first(
+            "support_issue_assignments",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"assignee_email='{_escape_pb(assignee_email)}' && "
+                    "assigned_by='routing' && status='assigned'"
+                ),
+            ),
+        )
+        if existing:
+            return
     _record_assignment(
         issue_id=issue_id,
         assignee_email=assignee_email,
         assigned_by="routing",
         tenant_id=tenant_id,
         project_id=project_id,
+        operation_key="default_assignment" if idempotent else "",
     )
 
 
@@ -6981,6 +7011,48 @@ def _direct_channel_run_key(*, source: str, source_message_id: str) -> str:
     return _key_from(f"{source}:{source_message_id}:runbooks")
 
 
+def _direct_channel_processing_run(
+    *,
+    issue_id: str,
+    source: str,
+    source_message_id: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> dict[str, Any] | None:
+    """Return the durable package run for one channel message, if any."""
+    run_key = _direct_channel_run_key(
+        source=source,
+        source_message_id=source_message_id,
+    )
+    return _first(
+        "support_ai_runs",
+        _issue_filter(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            extra=(
+                f"issue='{_escape_pb(issue_id)}' && "
+                f"run_key='{_escape_pb(run_key)}'"
+            ),
+        ),
+    )
+
+
+def _direct_channel_run_can_resume_package(run: dict[str, Any]) -> bool:
+    """Only resume after the runbook result has crossed its durable boundary."""
+    if _string_from(run.get("status")).lower() != "processing":
+        return False
+    metadata = _parse(run.get("metadata"), dict)
+    progress = _parse(metadata.get("processingProgress"), dict)
+    stage = _string_from(progress.get("stage")).lower()
+    return stage in {
+        "automation",
+        "triage",
+        "ticket_fields",
+        "composer",
+        "finalizing",
+    }
+
+
 class DirectChannelProcessingInProgress(RuntimeError):
     """A live source-message worker still owns the direct-channel run."""
 
@@ -7197,6 +7269,7 @@ def _apply_direct_channel_runbooks(
     identity_data: dict[str, Any],
     tenant_id: str | None,
     project_id: str,
+    resume_processing_run: bool = False,
 ) -> dict[str, Any]:
     """Persist one direct message's runbook result before ticket automation."""
     from automail.integrations.http_tool import fence_http_tool_execution
@@ -7207,22 +7280,36 @@ def _apply_direct_channel_runbooks(
     if not issue_id:
         return issue
     run_key = _direct_channel_run_key(source=source, source_message_id=source_message_id)
-    existing = _first(
-        "support_ai_runs",
-        _issue_filter(
-            tenant_id=tenant_id,
-            project_id=project_id,
-            extra=(
-                f"issue='{_escape_pb(issue_id)}' && "
-                f"run_key='{_escape_pb(run_key)}'"
-            ),
-        ),
+    existing = _direct_channel_processing_run(
+        issue_id=issue_id,
+        source=source,
+        source_message_id=source_message_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
     )
     now = _now_iso()
     if existing and _string_from(existing.get("status")).lower() == "processing":
-        raise DirectChannelProcessingInProgress(
-            "Direct-channel runbook processing is already in progress"
-        )
+        if not resume_processing_run or not _direct_channel_run_can_resume_package(existing):
+            raise DirectChannelProcessingInProgress(
+                "Direct-channel runbook processing is already in progress"
+            )
+        intent_result = _parse(existing.get("intent_result"), dict)
+        issue_updates = {
+            "activated_intent": _string_from(existing.get("activated_intent")),
+            "requires_human": bool(existing.get("requires_human", True)),
+            "action_log": _action_log(intent_result),
+        }
+        _require_processing_claim(existing)
+        _patch(f"/api/collections/support_issues/records/{issue_id}", issue_updates)
+        if intent_result.get("matched"):
+            _prepare_runbook_action_approvals(
+                issue_id=issue_id,
+                intent_result=intent_result,
+                source_message_id=source_message_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+        return {**issue, **issue_updates, "_processingRun": existing}
     if existing:
         intent_result = _parse(existing.get("intent_result"), dict)
         issue_updates = {
@@ -22790,6 +22877,12 @@ def record_channel_webhook_event(
     error: str = "",
     received_at: str = "",
     processed_at: str = "",
+    processing_claim_token: str = "",
+    processing_claimed_at: str = "",
+    processing_claim_expires_at: str = "",
+    processing_attempt: int = 0,
+    processing_retry_safe: bool = False,
+    retry_policy_version: int = 0,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "id": generate_id(),
@@ -22805,12 +22898,284 @@ def record_channel_webhook_event(
         "received_at": received_at or _now_iso(),
         "processed_at": processed_at,
     }
+    if processing_claim_token:
+        data.update(
+            {
+                "processing_claim_token": processing_claim_token,
+                "processing_claimed_at": processing_claimed_at,
+                "processing_claim_expires_at": processing_claim_expires_at,
+                "processing_attempt": processing_attempt,
+                "processing_retry_safe": processing_retry_safe,
+                "retry_policy_version": retry_policy_version,
+            }
+        )
     if outbound_message_id:
         data["outbound_message"] = outbound_message_id
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
     return _normalize_channel_webhook_event(_post("/api/collections/support_channel_webhook_events/records", data))
+
+
+def _claim_channel_webhook_event(
+    *,
+    tenant_id: str | None,
+    project_id: str,
+    channel_id: str,
+    provider: str,
+    event_id: str,
+    event_type: str,
+    provider_message_id: str,
+    payload: dict[str, Any],
+    received_at: str,
+) -> tuple[dict[str, Any], str]:
+    """Acquire durable ownership for one event, including safe stale retries."""
+    existing = get_channel_webhook_event(
+        channel_id,
+        event_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    if existing:
+        return _claim_existing_channel_webhook_event(
+            existing,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+
+    claim_token = secrets.token_hex(16)
+    claimed_at = _now_utc()
+    claimed_at_iso = claimed_at.isoformat()
+    expires_at = (claimed_at + timedelta(seconds=CHANNEL_WEBHOOK_CLAIM_LEASE_SECONDS)).isoformat()
+    claim_result = {
+        "_webhookClaim": {
+            "version": 1,
+            "retryPolicyVersion": CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+            "attempt": 1,
+            "tokenFingerprint": hashlib.sha256(claim_token.encode("utf-8")).hexdigest()[:12],
+            "workerId": _channel_webhook_worker_id(),
+            "claimedAt": claimed_at_iso,
+            "leaseExpiresAt": expires_at,
+            "history": [],
+        }
+    }
+    try:
+        created = record_channel_webhook_event(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            channel_id=channel_id,
+            provider=provider,
+            event_id=event_id,
+            event_type=event_type,
+            provider_message_id=provider_message_id,
+            status="received",
+            payload=payload,
+            result=claim_result,
+            received_at=received_at,
+            processing_claim_token=claim_token,
+            processing_claimed_at=claimed_at_iso,
+            processing_claim_expires_at=expires_at,
+            processing_attempt=1,
+            retry_policy_version=CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+        )
+        return created, claim_token
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in {400, 409}:
+            raise
+        for attempt in range(CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS):
+            winner = get_channel_webhook_event(
+                channel_id,
+                event_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            if winner:
+                return winner, ""
+            if attempt + 1 < CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS:
+                time.sleep(CHANNEL_WEBHOOK_REPLAY_POLL_INTERVAL_SECONDS)
+        raise
+
+
+def _channel_webhook_worker_id() -> str:
+    host = _string_from(os.getenv("HOSTNAME")) or "support-worker"
+    return f"{host}:{os.getpid()}:{threading.get_ident()}"
+
+
+def _claim_existing_channel_webhook_event(
+    webhook_event: dict[str, Any],
+    *,
+    tenant_id: str | None,
+    project_id: str,
+) -> tuple[dict[str, Any], str]:
+    status = _string_from(webhook_event.get("status")).lower()
+    claim_expires_at = _parse_iso_datetime(webhook_event.get("processingClaimExpiresAt"))
+    stale_received = status == "received" and (
+        not _string_from(webhook_event.get("processingClaimToken"))
+        or claim_expires_at is None
+        or claim_expires_at <= _now_utc()
+    )
+    retryable_failed = (
+        status == "failed"
+        and bool(webhook_event.get("processingRetrySafe"))
+        and int(webhook_event.get("retryPolicyVersion") or 0) == CHANNEL_WEBHOOK_RETRY_POLICY_VERSION
+        and int(webhook_event.get("processingAttempt") or 0) < CHANNEL_WEBHOOK_MAX_PROCESSING_ATTEMPTS
+    )
+    if not stale_received and not retryable_failed:
+        return webhook_event, ""
+
+    claim = _post(
+        f"/api/mantly/support-channel-webhooks/{quote(_string_from(webhook_event.get('id')), safe='')}/claim",
+        {
+            "project_id": project_id,
+            "tenant_id": tenant_id or "",
+            "worker_id": _channel_webhook_worker_id(),
+            "lease_seconds": CHANNEL_WEBHOOK_CLAIM_LEASE_SECONDS,
+            "allow_failed": retryable_failed,
+            "retry_policy_version": CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+            "max_attempts": CHANNEL_WEBHOOK_MAX_PROCESSING_ATTEMPTS,
+        },
+    )
+    event = _record_from(claim.get("event"))
+    normalized = _normalize_channel_webhook_event(event) if event else webhook_event
+    claim_token = _string_from(claim.get("claim_token"))
+    if claim.get("claimed") is True and claim_token:
+        normalized.update(
+            {
+                "processingClaimToken": claim_token,
+                "processingClaimedAt": _string_from(claim.get("claimed_at")),
+                "processingClaimExpiresAt": _string_from(claim.get("lease_expires_at")),
+                "processingAttempt": int(claim.get("attempt") or 0),
+                "retryPolicyVersion": CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+            }
+        )
+        return normalized, claim_token
+    return normalized, ""
+
+
+def _wait_for_channel_webhook_winner(
+    webhook_event: dict[str, Any],
+    *,
+    channel_id: str,
+    event_id: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> dict[str, Any]:
+    """Briefly wait for the claim owner to persist its terminal result."""
+    winner = webhook_event
+    for attempt in range(CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS):
+        if _string_from(winner.get("status")) in CHANNEL_WEBHOOK_TERMINAL_STATUSES:
+            return winner
+        if attempt + 1 >= CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS:
+            break
+        time.sleep(CHANNEL_WEBHOOK_REPLAY_POLL_INTERVAL_SECONDS)
+        refreshed = get_channel_webhook_event(
+            channel_id,
+            event_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        if refreshed:
+            winner = refreshed
+    return winner
+
+
+def _channel_webhook_replay_item(
+    webhook_event: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+    provider_message_id: str,
+) -> dict[str, Any]:
+    """Return the winner's stored result using stable skipped replay fields."""
+    winner_status = _string_from(webhook_event.get("status"))
+    if winner_status == "processed":
+        replay_error = "Event already processed"
+    elif winner_status in CHANNEL_WEBHOOK_TERMINAL_STATUSES:
+        replay_error = f"Event already handled with status {winner_status}"
+    else:
+        replay_error = "Event processing already claimed"
+    stored_result = {
+        key: value
+        for key, value in _record_from(webhook_event.get("result")).items()
+        if not key.startswith("_")
+    }
+    replay_item = {
+        **stored_result,
+        "eventId": event_id,
+        "eventType": event_type,
+        "providerMessageId": provider_message_id,
+        "status": "skipped",
+        "error": replay_error,
+        "winnerStatus": winner_status or "received",
+    }
+    winner_error = _string_from(webhook_event.get("error"))
+    if winner_error:
+        replay_item["winnerError"] = winner_error
+    return replay_item
+
+
+def _complete_channel_webhook_claim(
+    webhook_event_id: str,
+    *,
+    tenant_id: str | None,
+    project_id: str,
+    claim_token: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+    outbound_message_id: str = "",
+    retry_safe: bool = False,
+) -> dict[str, Any] | None:
+    """Finalize only while ``claim_token`` remains the current durable owner."""
+    del tenant_id, project_id
+    path = f"/api/mantly/support-channel-webhooks/{quote(webhook_event_id, safe='')}/complete"
+    payload = {
+        "claim_token": claim_token,
+        "status": status,
+        "result": result or {},
+        "error": error,
+        "outbound_message_id": outbound_message_id,
+        "retry_safe": retry_safe,
+    }
+    try:
+        completion = _post(path, payload)
+    except httpx.RequestError:
+        completion = _post(path, payload)
+    event = _record_from(completion.get("event"))
+    if completion.get("completed") is not True or not event:
+        raise RuntimeError("PocketBase returned an invalid channel webhook completion")
+    return _normalize_channel_webhook_event(event)
+
+
+def _try_complete_channel_webhook_claim(
+    webhook_event_id: str,
+    *,
+    tenant_id: str | None,
+    project_id: str,
+    claim_token: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+    outbound_message_id: str = "",
+    retry_safe: bool = False,
+) -> bool:
+    try:
+        _complete_channel_webhook_claim(
+            webhook_event_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            claim_token=claim_token,
+            status=status,
+            result=result,
+            error=error,
+            outbound_message_id=outbound_message_id,
+            retry_safe=retry_safe,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 409:
+            raise
+        return False
+    return True
 
 
 def update_channel_webhook_event(
@@ -24408,6 +24773,7 @@ def _ingest_generic_channel_message_event(
     event: dict[str, Any],
     tenant_id: str | None,
     project_id: str,
+    resume_incomplete: bool = False,
 ) -> dict[str, Any]:
     provider = _channel_provider(event, channel)
     provider_key = _event_token(provider) or "channel"
@@ -24571,7 +24937,9 @@ def _ingest_generic_channel_message_event(
         existing_issue=existing_issue,
         message_created=created,
     )
-    if not created:
+    if resume_incomplete:
+        resolver_proof["processingRecovery"] = "resumed"
+    if not created and not resume_incomplete:
         return {
             "eventType": _channel_event_type(event),
             "status": "skipped",
@@ -24582,12 +24950,90 @@ def _ingest_generic_channel_message_event(
             "resolver": resolver_proof,
             "error": "",
         }
+
+    issue_was_existing = bool(existing_issue)
+    resume_processing_run = False
+    if not created:
+        durable_run = _direct_channel_processing_run(
+            issue_id=issue_id,
+            source=provider_key,
+            source_message_id=source_message_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        durable_status = _string_from((durable_run or {}).get("status")).lower()
+        if durable_run and durable_status != "processing":
+            return {
+                "eventType": _channel_event_type(event),
+                "status": "success",
+                "processed": 1,
+                "skipped": 0,
+                "issueId": issue_id,
+                "messageId": message["id"],
+                "resolver": resolver_proof,
+                "processingRecovered": True,
+                "processingRunId": _string_from(durable_run.get("id")),
+                "processingRunStatus": durable_status,
+                "error": "",
+            }
+        if durable_run and not _direct_channel_run_can_resume_package(durable_run):
+            return {
+                "eventType": _channel_event_type(event),
+                "status": "skipped",
+                "processed": 0,
+                "skipped": 1,
+                "issueId": issue_id,
+                "messageId": message["id"],
+                "resolver": resolver_proof,
+                "processingRecovered": False,
+                "processingRunId": _string_from(durable_run.get("id")),
+                "processingRunStatus": durable_status or "processing",
+                "error": "Ticket processing is already in progress",
+            }
+        resume_processing_run = bool(durable_run)
+    if resume_incomplete:
+        persisted_messages = _list_issue_messages(
+            issue_id=issue_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        customer_message_count = sum(
+            1
+            for persisted_message in persisted_messages
+            if _string_from(persisted_message.get("direction")).lower() == "customer"
+        )
+        issue_was_existing = (
+            _ticket_creation_mode(channel) != "per_message"
+            and customer_message_count > 1
+        )
+        if not issue_was_existing:
+            resolver_proof["resolverAction"] = "created"
+            _record_default_assignment(
+                issue_id=issue_id,
+                assignee_email=_string_from(
+                    (existing_issue or {}).get("assignee_email")
+                    or (existing_issue or {}).get("assigneeEmail")
+                ),
+                tenant_id=tenant_id,
+                project_id=project_id,
+                idempotent=True,
+            )
+    else:
+        customer_message_count = 0
+
     previous_count = int(existing_issue.get("message_count") or 0) if existing_issue else 0
+    next_count = (
+        max(previous_count, customer_message_count or 1)
+        if not created
+        else previous_count + 1
+    )
     issue_updates = {
-        "message_count": previous_count + 1,
+        "message_count": next_count,
         "latest_message_at": now,
     }
-    existing_was_done = bool(existing_issue) and _workflow_status(_string_from(existing_issue.get("status"))) == "done"
+    existing_was_done = issue_was_existing and _workflow_status(
+        _string_from((existing_issue or {}).get("status"))
+    ) == "done"
     if existing_was_done:
         issue_updates["status"] = "open"
     _patch(f"/api/collections/support_issues/records/{issue_id}", issue_updates)
@@ -24611,8 +25057,15 @@ def _ingest_generic_channel_message_event(
             "resolver": resolver_proof,
             **external_keys,
         },
+        record_id=_stable_record_id(
+            "support_issue_event",
+            project_id,
+            issue_id,
+            source_message_id,
+            f"{provider_key}_message_received",
+        ),
     )
-    if existing_issue:
+    if issue_was_existing:
         _notify_customer_message_subscribers(
             issue={**existing_issue, **issue_updates},
             issue_id=issue_id,
@@ -24640,10 +25093,11 @@ def _ingest_generic_channel_message_event(
         identity_data=identity_data,
         tenant_id=tenant_id,
         project_id=project_id,
+        resume_processing_run=resume_processing_run,
     )
     processing_run = _processing_run_from_issue(processed_issue)
     _require_processing_claim(processing_run)
-    if not existing_issue:
+    if not issue_was_existing:
         _ensure_issue_sla_events(issue_id=issue_id, tenant_id=tenant_id, project_id=project_id)
         _require_processing_claim(processing_run)
         automation_result = _run_automation_rules_for_issue(
@@ -24721,6 +25175,7 @@ def _ingest_generic_channel_message_event(
         "issueId": issue_id,
         "messageId": message["id"],
         "resolver": resolver_proof,
+        "processingRecovered": bool(resume_incomplete),
         "error": "",
     }
 
@@ -24762,39 +25217,35 @@ def ingest_channel_webhook(
             )
         )
         event_id = _channel_event_id(event, event_type, provider_message_id, index)
-        existing = get_channel_webhook_event(
-            channel_id,
-            event_id,
+        webhook_event, claim_token = _claim_channel_webhook_event(
             tenant_id=channel_tenant_id,
             project_id=channel_project_id,
+            channel_id=channel_id,
+            provider=provider,
+            event_id=event_id,
+            event_type=event_type,
+            provider_message_id=provider_message_id,
+            payload=event,
+            received_at=received_at,
         )
-        if existing and existing.get("status") == "processed":
-            skipped += 1
-            items.append(
-                {
-                    "eventId": event_id,
-                    "eventType": event_type,
-                    "providerMessageId": provider_message_id,
-                    "status": "skipped",
-                    "error": "Event already processed",
-                }
-            )
-            continue
-        if existing:
-            webhook_event = existing
-        else:
-            webhook_event = record_channel_webhook_event(
+        if not claim_token:
+            webhook_event = _wait_for_channel_webhook_winner(
+                webhook_event,
+                channel_id=channel_id,
+                event_id=event_id,
                 tenant_id=channel_tenant_id,
                 project_id=channel_project_id,
-                channel_id=channel_id,
-                provider=provider,
-                event_id=event_id,
-                event_type=event_type,
-                provider_message_id=provider_message_id,
-                status="received",
-                payload=event,
-                received_at=received_at,
             )
+            skipped += 1
+            items.append(
+                _channel_webhook_replay_item(
+                    webhook_event,
+                    event_id=event_id,
+                    event_type=event_type,
+                    provider_message_id=provider_message_id,
+                )
+            )
+            continue
         if is_inbound_message:
             try:
                 message_result = _ingest_generic_channel_message_event(
@@ -24802,6 +25253,7 @@ def ingest_channel_webhook(
                     event=event,
                     tenant_id=channel_tenant_id,
                     project_id=channel_project_id,
+                    resume_incomplete=int(webhook_event.get("processingAttempt") or 0) > 1,
                 )
                 result = {
                     "matched": True,
@@ -24809,28 +25261,85 @@ def ingest_channel_webhook(
                     **message_result,
                 }
                 event_status = "processed" if message_result.get("status") == "success" else message_result.get("status") or "processed"
+                completed = _try_complete_channel_webhook_claim(
+                    webhook_event["id"],
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                    claim_token=claim_token,
+                    status=event_status,
+                    result=result,
+                )
+                if not completed:
+                    latest = get_channel_webhook_event(
+                        channel_id,
+                        event_id,
+                        tenant_id=channel_tenant_id,
+                        project_id=channel_project_id,
+                    ) or webhook_event
+                    latest = _wait_for_channel_webhook_winner(
+                        latest,
+                        channel_id=channel_id,
+                        event_id=event_id,
+                        tenant_id=channel_tenant_id,
+                        project_id=channel_project_id,
+                    )
+                    skipped += 1
+                    items.append(
+                        _channel_webhook_replay_item(
+                            latest,
+                            event_id=event_id,
+                            event_type=event_type,
+                            provider_message_id=provider_message_id,
+                        )
+                    )
+                    continue
                 if message_result.get("status") == "success":
                     processed += 1
                 else:
                     skipped += 1
-                update_channel_webhook_event(
-                    webhook_event["id"],
-                    tenant_id=channel_tenant_id,
-                    project_id=channel_project_id,
-                    status=event_status,
-                    result=result,
-                )
                 items.append({"eventId": event_id, **result})
             except Exception as exc:
-                failed += 1
                 error = str(exc)
-                update_channel_webhook_event(
+                completed = _try_complete_channel_webhook_claim(
                     webhook_event["id"],
                     tenant_id=channel_tenant_id,
                     project_id=channel_project_id,
+                    claim_token=claim_token,
                     status="failed",
+                    result={
+                        "matched": False,
+                        "kind": "inbound_message",
+                        "eventType": event_type,
+                        "providerMessageId": provider_message_id,
+                    },
                     error=error,
+                    retry_safe=True,
                 )
+                if not completed:
+                    latest = get_channel_webhook_event(
+                        channel_id,
+                        event_id,
+                        tenant_id=channel_tenant_id,
+                        project_id=channel_project_id,
+                    ) or webhook_event
+                    latest = _wait_for_channel_webhook_winner(
+                        latest,
+                        channel_id=channel_id,
+                        event_id=event_id,
+                        tenant_id=channel_tenant_id,
+                        project_id=channel_project_id,
+                    )
+                    skipped += 1
+                    items.append(
+                        _channel_webhook_replay_item(
+                            latest,
+                            event_id=event_id,
+                            event_type=event_type,
+                            provider_message_id=provider_message_id,
+                        )
+                    )
+                    continue
+                failed += 1
                 items.append(
                     {
                         "eventId": event_id,
@@ -24849,19 +25358,44 @@ def ingest_channel_webhook(
             provider=provider,
         )
         if not outbound:
-            unmatched += 1
             result = {
                 "matched": False,
                 "providerMessageId": provider_message_id,
                 "eventType": event_type,
             }
-            update_channel_webhook_event(
+            completed = _try_complete_channel_webhook_claim(
                 webhook_event["id"],
                 tenant_id=channel_tenant_id,
                 project_id=channel_project_id,
+                claim_token=claim_token,
                 status="unmatched",
                 result=result,
             )
+            if not completed:
+                latest = get_channel_webhook_event(
+                    channel_id,
+                    event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                ) or webhook_event
+                latest = _wait_for_channel_webhook_winner(
+                    latest,
+                    channel_id=channel_id,
+                    event_id=event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                )
+                skipped += 1
+                items.append(
+                    _channel_webhook_replay_item(
+                        latest,
+                        event_id=event_id,
+                        event_type=event_type,
+                        provider_message_id=provider_message_id,
+                    )
+                )
+                continue
+            unmatched += 1
             items.append({"eventId": event_id, "eventType": event_type, "status": "unmatched", **result})
             continue
         try:
@@ -24874,7 +25408,6 @@ def ingest_channel_webhook(
                 provider=provider,
                 provider_message_id=provider_message_id,
             )
-            processed += 1
             result = {
                 "matched": True,
                 "outboundMessageId": updated_outbound["id"],
@@ -24883,25 +25416,82 @@ def ingest_channel_webhook(
                 "providerMessageId": provider_message_id,
                 "eventType": event_type,
             }
-            update_channel_webhook_event(
+            completed = _try_complete_channel_webhook_claim(
                 webhook_event["id"],
                 tenant_id=channel_tenant_id,
                 project_id=channel_project_id,
+                claim_token=claim_token,
                 status="processed",
                 outbound_message_id=updated_outbound["id"],
                 result=result,
             )
+            if not completed:
+                latest = get_channel_webhook_event(
+                    channel_id,
+                    event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                ) or webhook_event
+                latest = _wait_for_channel_webhook_winner(
+                    latest,
+                    channel_id=channel_id,
+                    event_id=event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                )
+                skipped += 1
+                items.append(
+                    _channel_webhook_replay_item(
+                        latest,
+                        event_id=event_id,
+                        event_type=event_type,
+                        provider_message_id=provider_message_id,
+                    )
+                )
+                continue
+            processed += 1
             items.append({"eventId": event_id, "status": "processed", **result})
         except Exception as exc:
-            failed += 1
             error = str(exc)
-            update_channel_webhook_event(
+            completed = _try_complete_channel_webhook_claim(
                 webhook_event["id"],
                 tenant_id=channel_tenant_id,
                 project_id=channel_project_id,
+                claim_token=claim_token,
                 status="failed",
+                result={
+                    "matched": False,
+                    "eventType": event_type,
+                    "providerMessageId": provider_message_id,
+                },
                 error=error,
+                retry_safe=False,
             )
+            if not completed:
+                latest = get_channel_webhook_event(
+                    channel_id,
+                    event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                ) or webhook_event
+                latest = _wait_for_channel_webhook_winner(
+                    latest,
+                    channel_id=channel_id,
+                    event_id=event_id,
+                    tenant_id=channel_tenant_id,
+                    project_id=channel_project_id,
+                )
+                skipped += 1
+                items.append(
+                    _channel_webhook_replay_item(
+                        latest,
+                        event_id=event_id,
+                        event_type=event_type,
+                        provider_message_id=provider_message_id,
+                    )
+                )
+                continue
+            failed += 1
             items.append(
                 {
                     "eventId": event_id,

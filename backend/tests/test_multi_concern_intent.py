@@ -22,6 +22,7 @@ from automail.models import (
     ConcernRoute,
     Email,
     IdentityResult,
+    IntentAction,
     IntentProcessingOutput,
     IntentReviewOutput,
     PhishingResult,
@@ -29,6 +30,7 @@ from automail.models import (
 )
 from automail.pipeline import orchestrator
 from automail.pipeline.intent.agent import (
+    _build_process_user_message,
     _concern_id,
     _execute_routed_concern,
     _route_concerns_call_is_invalid,
@@ -56,6 +58,124 @@ def _base_stubs(monkeypatch) -> None:
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_attachments", lambda *_args, **_kwargs: [])
+
+
+def test_processing_prompt_requires_exact_materially_applicable_action_selection() -> None:
+    prompt = _build_process_user_message(
+        _email(),
+        None,
+        [
+            IntentAction(
+                name="delete_workspace",
+                label="Delete workspace",
+                description="Delete a workspace after authority verification",
+            ),
+        ],
+    )
+
+    assert "selected_action_names" in prompt
+    assert "exact configured action names" in prompt
+    assert "prerequisites fail" in prompt
+    assert "lacks sufficient authority" in prompt
+    assert "Return an empty array" in prompt
+
+
+@pytest.mark.parametrize(
+    ("selection_mode", "selected_action_names", "expected_action_names", "expect_review"),
+    [
+        pytest.param("legacy", None, [], True, id="missing-selection-fails-closed"),
+        pytest.param("explicit", [], [], False, id="explicit-empty-suppresses-all"),
+        pytest.param(
+            "explicit",
+            ["upgrade_plan", "unknown_action", "upgrade_plan"],
+            [],
+            True,
+            id="unknown-selection-fails-closed",
+        ),
+        pytest.param(
+            "explicit",
+            ["upgrade_plan", "upgrade_plan"],
+            ["upgrade_plan"],
+            False,
+            id="duplicate-known-selection-is-collapsed",
+        ),
+    ],
+)
+def test_runbook_action_selection_reaches_grounding_and_approval_proposals(
+    monkeypatch: pytest.MonkeyPatch,
+    selection_mode: str,
+    selected_action_names: list[str] | None,
+    expected_action_names: list[str],
+    expect_review: bool,
+) -> None:
+    from automail.db.pocketbase import issues
+
+    _base_stubs(monkeypatch)
+    route = ConcernRoute(
+        summary="Workspace request",
+        source_text="Please handle my workspace request.",
+        intent_name="cancel-contract",
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: ([route], None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "delete_workspace",
+                "label": "Delete workspace",
+                "type": "button",
+                "webhook": "https://example.test/delete",
+            },
+            {
+                "name": "upgrade_plan",
+                "label": "Upgrade plan",
+                "type": "button",
+                "webhook": "https://example.test/upgrade",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.intents_factory.get_intent_response_rules",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def process(*_args, **_kwargs):
+        if selection_mode == "legacy":
+            return IntentProcessingOutput(summary="Processed legacy output")
+        return IntentProcessingOutput(
+            summary="Processed explicit selection",
+            selected_action_names=selected_action_names,
+        )
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+
+    result, response = run_intent_agent(_email())
+
+    assert (response is not None and response.requires_human) is expect_review
+    assert [action.name for action in result.actions] == expected_action_names
+    assert [action.name for action in result.concerns[0].actions] == expected_action_names
+    assert [action.name for action in result.concerns[0].action_outcomes] == expected_action_names
+    if expect_review:
+        assert result.concerns[0].requires_human is True
+        assert "selection" in (result.concerns[0].requires_human_reason or "").lower()
+
+    proposals = issues._runbook_action_proposals(
+        result.model_dump(mode="json", by_alias=True),
+    )
+    assert [proposal["name"] for proposal in proposals] == expected_action_names
+
+    grounding_prompt = create_response_user_prompt(_email(), intent_result=result)
+    for action_name in ("delete_workspace", "upgrade_plan"):
+        assert (f'<action name="{action_name}"' in grounding_prompt) == (
+            action_name in expected_action_names
+        )
 
 
 def test_router_rejects_known_intent_without_any_concern_or_obligation_text(
@@ -191,6 +311,7 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         calls.append((intent_name, email.subject, email.body))
         return IntentProcessingOutput(
             summary=f"Prepared {intent_name}",
+            selected_action_names=[action.name for action in _actions],
             reply_requirements=[f"Cover {intent_name}."],
         )
 
@@ -232,6 +353,46 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         f"{result.concerns[0].concern_id}:obligation-2",
     ]
     assert result.concerns[0].concern_id != result.concerns[1].concern_id
+
+
+def test_four_independent_concerns_are_all_executed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_stubs(monkeypatch)
+    intent_names = [
+        "cancel-contract",
+        "buy-product",
+        "refund-order",
+        "update-address",
+    ]
+    routes = [
+        ConcernRoute(
+            summary=f"Concern {index}",
+            source_text=f"Request {index}.",
+            answer_obligations=[f"Answer request {index}."],
+            intent_name=intent_name,
+            confidence=0.95,
+        )
+        for index, intent_name in enumerate(intent_names, 1)
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_known_intent_names",
+        lambda intents_dir=None: set(intent_names),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {"enabled": True},
+    )
+    result, response = run_intent_agent(_email())
+
+    assert response is None
+    assert [concern.intent_name for concern in result.concerns] == intent_names
 
 
 def test_damaged_hazardous_parcel_prefers_fulfillment_exception_runbook(monkeypatch):
@@ -1180,7 +1341,10 @@ def test_failed_runbook_does_not_stop_other_concerns(monkeypatch):
         calls.append(intent_name)
         if intent_name == "cancel-contract":
             raise RuntimeError("cancellation API unavailable")
-        return IntentProcessingOutput(summary="Purchase prepared")
+        return IntentProcessingOutput(
+            summary="Purchase prepared",
+            selected_action_names=["buy-product"],
+        )
 
     monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
 
@@ -1322,6 +1486,7 @@ def test_concern_collectors_isolate_tools_actions_knowledge_and_composer_order(m
         _record_test_attachment(intent_name)
         return IntentProcessingOutput(
             summary=f"Processed {intent_name}",
+            selected_action_names=[f"action-{intent_name}"],
             reply_requirements=[f"Runtime knowledge for {intent_name}"],
         )
 

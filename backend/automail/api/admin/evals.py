@@ -4,11 +4,13 @@ Provides CRUD for eval sets, cases, runs, and results — all scoped per-project
 Also exposes a run-trigger endpoint that executes the pipeline + LLM judge
 in a background thread.
 """
+import asyncio
 import logging
 import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from automail.api.admin.deps import ProjectEditorDep, ProjectViewerDep
 from automail.api.admin.eval_helpers import (
@@ -29,12 +31,82 @@ from automail.db.pocketbase.client import (
     _post,
     generate_id,
 )
+from automail.demo.e2e_fixtures import e2e_fixture_runtime_enabled
+from automail.evals.judge import run_judge
+from automail.pipeline.drafts import get_draft_source
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin/projects/{pid}/eval")
 
 __all__ = ["_demo_root", "mark_orphaned_eval_runs_failed", "router"]
+
+
+class E2EResponseJudgeInput(BaseModel):
+    response_text: str = Field(min_length=1, max_length=50_000)
+    must_cover: list[str] = Field(min_length=1, max_length=30)
+    must_not_claim: list[str] = Field(default_factory=list, max_length=30)
+    must_mark_unverified: list[str] = Field(default_factory=list, max_length=30)
+
+
+@router.post("/e2e-response-judge")
+async def judge_e2e_response(
+    body: E2EResponseJudgeInput,
+    ctx: ProjectEditorDep,
+) -> dict:
+    """Semantically grade one synthetic response while the E2E runtime is enabled."""
+    if not e2e_fixture_runtime_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    expected_response = "\n".join(
+        [
+            "The response must satisfy every MUST COVER item, must not make any "
+            "MUST NOT CLAIM statement, and must explicitly describe every MUST MARK "
+            "UNVERIFIED item as unknown, pending, unavailable, or requiring approval. "
+            "A prohibited claim or omitted required item is a material error and must "
+            "score below 90.",
+            "MUST COVER:",
+            *(f"- {item}" for item in body.must_cover),
+            "MUST NOT CLAIM:",
+            *(f"- {item}" for item in body.must_not_claim),
+            "MUST EXPLICITLY MARK UNVERIFIED OR PENDING:",
+            *(f"- {item}" for item in body.must_mark_unverified),
+        ]
+    )
+    expected = {
+        "expected_customer_found": False,
+        "expected_customer_data": {},
+        "expected_intent_matched": False,
+        "expected_intent_name": "",
+        "expected_actions": [],
+        "expected_requires_human": True,
+        "expected_response": expected_response,
+    }
+    actual = {
+        "identityResult": {"found": False},
+        "intentResult": {"matched": False, "actions": []},
+        "agentResponse": {
+            "responseText": body.response_text,
+            "requiresHuman": True,
+        },
+    }
+    config_source = get_draft_source(ctx.project_id, tenant_id=ctx.tenant_id)
+    result = await asyncio.to_thread(
+        run_judge,
+        expected,
+        actual,
+        True,
+        config_path=config_source,
+        tenant_id=ctx.tenant_id or None,
+    )
+    if result.response is None:
+        raise HTTPException(status_code=502, detail="Response judge returned no response score")
+    return {
+        "passed": result.response.score >= 90,
+        "score": result.response.score,
+        "reasoning": result.response.reasoning,
+        "threshold": 90,
+        "tokenUsage": result.token_usage or {},
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

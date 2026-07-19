@@ -848,6 +848,12 @@ def ensure_app_collections_schema(
                 _json_field("result"),
                 _date_field("received_at"),
                 _date_field("processed_at"),
+                {**_text_field("processing_claim_token"), "hidden": True},
+                _date_field("processing_claimed_at"),
+                _date_field("processing_claim_expires_at"),
+                _number_field("processing_attempt"),
+                _bool_field("processing_retry_safe"),
+                _number_field("retry_policy_version"),
                 _created_field(),
                 _updated_field(),
             ],
@@ -1502,11 +1508,32 @@ def ensure_app_collections_schema(
                 "CREATE UNIQUE INDEX idx_support_channel_webhook_events_channel_event ON support_channel_webhook_events (channel, event_id)",
                 "CREATE INDEX idx_support_channel_webhook_events_project_status ON support_channel_webhook_events (project, status, received_at)",
                 "CREATE INDEX idx_support_channel_webhook_events_provider_message ON support_channel_webhook_events (provider_message_id, received_at)",
+                "CREATE INDEX idx_support_channel_webhook_claim ON support_channel_webhook_events (status, processing_claim_expires_at)",
             ],
         )
-        _, was_created = _ensure_collection(http_client, resolved_pb_url, token, support_channel_webhook_events_payload)
+        support_channel_webhook_events, was_created = _ensure_collection(
+            http_client,
+            resolved_pb_url,
+            token,
+            support_channel_webhook_events_payload,
+        )
         if was_created:
             created.append("support_channel_webhook_events")
+        for field_def in (
+            {**_text_field("processing_claim_token"), "hidden": True},
+            _date_field("processing_claimed_at"),
+            _date_field("processing_claim_expires_at"),
+            _number_field("processing_attempt"),
+            _bool_field("processing_retry_safe"),
+            _number_field("retry_policy_version"),
+        ):
+            _ensure_field_on_collection(
+                http_client,
+                resolved_pb_url,
+                token,
+                support_channel_webhook_events["name"],
+                field_def,
+            )
 
         support_web_chat_sessions_payload = _base_collection_payload(
             "support_web_chat_sessions",

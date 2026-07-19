@@ -28,7 +28,7 @@ jobs:
 
       - name: Ruff
         working-directory: backend
-        run: uv run ruff check automail tests
+        run: uv run ruff check automail tests ../e2e
 
   unit-tests:
     name: Unit tests (no API calls)
@@ -87,6 +87,8 @@ jobs:
         run: >
           uv run pytest
           tests/test_support_*.py
+          tests/test_e2e_fixture_tools.py
+          tests/test_multi_concern_intent.py
           tests/test_pb_bootstrap.py
           tests/test_gmail_addon.py
           tests/test_tenant_isolation.py

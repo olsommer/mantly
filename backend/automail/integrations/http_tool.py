@@ -20,11 +20,19 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlparse
 
 import httpx
 from langchain.tools import BaseTool, tool
 from pydantic import Field, create_model
+
+from automail.demo.e2e_fixtures import (
+    E2EFixtureLookupError,
+    E2EFixtureNotFound,
+    e2e_fixture_runtime_enabled,
+    lookup_e2e_tool_fixture,
+    merge_e2e_tool_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +40,23 @@ logger = logging.getLogger(__name__)
 # Type mapping for dynamic Pydantic field construction
 # ---------------------------------------------------------------------------
 
-_TYPE_MAP: dict[str, type] = {
+_TYPE_MAP: dict[str, Any] = {
     "string": str,
     "number": float,
     "integer": int,
     "boolean": bool,
+    "array": list[str],
 }
 
 
-def _cast(py_type: type, value: str) -> Any:
+def _cast(py_type: Any, value: Any) -> Any:
     """Convert a string default value to the target Python type."""
     if py_type is bool:
-        return value.lower() in ("true", "1", "yes")
+        return str(value).lower() in ("true", "1", "yes")
+    if py_type == list[str]:
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return [str(value)]
     try:
         return py_type(value)
     except (ValueError, TypeError):
@@ -459,6 +472,26 @@ def _resolve_env_vars(value: str, secrets: dict[str, str] | None = None) -> str:
 def _maybe_call_hosted_demo_tool(url: str, payload: dict[str, Any]) -> str | None:
     """Resolve hosted demo tools in-process for stable demos."""
     parsed = urlparse(url)
+    e2e_match = re.fullmatch(
+        r"/demo/e2e/tool/(?P<persona_id>[a-z][a-z0-9-]+)/"
+        r"(?P<tool_name>[a-z][a-z0-9_]*)",
+        parsed.path,
+    )
+    if e2e_match:
+        if not e2e_fixture_runtime_enabled():
+            raise E2EFixtureLookupError("E2E fixture runtime is disabled")
+        supplied_input = merge_e2e_tool_input(
+            parse_qsl(parsed.query, keep_blank_values=True),
+            payload,
+        )
+        result = lookup_e2e_tool_fixture(
+            e2e_match.group("persona_id"),
+            e2e_match.group("tool_name"),
+            supplied_input,
+        )
+        logger.info("Using in-process E2E fixture tool for %s", parsed.path)
+        return json.dumps(result, ensure_ascii=False)
+
     demo_paths = {
         "/demo/insurance/motor-policy",
         "/demo/insurance/green-card",
@@ -669,6 +702,10 @@ def _make_http_tool(
             response.raise_for_status()
             _record_tool_call(defn, status="success", response_text=response.text)
             return _capture_generated_file(defn, response.text)
+        except E2EFixtureLookupError as exc:
+            status = "fixture_not_found" if isinstance(exc, E2EFixtureNotFound) else "fixture_error"
+            _record_tool_call(defn, status=status)
+            return f"E2E fixture lookup failed: {exc}"
         except httpx.HTTPStatusError as exc:
             _record_tool_call(defn, status=f"http_{exc.response.status_code}")
             return f"HTTP {exc.response.status_code}: {exc.response.text[:500]}"

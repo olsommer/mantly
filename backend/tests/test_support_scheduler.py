@@ -7,7 +7,7 @@ import pytest
 
 from automail.api.admin import channels as admin_channels
 from automail.api.admin import issues as admin_issue_api
-from automail.support import scheduler
+from automail.support import channel_test_jobs, scheduler
 
 
 def _provider_delivery_proof(provider: str = "slack", channel_id: str = "C_LIVE") -> dict:
@@ -7821,7 +7821,7 @@ def test_admin_channels_report_provider_signature_key_readiness(client, monkeypa
     assert any(env["name"] == "ACME_TELEGRAM_SIGNING_SECRET" and not env["configured"] and env["required"] for env in telegram["envVars"])
 
 
-def test_admin_channel_test_message_ingests_normalized_message(client, monkeypatch):
+def test_admin_channel_test_message_enqueues_normalized_message(client, monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         "automail.api.admin.channels.get_channel",
@@ -7834,17 +7834,22 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
         },
     )
 
-    def fake_ingest(channel_key: str, **kwargs):
-        calls.append({"channel_key": channel_key, **kwargs})
+    def fake_enqueue(**kwargs):
+        calls.append(kwargs)
         return {
-            "status": "success",
-            "processed": 1,
+            "accepted": True,
+            "status": "queued",
+            "processed": 0,
             "failed": 0,
             "skipped": 0,
-            "items": [{"kind": "inbound_message", "issueId": "issue1", "messageId": "msg1"}],
+            "items": [],
+            "payload": kwargs["payload"],
+            "runId": "job-row-1",
+            "eventId": kwargs["payload"]["eventId"],
+            "sourceIssueId": "discord:discord-main:C123:message-1",
         }
 
-    monkeypatch.setattr("automail.api.admin.channels.ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr("automail.api.admin.channels.enqueue_channel_test_message", fake_enqueue)
 
     resp = client.post(
         "/api/admin/projects/project1/channels/channel1/test-message",
@@ -7858,14 +7863,15 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
         },
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     data = resp.json()
-    assert data["processed"] == 1
-    assert data["items"][0]["issueId"] == "issue1"
-    assert calls[0]["channel_key"] == "discord-main"
+    assert data["accepted"] is True
+    assert data["status"] == "queued"
+    assert data["runId"] == "job-row-1"
+    assert data["sourceIssueId"] == "discord:discord-main:C123:message-1"
+    assert calls[0]["channel"]["channelKey"] == "discord-main"
     assert calls[0]["tenant_id"] == ""
     assert calls[0]["project_id"] == "project1"
-    assert calls[0]["source"] == "admin-test"
     payload = calls[0]["payload"]
     assert payload["provider"] == "discord"
     assert payload["content"] == "Production API is down."
@@ -7874,6 +7880,297 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
     assert payload["messageId"] == "message-1"
     assert payload["author"]["email"] == "ana@example.com"
     assert payload["metadata"]["source"] == "admin_test_message"
+
+
+def test_admin_channel_test_message_job_returns_exact_status(client, monkeypatch):
+    monkeypatch.setattr(
+        "automail.api.admin.channels.get_channel_test_job_status",
+        lambda job_id, **_kwargs: {
+            "accepted": False,
+            "status": "processed",
+            "processed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "unmatched": 0,
+            "payload": {},
+            "items": [{"issueId": "issue-1"}],
+            "runId": job_id,
+            "issueId": "issue-1",
+        },
+    )
+
+    resp = client.get(
+        "/api/admin/projects/project1/channels/test-message-jobs/job-row-1",
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["runId"] == "job-row-1"
+    assert resp.json()["issueId"] == "issue-1"
+
+
+def test_channel_test_job_uses_separate_receipt_and_reaches_terminal(monkeypatch):
+    events_by_event_id: dict[str, dict] = {}
+    ingest_calls: list[dict] = []
+    aggregates = iter([
+        {
+            "status": "success",
+            "processed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "unmatched": 0,
+            "items": [{"kind": "inbound_message", "issueId": "issue-1", "messageId": "message-1"}],
+        },
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{
+                "kind": "inbound_message",
+                "status": "skipped",
+                "winnerStatus": "processed",
+                "issueId": "issue-1",
+                "messageId": "message-1",
+            }],
+        },
+    ])
+
+    def fake_get(_channel_id: str, event_id: str, **_kwargs):
+        return events_by_event_id.get(event_id)
+
+    def fake_record(**kwargs):
+        record = {
+            "id": f"job-row-{len(events_by_event_id) + 1}",
+            "channelId": kwargs["channel_id"],
+            "provider": kwargs["provider"],
+            "eventId": kwargs["event_id"],
+            "status": kwargs["status"],
+            "payload": kwargs["payload"],
+            "result": kwargs["result"],
+            "error": "",
+        }
+        events_by_event_id[kwargs["event_id"]] = record
+        return record
+
+    def fake_update(job_id: str, **kwargs):
+        record = next(value for value in events_by_event_id.values() if value["id"] == job_id)
+        record.update({
+            "status": kwargs["status"],
+            "result": kwargs.get("result") or {},
+            "error": kwargs.get("error") or "",
+        })
+        return record
+
+    def fake_ingest(channel_key: str, **kwargs):
+        ingest_calls.append({"channel_key": channel_key, **kwargs})
+        return next(aggregates)
+
+    def fake_claim(event: dict, **_kwargs):
+        event["processingAttempt"] = 1
+        return event, "job-claim-token"
+
+    def fake_complete(job_id: str, **kwargs):
+        record = next(value for value in events_by_event_id.values() if value["id"] == job_id)
+        record.update({
+            "status": kwargs["status"],
+            "result": kwargs.get("result") or {},
+            "error": kwargs.get("error") or "",
+        })
+        return True
+
+    class ImmediateThread:
+        def __init__(self, *, target, kwargs, daemon, name):
+            self.target = target
+            self.kwargs = kwargs
+            assert daemon is True
+            assert name.startswith("channel-test-")
+
+        def start(self):
+            self.target(**self.kwargs)
+
+    monkeypatch.setattr(channel_test_jobs, "get_channel_webhook_event", fake_get)
+    monkeypatch.setattr(channel_test_jobs, "record_channel_webhook_event", fake_record)
+    monkeypatch.setattr(channel_test_jobs, "update_channel_webhook_event", fake_update)
+    monkeypatch.setattr(channel_test_jobs, "ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr(channel_test_jobs, "_claim_existing_channel_webhook_event", fake_claim)
+    monkeypatch.setattr(channel_test_jobs, "_try_complete_channel_webhook_claim", fake_complete)
+    monkeypatch.setattr(channel_test_jobs.threading, "Thread", ImmediateThread)
+
+    payload = {
+        "provider": "discord",
+        "eventId": "provider-event-1",
+        "messageId": "message-1",
+        "channelId": "C123",
+        "threadId": "thread-1",
+    }
+    result = channel_test_jobs.enqueue_channel_test_message(
+        channel={
+            "id": "channel-1",
+            "channelKey": "discord-main",
+            "type": "discord",
+            "config": {"ticketCreationMode": "per_message"},
+        },
+        payload=payload,
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert len(events_by_event_id) == 1
+    job_event_id = next(iter(events_by_event_id))
+    assert job_event_id.startswith("admin-test-job:provider-event-1:")
+    assert ingest_calls[0] == {
+        "channel_key": "discord-main",
+        "payload": payload,
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "source": "admin-test-async",
+    }
+    assert events_by_event_id[job_event_id]["status"] == "processed"
+    assert events_by_event_id[job_event_id]["result"]["issueId"] == "issue-1"
+    assert result["status"] == "processed"
+    assert result["processed"] == 1
+    assert result["items"][0]["issueId"] == "issue-1"
+    monkeypatch.setattr(channel_test_jobs, "_list_all", lambda *_args, **_kwargs: [events_by_event_id[job_event_id]])
+    persisted = channel_test_jobs.get_channel_test_job_status(
+        "job-row-1",
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+    assert persisted is not None
+    assert persisted["status"] == "processed"
+    assert persisted["issueId"] == "issue-1"
+
+    replay = channel_test_jobs.enqueue_channel_test_message(
+        channel={
+            "id": "channel-1",
+            "channelKey": "discord-main",
+            "type": "discord",
+            "config": {"ticketCreationMode": "per_message"},
+        },
+        payload=payload,
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert len(events_by_event_id) == 2
+    assert len(ingest_calls) == 2
+    assert replay["status"] == "skipped"
+    assert replay["processed"] == 0
+    assert replay["skipped"] == 1
+    assert replay["issueId"] == "issue-1"
+
+
+def test_channel_test_job_waits_out_abandoned_provider_claim_before_terminalizing(monkeypatch):
+    updates: list[dict] = []
+    completions: list[dict] = []
+    claim_attempts = iter([1, 2])
+    aggregates = iter([
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{"status": "skipped", "winnerStatus": "received"}],
+        },
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{
+                "status": "skipped",
+                "winnerStatus": "processed",
+                "issueId": "issue-recovered",
+            }],
+        },
+    ])
+
+    def fake_update(_job_id: str, **kwargs):
+        updates.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(channel_test_jobs, "update_channel_webhook_event", fake_update)
+    monkeypatch.setattr(channel_test_jobs, "ingest_channel_webhook", lambda *_args, **_kwargs: next(aggregates))
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "get_channel_webhook_event",
+        lambda *_args, **_kwargs: {"status": "received", "result": {}},
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_claim_existing_channel_webhook_event",
+        lambda event, **_kwargs: ({**event, "processingAttempt": next(claim_attempts)}, "claim-token"),
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_try_complete_channel_webhook_claim",
+        lambda _job_id, **kwargs: completions.append(kwargs) is None or True,
+    )
+
+    kwargs = {
+        "job_id": "job-row-1",
+        "channel_id": "channel-1",
+            "event_id": "admin-test-job:provider-event-1:invocation-1",
+        "channel_key": "discord-main",
+        "payload": {"eventId": "provider-event-1"},
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "metadata": {
+            "kind": channel_test_jobs.CHANNEL_TEST_JOB_KIND,
+            "eventId": "provider-event-1",
+            "messageId": "message-1",
+        },
+    }
+
+    channel_test_jobs.process_channel_test_job(**kwargs)
+
+    assert updates[-1]["status"] == "received"
+    assert updates[-1]["result"]["processing"] is True
+    assert completions == []
+
+    channel_test_jobs.process_channel_test_job(**kwargs)
+
+    assert completions[-1]["status"] == "processed"
+    assert completions[-1]["result"]["issueId"] == "issue-recovered"
+    assert completions[-1]["result"]["aggregate"]["processed"] == 1
+    assert completions[-1]["result"]["aggregate"]["skipped"] == 0
+
+
+def test_channel_test_job_scheduler_recovers_unclaimed_received_job(monkeypatch):
+    started: list[dict] = []
+    received = {
+        "id": "job-row-1",
+        "channel": "channel-1",
+        "event_id": "admin-test-job:provider-event-1:invocation-1",
+        "status": "received",
+        "payload": {"eventId": "provider-event-1"},
+        "result": {
+            "kind": channel_test_jobs.CHANNEL_TEST_JOB_KIND,
+            "channelKey": "discord-main",
+            "projectId": "project-1",
+        },
+        "project": "project-1",
+        "processing_claim_token": "",
+    }
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_raw_jobs",
+        lambda status, _limit: [received] if status == "received" else [],
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "start_channel_test_job",
+        lambda **kwargs: started.append(kwargs) is None or True,
+    )
+
+    result = channel_test_jobs.run_queued_channel_test_jobs(limit=5)
+
+    assert result["started"] == 1
+    assert started[0]["job_id"] == "job-row-1"
+    assert started[0]["channel_key"] == "discord-main"
 
 
 def test_admin_channel_webhook_event_rematch(client, monkeypatch):

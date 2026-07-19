@@ -30,6 +30,7 @@ from automail.support.issue_fields import IssueFieldExtraction
 from automail.support.issue_triage import IssueTriageSuggestion
 
 _claim_issue_reply_delivery_real = issues._claim_issue_reply_delivery
+_complete_channel_webhook_claim_real = issues._complete_channel_webhook_claim
 
 
 def test_restricted_knowledge_reply_requires_project_admin_for_mutation() -> None:
@@ -86,8 +87,20 @@ def _default_email_webhook_token(monkeypatch):
         )
         return {**reply, **data}
 
+    def fake_complete_channel_webhook_claim(webhook_event_id: str, **kwargs):
+        return issues.update_channel_webhook_event(
+            webhook_event_id,
+            tenant_id=kwargs["tenant_id"],
+            project_id=kwargs["project_id"],
+            status=kwargs["status"],
+            outbound_message_id=kwargs.get("outbound_message_id", ""),
+            result=kwargs.get("result"),
+            error=kwargs.get("error", ""),
+        )
+
     monkeypatch.setattr(issues, "_claim_issue_reply_delivery", fake_claim_issue_reply_delivery)
     monkeypatch.setattr(issues, "_complete_issue_reply_delivery", fake_complete_issue_reply_delivery)
+    monkeypatch.setattr(issues, "_complete_channel_webhook_claim", fake_complete_channel_webhook_claim)
     monkeypatch.setattr(
         issues,
         "_apply_direct_channel_runbooks",
@@ -23058,7 +23071,15 @@ def test_ingest_channel_webhook_skips_processed_duplicate(monkeypatch):
             "project": "project1",
             "channel_key": "email:support",
             "type": "email",
-        } if collection == "support_channels" else {"id": "eventRow1", "status": "processed"}
+        } if collection == "support_channels" else {
+            "id": "eventRow1",
+            "status": "processed",
+            "result": {
+                "issueId": "issue1",
+                "messageId": "msg1",
+                "matched": True,
+            },
+        }
         if collection == "support_channel_webhook_events" else None,
     )
 
@@ -23071,6 +23092,390 @@ def test_ingest_channel_webhook_skips_processed_duplicate(monkeypatch):
 
     assert result["status"] == "skipped"
     assert result["skipped"] == 1
+    assert result["items"][0]["issueId"] == "issue1"
+    assert result["items"][0]["messageId"] == "msg1"
+
+
+def test_ingest_channel_webhook_concurrent_replay_has_one_owner(monkeypatch):
+    channel = {
+        "id": "channel1",
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "channelKey": "discord-main",
+        "type": "discord",
+        "status": "active",
+        "config": {"ticketCreationMode": "per_message"},
+    }
+    event_store: dict[str, object] = {}
+    store_lock = threading.Lock()
+    initial_lookup_barrier = threading.Barrier(2)
+    duplicate_polling = threading.Event()
+    process_calls = 0
+    record_attempts = 0
+    update_calls = 0
+
+    monkeypatch.setattr(issues, "get_channel_by_key", lambda *_args, **_kwargs: channel)
+    monkeypatch.setattr(issues, "CHANNEL_WEBHOOK_REPLAY_POLL_ATTEMPTS", 100)
+    monkeypatch.setattr(issues, "CHANNEL_WEBHOOK_REPLAY_POLL_INTERVAL_SECONDS", 0.001)
+
+    def fake_get_event(*_args, **_kwargs):
+        with store_lock:
+            current = dict(event_store) if event_store else None
+        if current is None:
+            initial_lookup_barrier.wait(timeout=2)
+            return None
+        if current.get("status") == "received":
+            duplicate_polling.set()
+        return current
+
+    def fake_record_event(**kwargs):
+        nonlocal record_attempts
+        with store_lock:
+            record_attempts += 1
+            if event_store:
+                request = httpx.Request("POST", "http://pb.test/channel-webhook-events")
+                response = httpx.Response(409, request=request)
+                raise httpx.HTTPStatusError(
+                    "unique channel event",
+                    request=request,
+                    response=response,
+                )
+            event_store.update(
+                {
+                    "id": "event-row-1",
+                    "channelId": "channel1",
+                    "eventId": kwargs["event_id"],
+                    "eventType": kwargs["event_type"],
+                    "providerMessageId": kwargs["provider_message_id"],
+                    "status": "received",
+                    "result": {},
+                    "error": "",
+                }
+            )
+            return dict(event_store)
+
+    def fake_ingest_message(**_kwargs):
+        nonlocal process_calls
+        with store_lock:
+            process_calls += 1
+        assert duplicate_polling.wait(timeout=2)
+        return {
+            "eventType": "MESSAGE_CREATE",
+            "status": "success",
+            "processed": 1,
+            "skipped": 0,
+            "issueId": "issue-race",
+            "messageId": "message-race",
+            "resolver": {"resolverAction": "created"},
+            "error": "",
+        }
+
+    def fake_update_event(_webhook_event_id, **kwargs):
+        nonlocal update_calls
+        with store_lock:
+            update_calls += 1
+            event_store.update(
+                {
+                    "status": kwargs["status"],
+                    "result": kwargs.get("result") or {},
+                    "error": kwargs.get("error") or "",
+                }
+            )
+            return dict(event_store)
+
+    monkeypatch.setattr(issues, "get_channel_webhook_event", fake_get_event)
+    monkeypatch.setattr(issues, "record_channel_webhook_event", fake_record_event)
+    monkeypatch.setattr(issues, "_ingest_generic_channel_message_event", fake_ingest_message)
+    monkeypatch.setattr(issues, "update_channel_webhook_event", fake_update_event)
+
+    payload = {
+        "eventId": "evt-race",
+        "eventType": "MESSAGE_CREATE",
+        "provider": "discord",
+        "messageId": "message-race",
+        "channelId": "C123",
+        "guildId": "G123",
+        "content": "Please help with my order.",
+        "author": {"id": "U123", "username": "Ana"},
+    }
+    results: list[dict | None] = [None, None]
+    errors: list[BaseException] = []
+
+    def run(index: int) -> None:
+        try:
+            results[index] = issues.ingest_channel_webhook(
+                "discord-main",
+                tenant_id="tenant1",
+                project_id="project1",
+                payload=payload,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert process_calls == 1
+    assert record_attempts == 2
+    assert update_calls == 1
+    assert event_store["status"] == "processed"
+
+    completed = [result for result in results if result and result["processed"] == 1]
+    replays = [result for result in results if result and result["skipped"] == 1]
+    assert len(completed) == 1
+    assert len(replays) == 1
+    replay_item = replays[0]["items"][0]
+    assert replay_item["status"] == "skipped"
+    assert replay_item["winnerStatus"] == "processed"
+    assert replay_item["issueId"] == "issue-race"
+    assert replay_item["messageId"] == "message-race"
+    assert replay_item["resolver"]["resolverAction"] == "created"
+
+
+def test_channel_webhook_crash_after_claim_allows_stale_takeover(monkeypatch):
+    expired_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    crashed_claim = {
+        "id": "event-row-1",
+        "channelId": "channel1",
+        "eventId": "evt-crashed",
+        "status": "received",
+        "result": {
+            "_webhookClaim": {
+                "version": 1,
+                "attempt": 1,
+                "history": [],
+            }
+        },
+        "processingClaimToken": "dead-owner-token",
+        "processingClaimedAt": "2026-07-19T08:00:00+00:00",
+        "processingClaimExpiresAt": expired_at,
+        "processingAttempt": 1,
+        "processingRetrySafe": False,
+        "retryPolicyVersion": issues.CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+    }
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        issues,
+        "get_channel_webhook_event",
+        lambda *_args, **_kwargs: crashed_claim,
+    )
+
+    def fake_post(path: str, payload: dict):
+        posted.append((path, payload))
+        return {
+            "claimed": True,
+            "state": "received",
+            "claim_token": "takeover-token",
+            "attempt": 2,
+            "claimed_at": "2026-07-19T09:00:00+00:00",
+            "lease_expires_at": "2026-07-19T09:15:00+00:00",
+            "event": {
+                "id": "event-row-1",
+                "channel": "channel1",
+                "event_id": "evt-crashed",
+                "status": "received",
+                "result": {
+                    "_webhookClaim": {
+                        "version": 1,
+                        "attempt": 2,
+                        "history": [{"attempt": 1, "status": "lease_expired"}],
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(issues, "_post", fake_post)
+
+    event, claim_token = issues._claim_channel_webhook_event(
+        tenant_id="tenant1",
+        project_id="project1",
+        channel_id="channel1",
+        provider="discord",
+        event_id="evt-crashed",
+        event_type="MESSAGE_CREATE",
+        provider_message_id="message-1",
+        payload={"eventId": "evt-crashed"},
+        received_at="2026-07-19T08:00:00+00:00",
+    )
+
+    assert claim_token == "takeover-token"
+    assert event["processingAttempt"] == 2
+    assert event["result"]["_webhookClaim"]["history"] == [
+        {"attempt": 1, "status": "lease_expired"}
+    ]
+    path, claim_payload = posted[0]
+    assert path == "/api/mantly/support-channel-webhooks/event-row-1/claim"
+    assert claim_payload["allow_failed"] is False
+    assert claim_payload["retry_policy_version"] == 1
+
+
+def test_channel_webhook_failed_retry_uses_versioned_safe_policy(monkeypatch):
+    failed_event = issues._normalize_channel_webhook_event({
+        "id": "event-row-1",
+        "channel": "channel1",
+        "event_id": "evt-failed",
+        "status": "failed",
+        "error": "Transient database timeout",
+        "result": {
+            "_webhookClaim": {
+                "version": 1,
+                "attempt": 1,
+                "history": [],
+            }
+        },
+        "processing_attempt": 1,
+        "processing_retry_safe": True,
+        "retry_policy_version": issues.CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+    })
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        issues,
+        "get_channel_webhook_event",
+        lambda *_args, **_kwargs: failed_event,
+    )
+
+    def fake_post(path: str, payload: dict):
+        posted.append((path, payload))
+        return {
+            "claimed": True,
+            "state": "received",
+            "claim_token": "retry-token",
+            "attempt": 2,
+            "event": {
+                "id": "event-row-1",
+                "channel": "channel1",
+                "event_id": "evt-failed",
+                "status": "received",
+                "result": {
+                    "_webhookClaim": {
+                        "version": 1,
+                        "retryPolicyVersion": 1,
+                        "attempt": 2,
+                        "history": [
+                            {
+                                "attempt": 1,
+                                "status": "failed",
+                                "error": "Transient database timeout",
+                            }
+                        ],
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(issues, "_post", fake_post)
+
+    event, claim_token = issues._claim_channel_webhook_event(
+        tenant_id="tenant1",
+        project_id="project1",
+        channel_id="channel1",
+        provider="discord",
+        event_id="evt-failed",
+        event_type="MESSAGE_CREATE",
+        provider_message_id="message-1",
+        payload={"eventId": "evt-failed"},
+        received_at="2026-07-19T08:00:00+00:00",
+    )
+
+    assert claim_token == "retry-token"
+    assert event["result"]["_webhookClaim"]["history"][0]["error"] == (
+        "Transient database timeout"
+    )
+    path, claim_payload = posted[0]
+    assert path == "/api/mantly/support-channel-webhooks/event-row-1/claim"
+    assert claim_payload == {
+        "project_id": "project1",
+        "tenant_id": "tenant1",
+        "worker_id": claim_payload["worker_id"],
+        "lease_seconds": issues.CHANNEL_WEBHOOK_CLAIM_LEASE_SECONDS,
+        "allow_failed": True,
+        "retry_policy_version": issues.CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+        "max_attempts": issues.CHANNEL_WEBHOOK_MAX_PROCESSING_ATTEMPTS,
+    }
+
+
+def test_channel_webhook_failed_retry_fails_closed_without_safe_policy(monkeypatch):
+    failed_event = {
+        "id": "event-row-1",
+        "channelId": "channel1",
+        "eventId": "evt-failed",
+        "status": "failed",
+        "processingAttempt": 1,
+        "processingRetrySafe": False,
+        "retryPolicyVersion": issues.CHANNEL_WEBHOOK_RETRY_POLICY_VERSION,
+    }
+    monkeypatch.setattr(
+        issues,
+        "get_channel_webhook_event",
+        lambda *_args, **_kwargs: failed_event,
+    )
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda *_args, **_kwargs: pytest.fail("unsafe failure must not be reclaimed"),
+    )
+
+    event, claim_token = issues._claim_channel_webhook_event(
+        tenant_id="tenant1",
+        project_id="project1",
+        channel_id="channel1",
+        provider="discord",
+        event_id="evt-failed",
+        event_type="MESSAGE_CREATE",
+        provider_message_id="message-1",
+        payload={"eventId": "evt-failed"},
+        received_at="2026-07-19T08:00:00+00:00",
+    )
+
+    assert event is failed_event
+    assert claim_token == ""
+
+
+def test_channel_webhook_completion_sends_owner_token_and_retry_safety(monkeypatch):
+    posted: list[tuple[str, dict]] = []
+
+    def fake_post(path: str, payload: dict):
+        posted.append((path, payload))
+        return {
+            "completed": True,
+            "idempotent": False,
+            "state": "failed",
+            "event": {
+                "id": "event-row-1",
+                "channel": "channel1",
+                "event_id": "evt-failed",
+                "status": "failed",
+                "error": "Transient database timeout",
+                "result": {"kind": "inbound_message"},
+                "processing_retry_safe": True,
+                "retry_policy_version": 1,
+            },
+        }
+
+    monkeypatch.setattr(issues, "_post", fake_post)
+
+    event = _complete_channel_webhook_claim_real(
+        "event-row-1",
+        tenant_id="tenant1",
+        project_id="project1",
+        claim_token="current-owner-token",
+        status="failed",
+        result={"kind": "inbound_message"},
+        error="Transient database timeout",
+        retry_safe=True,
+    )
+
+    assert event is not None
+    assert event["processingRetrySafe"] is True
+    path, completion_payload = posted[0]
+    assert path == "/api/mantly/support-channel-webhooks/event-row-1/complete"
+    assert completion_payload["claim_token"] == "current-owner-token"
+    assert completion_payload["retry_safe"] is True
 
 
 def test_ingest_channel_webhook_marks_duplicate_message_with_resolver_proof(monkeypatch):
@@ -23117,6 +23522,19 @@ def test_ingest_channel_webhook_marks_duplicate_message_with_resolver_proof(monk
     monkeypatch.setattr(issues, "_upsert_account", lambda **_kwargs: {"id": "account1"})
     monkeypatch.setattr(issues, "_upsert_contact", lambda **_kwargs: {"id": "contact1"})
     monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(
+        issues,
+        "_claim_channel_webhook_event",
+        lambda **_kwargs: (
+            {
+                "id": "eventRow1",
+                "channelId": "channel1",
+                "eventId": "evt-dup",
+                "status": "received",
+            },
+            "test-event-claim",
+        ),
+    )
 
     result = issues.ingest_channel_webhook(
         "discord-main",
@@ -23142,6 +23560,311 @@ def test_ingest_channel_webhook_marks_duplicate_message_with_resolver_proof(monk
     assert webhook_patch["status"] == "skipped"
     assert webhook_patch["result"]["resolver"]["resolverAction"] == "deduplicated"
     assert webhook_patch["result"]["resolver"]["externalTicketKey"] == "discord:discord-main:G123:C123:m-1"
+
+
+def test_ingest_channel_webhook_stale_takeover_resumes_after_timeline_persist(
+    monkeypatch,
+):
+    """A crashed first owner must not turn its durable message into lost work."""
+    posted: list[tuple[str, dict]] = []
+    patched: list[tuple[str, dict]] = []
+    runbook_calls: list[dict] = []
+    automation_calls: list[dict] = []
+    triage_calls: list[dict] = []
+    answer_calls: list[dict] = []
+    existing_issue = {
+        "id": "issue1",
+        "tenant": "tenant1",
+        "project": "project1",
+        "source_email_id": "discord:discord-main:C123:m-1",
+        "status": "open",
+        # The first worker died after the message insert and before this patch.
+        "message_count": 0,
+        "subject": "Production API is down.",
+    }
+    existing_message = {
+        "id": "msg1",
+        "issue": "issue1",
+        "source_message_id": "discord:discord-main:C123:m-1:m-1",
+        "direction": "customer",
+        "sender": "Ana",
+        "body": "Production API is down.",
+        "message_kind": "discord_message",
+        "metadata": {},
+    }
+
+    def fake_first(collection: str, *_args, **_kwargs):
+        if collection == "support_channels":
+            return {
+                "id": "channel1",
+                "tenant": "tenant1",
+                "project": "project1",
+                "channel_key": "discord-main",
+                "type": "discord",
+                "status": "active",
+                "config": {
+                    "ticketCreationMode": "per_message",
+                    "autoPrepareAgentReply": True,
+                    "autoPrepareTriage": True,
+                    "autoPrepareCustomFields": False,
+                    "autoCreateDraft": True,
+                },
+            }
+        if collection == "support_issues":
+            return existing_issue
+        if collection == "support_messages":
+            return existing_message
+        if collection == "support_ai_runs":
+            return None
+        if collection == "support_channel_webhook_events":
+            return {
+                "id": "eventRow1",
+                "channel": "channel1",
+                "event_id": "evt-crashed",
+                "status": "received",
+            }
+        return None
+
+    def fake_apply_runbooks(**kwargs):
+        runbook_calls.append(kwargs)
+        return {**kwargs["issue"], "activated_intent": "incident"}
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "_upsert_account", lambda **_kwargs: {"id": "account1"})
+    monkeypatch.setattr(issues, "_upsert_contact", lambda **_kwargs: {"id": "contact1"})
+    monkeypatch.setattr(
+        issues,
+        "_list_issue_messages",
+        lambda **_kwargs: [issues._normalize_message(existing_message)],
+    )
+    monkeypatch.setattr(issues, "_apply_direct_channel_runbooks", fake_apply_runbooks)
+    monkeypatch.setattr(issues, "_ensure_issue_sla_events", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_sync_channel_account_insights", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_refresh_account_contact_counts", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_run_automation_rules_for_issue",
+        lambda **kwargs: automation_calls.append(kwargs)
+        or {"processed": 0, "failed": 0, "items": []},
+    )
+    monkeypatch.setattr(
+        issues,
+        "prepare_issue_triage",
+        lambda _issue_id, **kwargs: triage_calls.append(kwargs)
+        or {
+            "actionExecution": {"id": "triage-execution1"},
+            "run": {"id": "triage-run1"},
+        },
+    )
+    monkeypatch.setattr(
+        issues,
+        "create_issue_agent_answer",
+        lambda _issue_id, **kwargs: answer_calls.append(kwargs)
+        or {
+            "reply": {"id": "draft1", "status": "draft"},
+            "run": {"id": "answer-run1"},
+            "autoSendRequested": False,
+            "autoSend": False,
+        },
+    )
+    monkeypatch.setattr(
+        issues,
+        "_claim_channel_webhook_event",
+        lambda **_kwargs: (
+            {
+                "id": "eventRow1",
+                "channelId": "channel1",
+                "eventId": "evt-crashed",
+                "status": "received",
+                "processingAttempt": 2,
+            },
+            "takeover-token",
+        ),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda path, data: posted.append((path, data)) or data,
+    )
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda path, data: patched.append((path, data)) or data,
+    )
+
+    result = issues.ingest_channel_webhook(
+        "discord-main",
+        tenant_id="tenant1",
+        project_id="project1",
+        payload={
+            "eventId": "evt-crashed",
+            "eventType": "MESSAGE_CREATE",
+            "provider": "discord",
+            "messageId": "m-1",
+            "channelId": "C123",
+            "guildId": "G123",
+            "content": "Production API is down.",
+            "author": {"id": "U123", "username": "Ana"},
+        },
+    )
+
+    assert result["status"] == "success"
+    assert result["processed"] == 1
+    assert result["items"][0]["processingRecovered"] is True
+    assert result["items"][0]["resolver"]["processingRecovery"] == "resumed"
+    assert len(runbook_calls) == 1
+    assert runbook_calls[0]["source_message_id"] == existing_message["source_message_id"]
+    assert runbook_calls[0]["resume_processing_run"] is False
+    assert automation_calls[0]["trigger"] == "issue_created"
+    assert len(triage_calls) == 1
+    assert len(answer_calls) == 1
+    assert answer_calls[0]["create_draft"] is True
+    assert not any(
+        path == "/api/collections/support_messages/records"
+        for path, _data in posted
+    )
+    assert not any(
+        path == "/api/collections/support_channel_webhook_events/records"
+        for path, _data in posted
+    )
+    issue_events = [
+        data
+        for path, data in posted
+        if path == "/api/collections/support_issue_events/records"
+    ]
+    assert [event["event_type"] for event in issue_events].count(
+        "discord_message_received"
+    ) == 1
+    webhook_patch = next(
+        data
+        for path, data in patched
+        if path == "/api/collections/support_channel_webhook_events/records/eventRow1"
+    )
+    assert webhook_patch["status"] == "processed"
+    assert webhook_patch["result"]["processingRecovered"] is True
+    assert webhook_patch["result"]["issueId"] == "issue1"
+    assert webhook_patch["result"]["messageId"] == "msg1"
+
+
+def test_generic_channel_recovery_after_issue_create_uses_create_semantics(
+    monkeypatch,
+):
+    posted: list[tuple[str, dict]] = []
+    assignments: list[dict] = []
+    messages: list[dict] = []
+    automations: list[dict] = []
+    prepared: list[dict] = []
+    sla_calls: list[dict] = []
+    existing_issue = {
+        "id": "issue1",
+        "tenant": "tenant1",
+        "project": "project1",
+        "source_email_id": "discord:discord-main:C123:m-1",
+        "status": "open",
+        "message_count": 0,
+        "assignee_email": "owner@example.com",
+    }
+
+    def fake_first(collection: str, *_args, **_kwargs):
+        if collection == "support_issues":
+            return existing_issue
+        if collection == "support_messages":
+            return None
+        if collection == "support_ai_runs":
+            return None
+        if collection == "support_issue_assignments":
+            return assignments[0] if assignments else None
+        return None
+
+    def fake_post(path: str, data: dict):
+        posted.append((path, data))
+        if path == "/api/collections/support_messages/records":
+            messages.append(data)
+        if path == "/api/collections/support_issue_assignments/records":
+            assignments.append(data)
+        return data
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "generate_id", lambda: "msg1")
+    monkeypatch.setattr(issues, "_post", fake_post)
+    monkeypatch.setattr(issues, "_patch", lambda _path, data: data)
+    monkeypatch.setattr(issues, "_upsert_account", lambda **_kwargs: {"id": "account1"})
+    monkeypatch.setattr(issues, "_upsert_contact", lambda **_kwargs: {"id": "contact1"})
+    monkeypatch.setattr(
+        issues,
+        "_list_issue_messages",
+        lambda **_kwargs: [issues._normalize_message(messages[0])],
+    )
+    monkeypatch.setattr(issues, "_notify_issue_assigned", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_apply_direct_channel_runbooks",
+        lambda **kwargs: kwargs["issue"],
+    )
+    monkeypatch.setattr(
+        issues,
+        "_ensure_issue_sla_events",
+        lambda **kwargs: sla_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_run_automation_rules_for_issue",
+        lambda **kwargs: automations.append(kwargs)
+        or {"processed": 0, "failed": 0, "items": []},
+    )
+    monkeypatch.setattr(
+        issues,
+        "_channel_auto_prepare_agent_reply",
+        lambda **kwargs: prepared.append(kwargs) or {"reply": {"id": "draft1"}},
+    )
+    monkeypatch.setattr(issues, "_sync_channel_account_insights", lambda **_kwargs: None)
+    monkeypatch.setattr(issues, "_refresh_account_contact_counts", lambda **_kwargs: None)
+
+    result = issues._ingest_generic_channel_message_event(
+        channel={
+            "id": "channel1",
+            "channelKey": "discord-main",
+            "type": "discord",
+            "config": {"ticketCreationMode": "per_message"},
+        },
+        event={
+            "eventId": "evt-crashed",
+            "eventType": "MESSAGE_CREATE",
+            "provider": "discord",
+            "messageId": "m-1",
+            "channelId": "C123",
+            "guildId": "G123",
+            "content": "Production API is down.",
+            "author": {"id": "U123", "username": "Ana"},
+        },
+        tenant_id="tenant1",
+        project_id="project1",
+        resume_incomplete=True,
+    )
+
+    assert result["status"] == "success"
+    assert result["processingRecovered"] is True
+    assert result["resolver"]["resolverAction"] == "created"
+    assert len(messages) == 1
+    assert len(assignments) == 1
+    assert assignments[0]["assignee_email"] == "owner@example.com"
+    assert len(sla_calls) == 1
+    assert automations[0]["trigger"] == "issue_created"
+    assert len(prepared) == 1
+    assert prepared[0].get("on_update") is None
+    assert not any(
+        path == "/api/collections/support_issues/records"
+        for path, _data in posted
+    )
+
+    issues._record_default_assignment(
+        issue_id="issue1",
+        assignee_email="owner@example.com",
+        tenant_id="tenant1",
+        project_id="project1",
+        idempotent=True,
+    )
+    assert len(assignments) == 1
 
 
 def test_create_and_update_knowledge_article(monkeypatch):

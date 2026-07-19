@@ -742,6 +742,50 @@ def test_explicit_request_sentences_fill_router_obligation_omissions(monkeypatch
     ]
 
 
+def test_first_person_noun_request_fills_equal_count_router_omission(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = (
+        "Zurich Commercial Court response due 20 July 2026 at 12:00. "
+        "I need an urgent consultation today. "
+        "Identify and escalate the deadline, explain the triage information needed, "
+        "and do not promise an extension, representation, or outcome."
+    )
+    route = ConcernRoute(
+        summary="Urgent court deadline and consultation request",
+        source_text=source_text,
+        answer_obligations=[
+            "Identify and escalate the deadline.",
+            "Explain the triage information needed.",
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "urgent-deadline",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "I need an urgent consultation today.",
+        "Identify and escalate the deadline.",
+        "Explain the triage information needed.",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        "urgent-deadline:obligation-1",
+        "urgent-deadline:obligation-2",
+        "urgent-deadline:obligation-3",
+    ]
+
+
 @pytest.mark.parametrize(
     "source_text",
     [
@@ -749,6 +793,10 @@ def test_explicit_request_sentences_fill_router_obligation_omissions(monkeypatch
         "The client asked the firm to stop substantive discussion.",
         "Stopping substantive discussion would preserve the current position.",
         "Review of the matter remains pending. Update from the client arrived yesterday.",
+        "I needed an urgent consultation yesterday.",
+        "The client said I need an urgent consultation today.",
+        "I do not need an urgent consultation today.",
+        "I need to explain the background before asking for advice.",
         "Do not conclude there is a conflict or that representation continues.",
         "Then do not stop substantive discussion or record a confirmed conflict.",
         "Please never escalate this as a confirmed conflict.",

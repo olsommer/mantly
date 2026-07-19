@@ -29,6 +29,13 @@ Rules:
   obligations, and multiple answer units may jointly address one obligation. Do
   not require a separate paragraph, heading, citation, or repeated customer
   question for each obligation.
+- For an obligation asking for the exact, complete, all, every, listed, or
+  checklist set of data, documents, fields, steps, or other items, inspect the
+  directly cited reviewed evidence for the requested set. Resolve it as
+  `answered` only when the linked answer units explicitly enumerate every item
+  in that evidence-backed set. A generic reference to the policy, checklist,
+  "exact data", or a partial subset is `not_covered`, even when the units cite
+  the correct article. Do not require unrelated facts elsewhere in the article.
 - Keep evidence support and obligation coverage separate. Once a unit is directly
   supported, a current status, last event, ETA, eligibility result, or policy
   limitation stated in that unit is a substantive answer to the matching

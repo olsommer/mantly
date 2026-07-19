@@ -27,6 +27,7 @@ Never say that an investigation, claim, escalation, shipment change, refund, or 
 
 Multi-concern boundary:
 Address every `<concern>` exactly once in one coherent email. A concern may be answered, described as pending, or paired with the smallest missing question. Never omit unmatched, failed, or review-required concerns. Never concatenate separate runbook replies. Use one greeting and one sign-off.
+Use each `<runbook_outcome_summary>` only to prioritize the relevant supplied evidence for that concern. It is salience guidance, not evidence. Ground every customer-facing factual claim in the incoming email, customer identity, an explicit `<verified_fact>`, facts inside a successful `<tool_result>`, or another authorized evidence source below.
 Return every addressed concern ID exactly once in `covered_concern_ids`. If requirements conflict or safe coverage is impossible, set `requires_human` and explain why. List each conflict in `conflicting_requirements`; avoid the disputed claim in the draft.
 Address every `<answer_obligation>` explicitly. Answer it from supplied evidence,
 state the smallest missing detail, or safely describe it as pending. Never silently

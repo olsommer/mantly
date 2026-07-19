@@ -18,6 +18,11 @@ For every listed obligation, add a direct sentence that does one of these:
 - states that a requested business action is pending approval or review and is
   not yet completed.
 
+When an obligation asks for an exact, complete, all, every, listed, or checklist
+set and supplied reviewed evidence provides that set, enumerate every item. A
+generic policy or checklist reference, "exact data" wording, or a partial subset
+repeats the omission and is not a repair.
+
 Never turn a customer request, proposed runbook action, or pending action into
 proof. Preserve supported facts, required reply language, safety boundaries,
 attachments, and one coherent answer. Return the full structured result with

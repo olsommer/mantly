@@ -435,7 +435,7 @@ cases:
         - Safe return shipping, completed escalation, sent replacement, approved refund, or instructions to handle the battery for photos.
       knowledge_ids: []
       knowledge_any_of: [fulfillment-battery-safety, fulfillment-returns-refunds]
-      tool_fixture_ids: [shipment-zf-10482, order-zf-10482]
+      tool_fixture_ids: []
       pending_actions: [open_safety_incident, request_replacement, request_refund]
       idempotency: *replay
   - id: E07

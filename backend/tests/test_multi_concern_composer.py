@@ -13,7 +13,10 @@ from automail.pipeline.response.composer import (
     _pending_action_claim_check,
     _reply_requires_human,
 )
-from automail.pipeline.response.prompt_factory import create_response_user_prompt
+from automail.pipeline.response.prompt_factory import (
+    create_response_system_prompt,
+    create_response_user_prompt,
+)
 
 
 def _email() -> Email:
@@ -34,6 +37,7 @@ def _result() -> IntentResult:
             RunbookOutcome(
                 concern_id="cancel-contract",
                 concern_summary="Cancel contract C-184",
+                summary="Contract remains active; cancellation requires approval.",
                 source_text="Cancel C-184",
                 confidence=0.99,
                 matched=True,
@@ -52,6 +56,7 @@ def _result() -> IntentResult:
             RunbookOutcome(
                 concern_id="buy-product",
                 concern_summary="Buy three XYZ Pro units",
+                summary="XYZ Pro is available at the verified unit price.",
                 source_text="quote three XYZ Pro units",
                 confidence=0.98,
                 matched=True,
@@ -96,6 +101,11 @@ def test_multi_concern_prompt_contains_every_outcome_and_evidence():
 
     assert '<intent_context status="multi" concern_count="2">' in prompt
     assert '<concern id="cancel-contract" matched="True"' in prompt
+    assert "<concern_summary>Cancel contract C-184</concern_summary>" in prompt
+    assert (
+        "<runbook_outcome_summary>Contract remains active; cancellation requires "
+        "approval.</runbook_outcome_summary>"
+    ) in prompt
     assert "contract-cancellation" in prompt
     assert "product-purchase" in prompt
     assert '<tool_result name="product_lookup" status="success">' in prompt
@@ -104,6 +114,27 @@ def test_multi_concern_prompt_contains_every_outcome_and_evidence():
     assert "Never claim cancellation completed before approval." in prompt
     assert '<answer_obligation id="cancel-contract:obligation-1">' in prompt
     assert "What is the price for three XYZ Pro units?" in prompt
+
+
+def test_runbook_outcome_summary_is_salience_guidance_not_verified_evidence():
+    result = _result()
+    result.concerns[0].summary = "Unverified outcome summary claim."
+    result.concerns[0].verified_facts = []
+    result.concerns[0].tool_evidence = []
+
+    user_prompt = create_response_user_prompt(_email(), intent_result=result)
+    system_prompt = create_response_system_prompt()
+
+    assert (
+        "<runbook_outcome_summary>Unverified outcome summary claim."
+        "</runbook_outcome_summary>"
+    ) in user_prompt
+    assert "<verified_fact" not in user_prompt.split(
+        "<runbook_outcome_summary>Unverified outcome summary claim."
+        "</runbook_outcome_summary>",
+        maxsplit=1,
+    )[0]
+    assert "salience guidance, not evidence" in system_prompt
 
 
 def test_most_restrictive_concern_keeps_combined_reply_in_review():

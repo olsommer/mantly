@@ -253,7 +253,14 @@ class AutomationGroundingAssessment:
 class KnowledgeAgentOutput(BaseModel):
     """Structured result produced after searching the isolated workspace."""
 
-    answer: str = Field(description="Approval-ready customer support answer")
+    answer: str = Field(
+        description=(
+            "Approval-ready customer support answer that explicitly resolves every "
+            "independent item in the agent request, including an item-specific "
+            "unknown, unverified, pending, unavailable, or unquantified result when "
+            "the evidence does not establish it"
+        )
+    )
     confidence: Literal["low", "medium", "high"]
     citation_ids: list[str] = Field(default_factory=list)
     citation_paths: list[str] = Field(
@@ -1899,6 +1906,19 @@ def _automatic_runbook_concern_context(
                     or raw.get("requires_human")
                 ),
             }
+            concern_summary = _string_from(
+                raw.get("concernSummary")
+                or raw.get("concern_summary")
+                or outcome.get("concernSummary")
+                or outcome.get("concern_summary")
+            )
+            if concern_summary:
+                concern["concernSummary"] = concern_summary[:1_000]
+            runbook_outcome_summary = _string_from(
+                outcome.get("summary") or raw.get("summary")
+            )
+            if runbook_outcome_summary:
+                concern["runbookOutcomeSummary"] = runbook_outcome_summary[:1_000]
             reason = _string_from(
                 raw.get("reason")
                 or raw.get("unmatchedReason")
@@ -2225,10 +2245,15 @@ def _scoped_grounding_ticket_evidence(
                     and _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
                 )
             ]
+            grounding_context = {
+                key: value
+                for key, value in concern.items()
+                if key not in {"concernSummary", "runbookOutcomeSummary"}
+            }
             evidence = {
                 "evidenceId": _concern_grounding_evidence_id(concern_id),
                 "concernId": concern_id,
-                "context": concern,
+                "context": grounding_context,
             }
             if scoped_actions:
                 evidence["runbookActions"] = scoped_actions

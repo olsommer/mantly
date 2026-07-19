@@ -227,6 +227,11 @@ runbooks:
   - key: saas-service-incident
     purpose: State live incident facts and prepare P1 escalation and SLA review.
     proposed_actions: [open_p1_escalation, request_sla_credit]
+    required_guidance:
+      - >-
+        State the incident status, affected region, affected service, exact start
+        time, and ETA only from the successful service-status lookup; if ETA is
+        absent, say that it is unavailable.
   - key: saas-subscription-change
     purpose: Treat cancellation, seat, purchase, and refund requests as separate actions.
     proposed_actions: [cancel_add_on, reduce_seats, purchase_add_on, request_refund]

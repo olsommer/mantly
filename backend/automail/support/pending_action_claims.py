@@ -2071,7 +2071,12 @@ _PROOF_COMPLETED_ACTION_TOKEN_PATTERN = re.compile(
 _LOCAL_CLAUSE_BOUNDARY_PATTERN = re.compile(
     r",\s*(?:(?:and|but|then|however|yet|while)\s*,?\s*)|"
     r";\s*(?:(?:however|but|yet|while)\s*,?\s*)?|"
-    r"\s*[:—–]\s*|"
+    # A prose colon introduces a new clause with following whitespace. Do not
+    # split compact values such as ISO timestamps, clock times, URLs, or ports;
+    # doing so can preserve orphan fragments like ``40 00Z`` after removing an
+    # unsafe action claim from the surrounding sentence.
+    r":\s+(?=\S)|"
+    r"\s*[—–]\s*|"
     r"\s+(?:and|but)\s+(?=(?:we|i)\b)",
     re.IGNORECASE,
 )

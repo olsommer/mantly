@@ -1534,6 +1534,72 @@ def test_pending_action_repair_removes_unsupported_e09_confirmation() -> None:
     )
 
 
+def test_pending_action_repair_does_not_preserve_orphan_iso_time_fragments() -> None:
+    answer = (
+        "The P1 escalation has been opened for incident INC-204 affecting EU "
+        "authentication since 2026-07-19T07:40:00Z."
+    )
+    actions = [
+        {
+            "name": "open_p1_escalation",
+            "label": "Open P1 Escalation",
+            "status": "pending_approval",
+        }
+    ]
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+
+    assert repaired == PENDING_ACTION_REPAIR_NOTICE
+    assert "40 00Z" not in repaired
+
+
+def test_pending_action_repair_preserves_an_intact_iso_fact_in_its_own_unit() -> None:
+    safe_fact = (
+        "Incident INC-204 affects EU authentication and began at "
+        "2026-07-19T07:40:00Z."
+    )
+    answer = f"{safe_fact} The P1 escalation has been opened."
+    actions = [
+        {
+            "name": "open_p1_escalation",
+            "label": "Open P1 Escalation",
+            "status": "pending_approval",
+        }
+    ]
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+
+    assert repaired == f"{safe_fact}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+
+
+@pytest.mark.parametrize("separator", [": ", " — ", " – "])
+def test_pending_action_repair_preserves_real_local_clause_boundaries(
+    separator: str,
+) -> None:
+    safe_fact = "Incident INC-204 remains under investigation."
+    answer = f"We opened the P1 escalation{separator}{safe_fact}"
+    actions = [
+        {
+            "name": "open_p1_escalation",
+            "label": "Open P1 Escalation",
+            "status": "pending_approval",
+        }
+    ]
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+
+    assert repaired == f"{safe_fact}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+
+
 def test_pending_action_repair_preserves_safe_units_and_removes_only_unsafe_units() -> None:
     safe_status = "Order ZF-10482 remains in transit with an estimated delivery on the next business day."
     unsafe_action = "We are initiating a warehouse verification."

@@ -68,6 +68,7 @@ def test_automation_composer_receives_focused_obligation_repair_context(monkeypa
     assert "Credit the difference." in prompt
     assert "not established by current" in prompt
     assert "pending approval or review" in prompt
+    assert '"exact data" wording, or a partial subset' in prompt
     assert result.generation_mode == "llm"
     assert "exact cause" in result.answer
 

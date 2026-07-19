@@ -125,6 +125,8 @@ def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
                         {
                             "concernId": "buy-product",
                             "text": "Buy three XYZ Pro units",
+                            "concernSummary": "Customer wants to buy XYZ Pro.",
+                            "summary": "Verified XYZ Pro is available for purchase.",
                             "matched": True,
                             "intentName": "product-purchase",
                             "confidence": "high",
@@ -171,6 +173,11 @@ def test_issue_reply_context_contains_every_concern_and_safe_tool_facts():
         "buy-product",
     ]
     assert ticket["concerns"][0]["requiresHuman"] is True
+    assert ticket["concerns"][1]["concernSummary"] == "Customer wants to buy XYZ Pro."
+    assert (
+        ticket["concerns"][1]["runbookOutcomeSummary"]
+        == "Verified XYZ Pro is available for purchase."
+    )
     assert ticket["concerns"][1]["toolEvidence"] == [
         {
             "name": "product_lookup",
@@ -342,6 +349,7 @@ def test_direct_runbook_outcome_keeps_review_reason_and_requirements():
                         {
                             "concernId": "cancel-contract",
                             "concernSummary": "Cancel contract C-184",
+                            "summary": "Contract remains active; cancellation requires approval.",
                             "sourceText": "Cancel C-184",
                             "matched": True,
                             "intentName": "contract-cancellation",
@@ -368,12 +376,47 @@ def test_direct_runbook_outcome_keeps_review_reason_and_requirements():
             "confidence": "",
             "status": "requires_human",
             "requiresHuman": True,
+            "concernSummary": "Cancel contract C-184",
+            "runbookOutcomeSummary": "Contract remains active; cancellation requires approval.",
             "reason": "Cancellation requires approval.",
             "replyRequirements": ["Describe cancellation as pending."],
             "forbiddenClaims": ["The contract is already cancelled."],
         }
     ]
     assert issue_agent._answer_obligations_from_issue(issue) == ()
+
+
+def test_runbook_summaries_are_removed_from_grounding_evidence():
+    issue = {
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "access-security",
+                            "concernSummary": "Customer reports an unknown login.",
+                            "summary": "A Warsaw login was verified.",
+                            "sourceText": "I saw a login from Warsaw.",
+                            "matched": True,
+                            "intentName": "access-security",
+                            "status": "ready",
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    ticket = issue_agent._ticket_context(issue)
+    scoped = issue_agent._scoped_grounding_ticket_evidence(ticket)
+
+    assert ticket["concerns"][0]["concernSummary"] == "Customer reports an unknown login."
+    assert ticket["concerns"][0]["runbookOutcomeSummary"] == "A Warsaw login was verified."
+    grounding_context = scoped["concerns"][0]["context"]
+    assert "concernSummary" not in grounding_context
+    assert "runbookOutcomeSummary" not in grounding_context
+    assert grounding_context["text"] == "I saw a login from Warsaw."
 
 
 def test_reply_attachments_are_allowlisted_and_always_files_are_forced():

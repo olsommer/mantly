@@ -176,7 +176,16 @@ def create_response_user_prompt(
                 f" status={_xml_attr(getattr(concern, 'status', ''))}"
                 f" requires_human={_xml_attr(bool(getattr(concern, 'requires_human', False)))}>\n"
             )
-            intent_text += f"    <summary>{_xml_text(getattr(concern, 'concern_summary', ''))}</summary>\n"
+            intent_text += (
+                "    <concern_summary>"
+                f"{_xml_text(getattr(concern, 'concern_summary', ''))}"
+                "</concern_summary>\n"
+            )
+            intent_text += (
+                "    <runbook_outcome_summary>"
+                f"{_xml_text(getattr(concern, 'summary', ''))}"
+                "</runbook_outcome_summary>\n"
+            )
             intent_text += f"    <source_text>{_xml_text(getattr(concern, 'source_text', ''))}</source_text>\n"
             intent_text += f"    <runbook>{_xml_text(intent_name)}</runbook>\n"
             intent_text += f"    <confidence>{_xml_text(getattr(concern, 'confidence', 0))}</confidence>\n"

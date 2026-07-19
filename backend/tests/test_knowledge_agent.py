@@ -658,6 +658,20 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
     assert len(captured["middleware"]) == 2
 
 
+def test_knowledge_agent_contract_keeps_saas_incident_unknowns_explicit() -> None:
+    prompt = issue_agent._SYSTEM_PROMPT
+    answer_schema = KnowledgeAgentOutput.model_json_schema()
+    answer_description = answer_schema["properties"]["answer"]["description"]
+
+    assert "agent request itself as an independent answer checklist" in prompt
+    assert "permission to request a review does not establish" in prompt
+    assert "requested eligibility, approval, cause, date, amount" in prompt
+    assert "Do not merge several missing items" in prompt
+    assert "Every item must have its own evidence-backed answer" in prompt
+    assert "explicitly resolves every independent item in the agent request" in answer_description
+    assert "unquantified result" in answer_description
+
+
 def test_draft_removes_terminal_thank_you_closing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4285,6 +4299,112 @@ def test_grounding_prompt_defines_strict_obligation_resolution_contract() -> Non
     assert "can be assessed or discussed later" in prompt
     assert "unrelated future consultation" in prompt
     assert "successful exact `tool:*` or `action:*` evidence ID" in prompt
+
+
+def test_composer_and_grounding_prompts_require_complete_evidence_checklists() -> None:
+    composer_prompt = issue_agent._AUTOMATION_SYSTEM_PROMPT
+    grounding_prompt = issue_agent._GROUNDING_SYSTEM_PROMPT
+
+    assert "enumerate every evidence-backed item explicitly" in composer_prompt
+    assert "generic reference to the policy, checklist" in composer_prompt
+    assert "partial subset does not answer the obligation" in composer_prompt
+    assert "explicitly enumerate every item" in grounding_prompt
+    assert '"exact data", or a partial subset is `not_covered`' in grounding_prompt
+    assert "Do not require unrelated facts elsewhere in the article" in grounding_prompt
+
+
+@pytest.mark.parametrize(
+    ("answer", "resolution", "expected_verified", "expected_calls"),
+    [
+        (
+            (
+                "Please provide the affected order IDs and quantities, the campaign "
+                "deadline, and the operational impact."
+            ),
+            "answered",
+            True,
+            1,
+        ),
+        (
+            (
+                "Please provide the exact operational data, including any additional "
+                "operational impact beyond the blocked orders and campaign deadline."
+            ),
+            "not_covered",
+            False,
+            2,
+        ),
+    ],
+)
+def test_grounding_e09_exact_data_obligation_requires_complete_reviewed_checklist(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    resolution: str,
+    expected_verified: bool,
+    expected_calls: int,
+) -> None:
+    obligation_id = "concern-b2b-launch:obligation-4"
+    obligation = "state the exact operational data you need"
+    article_id = "fulfillment-b2b-sla"
+    issue = _issue_with_grounding_obligations(
+        concern_id="concern-b2b-launch",
+        questions=[(obligation_id, obligation)],
+    )
+    article = {
+        "id": article_id,
+        "title": "B2B P1 incidents and SLA review",
+        "body": (
+            "A B2B launch blocker should capture affected orders and quantities, "
+            "campaign deadline, and operational impact."
+        ),
+        "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
+        "needsReview": False,
+    }
+    answer_units = issue_agent._grounding_answer_units(answer)
+    output = AutomationGroundingOutput(
+        verdict=("grounded" if expected_verified else "not_grounded"),
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[article_id],
+            )
+            for unit in answer_units
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution=resolution,
+                answer_unit_ids=[unit["id"] for unit in answer_units],
+                evidence_ids=[article_id],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output] * expected_calls,
+        articles=[article],
+    )
+
+    assert len(prompts) == expected_calls
+    assert all(obligation in prompt for prompt in prompts)
+    assert all(article["body"] in prompt for prompt in prompts)
+    assert all(answer in prompt for prompt in prompts)
+    assert result.verified is expected_verified
+    if expected_verified:
+        assert result.status == "passed"
+        assert result.uncovered_obligations == ()
+    else:
+        assert result.status == "failed"
+        assert result.reason_code == "incomplete_answer"
+        assert result.uncovered_obligations == (obligation,)
 
 
 def test_grounding_obligation_schema_requires_resolution_and_derives_covered() -> None:

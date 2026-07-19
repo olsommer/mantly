@@ -462,13 +462,16 @@ cases:
         Do not conclude there is a conflict or that representation continues.
       attachments: []
     concerns:
+      - key: matter-status
+        runbook_key: law-matter-status
+        answer_obligations:
+          - State the tool-confirmed matter status and whether substantive discussion is already paused.
       - key: potential-conflict
         runbook_key: law-potential-conflict
         answer_obligations:
-          - State the tool-confirmed matter status and whether discussion is already paused.
           - Address stopping discussion, recording the report, and escalating review separately.
     expected:
-      minimum_concern_count: 1
+      minimum_concern_count: 2
       reply_disposition: draft
       grounding_status: passed
       approval_required: true

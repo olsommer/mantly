@@ -940,10 +940,22 @@ _FACTUAL_ACTION_NOUN_SENTENCE_PATTERN = re.compile(
     r"report|review|state|stop|update)\s+(?:is|was|were|has|had|remains?))\b",
     re.IGNORECASE,
 )
+_FIRST_PERSON_NOUN_REQUEST_PATTERN = re.compile(
+    r"^\s*(?:(?:i|we)\s+(?:need|want|would\s+like)|"
+    r"i\s+am\s+requesting|we\s+are\s+requesting)\s+"
+    r"(?:an?|the|some|my|our)\s+"
+    r"(?:(?:urgent|immediate|new|same-day|updated|current|written|full|partial|"
+    r"replacement|billing|technical|legal|human)\s+){0,3}"
+    r"(?:consultation|appointment|refund|replacement|return|cancellation|"
+    r"cancelation|update|status|answer|review|escalation|callback|call|copy|"
+    r"invoice|receipt|extension|waiver|plan|booking|reservation|quote|estimate|"
+    r"reset|change)\b",
+    re.IGNORECASE,
+)
 _EXPLICIT_REQUEST_SENTENCE_PATTERN = re.compile(
     r"^\s*(?:"
     r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)|"
-    r"(?:(?:i|we)\s+(?:need|want|would\s+like)\s+(?:you\s+)?to\s+)|"
+    r"(?:(?:i|we)\s+(?:need|want|would\s+like)\s+you\s+to\s+)|"
     r"(?:you\s+(?:must|need\s+to|should)\s+)"
     r")?"
     r"(?:address|answer|apply|approve|arrange|book|cancel|change|check|confirm|"
@@ -983,7 +995,10 @@ def _explicit_request_sentences(value: str) -> list[str]:
             continue
         if _FACTUAL_ACTION_NOUN_SENTENCE_PATTERN.match(candidate):
             continue
-        if _EXPLICIT_REQUEST_SENTENCE_PATTERN.match(candidate):
+        if (
+            _EXPLICIT_REQUEST_SENTENCE_PATTERN.match(candidate)
+            or _FIRST_PERSON_NOUN_REQUEST_PATTERN.match(candidate)
+        ):
             requests.append(item)
     return _dedupe_strings(requests)
 
@@ -1023,6 +1038,38 @@ def _obligation_restates_part_of_question(obligation: str, question: str) -> boo
     if {"term", "condition"}.issubset(question_tokens) and obligation_tokens.intersection({"term", "condition"}):
         return True
     return bool(obligation_tokens and obligation_tokens.issubset(question_tokens))
+
+
+_INLINE_NEGATIVE_REQUEST_CONSTRAINT_PATTERN = re.compile(
+    r"\s*[,;]\s*(?:and\s+)?(?:please\s+)?(?:do\s+not|don't|never|must\s+not|"
+    r"should\s+not|cannot|can't|avoid|refrain\s+from)\b.*$",
+    re.IGNORECASE,
+)
+
+
+def _routed_obligations_cover_request(
+    request: str,
+    routed_obligations: list[str],
+) -> bool:
+    """Accept granular router units when their combined meaning covers one request."""
+    if any(
+        _obligation_covers_question(obligation, request)
+        or _obligation_restates_part_of_question(obligation, request)
+        for obligation in routed_obligations
+    ):
+        return True
+
+    positive_request = _INLINE_NEGATIVE_REQUEST_CONSTRAINT_PATTERN.sub("", request)
+    request_tokens = _obligation_tokens(positive_request)
+    routed_tokens = {
+        token
+        for obligation in routed_obligations
+        for token in _obligation_tokens(obligation)
+    }
+    return bool(
+        request_tokens
+        and len(request_tokens & routed_tokens) / len(request_tokens) >= 0.8
+    )
 
 
 _EXPLICIT_COMPOUND_QUESTION_PATTERN = re.compile(
@@ -1411,12 +1458,17 @@ def _answer_obligations(
         ]
     )
     explicit_requests = _explicit_request_sentences(route.source_text)
-    # Router obligations may intentionally split one compound sentence into safer,
-    # independently auditable units. Supplement only when the source contains more
-    # explicit request sentences than the router returned, which proves a
-    # sentence-level omission without replacing that cautious compound logic.
+    # More explicit sentences than router units proves an L08-style omission.
+    # Otherwise add only source requests not covered by the router units together,
+    # preserving intentional granular splits of one compound request.
     missing_request_sentences = (
-        explicit_requests if len(explicit_requests) > len(routed_questions) else []
+        explicit_requests
+        if len(explicit_requests) > len(routed_questions)
+        else [
+            request
+            for request in explicit_requests
+            if not _routed_obligations_cover_request(request, routed_questions)
+        ]
     )
     explicit_obligations = _dedupe_strings(explicit_questions, missing_request_sentences)
     questions = list(explicit_obligations)

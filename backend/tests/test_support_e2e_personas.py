@@ -218,15 +218,20 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     saas_cases = {case.id: case for case in personas["saas-support"].cases}
 
     assert "law-gmbh-formation" in lawyer_cases["L06"].expected.knowledge_ids
-    assert "law-potential-conflict" in {
+    assert {
         concern.runbook_key for concern in lawyer_cases["L08"].concerns
-    }
+    } == {"law-matter-status", "law-potential-conflict"}
+    assert lawyer_cases["L08"].expected.minimum_concern_count == 2
+    assert lawyer_cases["L08"].expected.tool_fixture_ids == [
+        "matter-mat-2026-221"
+    ]
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
     assert fulfillment_cases["E06"].expected.knowledge_ids == []
     assert set(fulfillment_cases["E06"].expected.knowledge_any_of) == {
         "fulfillment-battery-safety",
         "fulfillment-returns-refunds",
     }
+    assert fulfillment_cases["E06"].expected.tool_fixture_ids == []
     assert fulfillment_cases["E05"].expected.single_combined_reply is True
     assert saas_cases["S03"].expected.minimum_concern_count == 1
     assert sum(
@@ -249,8 +254,50 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "remove the exposed token" in rule
         for rule in saas_runbooks["saas-token-exposure"].required_guidance
     )
+    assert any(
+        "exact start time" in rule and "ETA" in rule
+        for rule in saas_runbooks["saas-service-incident"].required_guidance
+    )
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())
+
+
+def test_l08_seeds_matter_lookup_on_the_status_runbook() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "lawyer"
+    )
+    content = build_intent_content(
+        persona,
+        "law-matter-status",
+        "https://api.mantly.io",
+    )
+    frontmatter = yaml.safe_load(content.split("---", 2)[1])
+
+    assert "fixture_matter_mat_2026_221" in {
+        tool["name"] for tool in frontmatter["tools"]
+    }
+
+
+def test_e06_skips_logistics_lookups_without_losing_relevant_tool_coverage() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "fulfillment"
+    )
+    cases = {case.id: case for case in persona.cases}
+
+    def tool_names(runbook_key: str) -> set[str]:
+        content = build_intent_content(
+            persona,
+            runbook_key,
+            "https://api.mantly.io",
+        )
+        frontmatter = yaml.safe_load(content.split("---", 2)[1])
+        return {tool["name"] for tool in frontmatter["tools"]}
+
+    assert cases["E06"].expected.tool_fixture_ids == []
+    assert tool_names("fulfillment-hazardous-battery") == set()
+    assert tool_names("fulfillment-product-remedy") == set()
+    assert "fixture_shipment_zf_10482" in tool_names("fulfillment-shipment-status")
+    assert "fixture_order_zf_10482" in tool_names("fulfillment-partial-shipment")
 
 
 def test_pending_actions_must_belong_to_a_matched_runbook() -> None:

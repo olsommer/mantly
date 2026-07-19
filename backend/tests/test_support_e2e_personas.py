@@ -27,6 +27,7 @@ from e2e.live import (
     _replay_receipt_audit,
     _target_validation_error,
     _wait_for_channel_test_job,
+    _wait_for_issue,
     build_intent_content,
     parse_target,
     seed_persona,
@@ -415,6 +416,55 @@ def test_live_runner_rejects_async_channel_test_without_run_id() -> None:
             timeout_seconds=1,
             poll_seconds=0,
         )
+
+
+def test_live_runner_fails_fast_when_terminal_processing_has_no_expected_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = parse_target("fulfillment=project123:channel456")
+    issue = {
+        "id": "issue-no-draft",
+        "aiRuns": [
+            {
+                "id": "run-1",
+                "status": "needs_human",
+                "metadata": {
+                    "processingProgress": {
+                        "status": "completed",
+                        "stage": "completed",
+                        "stages": [
+                            {"key": key, "status": "completed"}
+                            for key in REQUIRED_PROCESSING_STAGES
+                        ],
+                    }
+                },
+            }
+        ],
+        "outboundMessages": [],
+    }
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, _path: str) -> dict:
+            self.calls += 1
+            return issue
+
+    api = FakeApi()
+    monkeypatch.setattr("e2e.live.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(LiveE2EError, match="completed processing with 0 drafts"):
+        _wait_for_issue(
+            api,  # type: ignore[arg-type]
+            target,
+            "issue-no-draft",
+            expected_drafts=1,
+            timeout_seconds=60,
+            poll_seconds=0,
+        )
+
+    assert api.calls == 2
 
 
 def test_live_runner_keeps_case_specific_negatives_out_of_shared_runbooks() -> None:

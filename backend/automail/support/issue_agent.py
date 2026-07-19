@@ -327,11 +327,14 @@ def _grounding_retryable_protocol_errors(
     *,
     expected_unit_ids: frozenset[str],
     expected_obligation_ids: frozenset[str],
+    allowed_evidence_ids: frozenset[str],
 ) -> tuple[str, ...]:
     """Return evaluator-shape errors that justify one identical retry.
 
-    This intentionally excludes semantic grounding failures and unknown evidence
-    IDs. The normal validation path remains authoritative after the final attempt.
+    This intentionally excludes semantic grounding failures. Unknown evidence
+    IDs are malformed protocol references and receive the same bounded retry as
+    unknown unit or obligation IDs. The normal validation path remains
+    authoritative after the final attempt.
     """
 
     if not isinstance(structured, AutomationGroundingOutput):
@@ -347,6 +350,14 @@ def _grounding_retryable_protocol_errors(
         errors.append("Evaluator returned a missing or duplicate answer-unit ID")
     if set(unit_ids) != expected_unit_ids:
         errors.append("Evaluator did not assess every answer unit exactly once")
+    for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]:
+        evidence_ids = {
+            evidence_id
+            for value in assessment.evidence_ids
+            if (evidence_id := _string_from(value))
+        }
+        if not evidence_ids.issubset(allowed_evidence_ids):
+            errors.append("Answer unit uses unknown evidence IDs")
 
     if len(structured.obligation_assessments) > 100:
         errors.append("Evaluator returned too many obligation assessments")
@@ -361,6 +372,13 @@ def _grounding_retryable_protocol_errors(
             errors.append("Answer obligation uses unknown answer-unit IDs")
         if assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
             errors.append("Addressed obligation has no answer-unit IDs")
+        evidence_ids = {
+            evidence_id
+            for value in assessment.evidence_ids
+            if (evidence_id := _string_from(value))
+        }
+        if not evidence_ids.issubset(allowed_evidence_ids):
+            errors.append("Answer obligation uses unknown evidence IDs")
     return tuple(dict.fromkeys(errors))
 
 
@@ -387,6 +405,7 @@ def _grounding_needs_obligation_reassessment(
         structured,
         expected_unit_ids=expected_unit_ids,
         expected_obligation_ids=expected_obligation_ids,
+        allowed_evidence_ids=allowed_evidence_ids,
     ):
         return False
     if any(_string_from(value) for value in structured.contradictions):
@@ -1321,6 +1340,14 @@ _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN = re.compile(
     r"\b(?:changed|escalated|cancelled|canceled|refunded|shipped|dispatched|"
     r"started|completed|confirmed|approved|opened|created|updated|processed|"
     r"sent|received|arrived|failed|succeeded|happened|occurred|went)\b\s*$)",
+    re.IGNORECASE,
+)
+_ENGLISH_ACTION_RESULT_CONFIRMATION_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"(?:confirm|guarantee|ensure)\s+(?:that\s+)?"
+    r"(?P<topic>.+?)\s+(?:is|was|has\s+been)\s+"
+    r"(?P<state>fixed|resolved|restored|recovered|complete|completed|successful|working)"
+    r"\s*[.?!]*$",
     re.IGNORECASE,
 )
 
@@ -2553,6 +2580,28 @@ def _action_state_obligation_subject(
     return ""
 
 
+def _english_action_result_pending_notice(question: str) -> tuple[str, str] | None:
+    """Render a direct negative answer for a narrowly bounded result claim."""
+    match = _ENGLISH_ACTION_RESULT_CONFIRMATION_PATTERN.fullmatch(question)
+    if match is None:
+        return None
+    topic = match.group("topic").strip(" \t\r\n.,;:!?\"'“”‘’")
+    state = match.group("state").casefold()
+    if (
+        not topic
+        or _ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(topic)
+        or _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(topic)
+    ):
+        return None
+    rendered_topic = topic[:1].upper() + topic[1:]
+    subject_key = f"{topic} {state}"
+    return (
+        subject_key,
+        f"{rendered_topic} is not confirmed as {state}. "
+        "A related next step for your request remains pending human review.",
+    )
+
+
 def _action_state_subject_tokens(value: str) -> frozenset[str]:
     """Return stable topic tokens for conservative answer-presence checks."""
     return frozenset(
@@ -2733,21 +2782,33 @@ def _pending_action_obligation_notices(
         )
         if not remaining_question:
             return
-        subject = _action_state_obligation_subject(
-            remaining_question,
-            language=language,
-        )
         if has_success_backed_action_claim(
             answer=answer,
             runbook_actions=concern_actions,
             expected_action_text=remaining_question,
         ):
             return
-        subject_tokens = _action_state_subject_tokens(subject)
-        rendered_subject = subject[:1].upper() + subject[1:] if language == "en" else subject
-        notice = _ACTION_STATE_PENDING_NOTICES[language].format(
-            subject=rendered_subject,
+        result_notice = (
+            _english_action_result_pending_notice(remaining_question)
+            if language == "en"
+            else None
         )
+        if result_notice is not None:
+            subject, notice = result_notice
+        else:
+            subject = _action_state_obligation_subject(
+                remaining_question,
+                language=language,
+            )
+            rendered_subject = (
+                subject[:1].upper() + subject[1:]
+                if language == "en"
+                else subject
+            )
+            notice = _ACTION_STATE_PENDING_NOTICES[language].format(
+                subject=rendered_subject,
+            )
+        subject_tokens = _action_state_subject_tokens(subject)
         if (
             not subject_tokens
             or subject_tokens in seen_subjects
@@ -4344,6 +4405,7 @@ def assess_issue_automation_grounding(
                     structured,
                     expected_unit_ids=expected_unit_ids_for_retry,
                     expected_obligation_ids=expected_obligation_ids_for_retry,
+                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
                 )
                 if retryable_errors and attempt + 1 < GROUNDING_MODEL_CALL_LIMIT:
                     logger.warning(

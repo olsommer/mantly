@@ -31,7 +31,6 @@ from .schema import REQUIRED_PROCESSING_STAGES, E2EPersona, PersonaCase, load_pe
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PERSONA_DIR = ROOT / "e2e" / "personas"
 DEFAULT_TOKEN_ENV = "MANTLY_E2E_BEARER_TOKEN"
-TERMINAL_RUN_STATUSES = {"success", "needs_human", "completed", "failed"}
 TERMINAL_CHANNEL_TEST_JOB_STATUSES = {
     "processed",
     "failed",
@@ -1012,18 +1011,33 @@ def _draft_replies(issue: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _is_terminal(issue: dict[str, Any], expected_drafts: int) -> bool:
+def _processing_is_terminal(issue: dict[str, Any]) -> bool:
     runs = [run for run in issue.get("aiRuns") or [] if isinstance(run, dict)]
     if not runs:
         return False
     if any(
-        str(run.get("status") or "").lower() not in TERMINAL_RUN_STATUSES
+        str(run.get("status") or "").lower() == "processing"
         for run in runs
-        if str(run.get("status") or "").lower() == "processing"
     ):
         return False
     stages = _progress_stages(issue)
     if set(REQUIRED_PROCESSING_STAGES) - set(stages):
+        return False
+    return True
+
+
+def _processing_completed(issue: dict[str, Any]) -> bool:
+    if not _processing_is_terminal(issue):
+        return False
+    stages = _progress_stages(issue)
+    return all(
+        stages[key].lower() in {"completed", "failed", "skipped"}
+        for key in REQUIRED_PROCESSING_STAGES
+    )
+
+
+def _is_terminal(issue: dict[str, Any], expected_drafts: int) -> bool:
+    if not _processing_is_terminal(issue):
         return False
     return len(_draft_replies(issue)) >= expected_drafts
 
@@ -1184,6 +1198,8 @@ def _wait_for_issue(
     last_issue: dict[str, Any] = {}
     stable_fingerprint = ""
     stable_count = 0
+    missing_draft_fingerprint = ""
+    missing_draft_count = 0
     while time.monotonic() < deadline:
         last_issue = _fetch_issue(api, target, issue_id)
         if _is_terminal(last_issue, expected_drafts):
@@ -1195,6 +1211,23 @@ def _wait_for_issue(
         else:
             stable_count = 0
             stable_fingerprint = ""
+            draft_count = len(_draft_replies(last_issue))
+            if expected_drafts > draft_count and _processing_completed(last_issue):
+                fingerprint = _issue_fingerprint(last_issue)
+                missing_draft_count = (
+                    missing_draft_count + 1
+                    if fingerprint == missing_draft_fingerprint
+                    else 1
+                )
+                missing_draft_fingerprint = fingerprint
+                if missing_draft_count >= 2:
+                    raise LiveE2EError(
+                        f"issue {issue_id} completed processing with {draft_count} "
+                        f"drafts; expected at least {expected_drafts}"
+                    )
+            else:
+                missing_draft_count = 0
+                missing_draft_fingerprint = ""
         time.sleep(max(0.25, poll_seconds))
     stages = _progress_stages(last_issue)
     raise LiveE2EError(

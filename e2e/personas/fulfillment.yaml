@@ -468,7 +468,9 @@ cases:
         - Packaging, shipping-label, item, SKU, and quantity evidence.
       must_not_claim:
         - Opened warehouse ticket, approved replacement, stock, dispatch, or tomorrow delivery.
-      knowledge_ids: [fulfillment-exceptions]
+      # The evidence checklist is explicit runbook guidance for this concern;
+      # requiring a knowledge citation here would falsely attribute its source.
+      knowledge_ids: []
       tool_fixture_ids: [order-zf-20991]
       pending_actions: [open_warehouse_ticket, request_replacement]
       idempotency: *replay

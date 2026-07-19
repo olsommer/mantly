@@ -97,6 +97,22 @@ _DAMAGE_SAFETY_PATTERN = re.compile(
     r"rupture(?:d)?|smok(?:e|ing)|spill(?:ed|ing|s)?|swollen)\b",
     re.IGNORECASE,
 )
+_LABELED_BUSINESS_OBJECT_IDENTIFIER_PATTERN = re.compile(
+    r"\b(?P<label>account|booking|case|claim|contract|invoice|matter|order|policy|"
+    r"quote|return|rma|shipment|subscription|ticket|tracking)"
+    r"(?:\s+(?:id|no\.?|number|reference))?\s*(?:[:#]\s*)?"
+    r"(?P<value>[A-Za-z0-9][A-Za-z0-9._/-]{1,63})\b",
+    re.IGNORECASE,
+)
+_BUSINESS_OBJECT_IDENTIFIER_CANDIDATE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9@])(?P<value>[A-Za-z0-9][A-Za-z0-9._/-]{1,63})(?![A-Za-z0-9@])"
+)
+_SHARED_BUSINESS_OBJECT_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:about|for|re(?:garding)?|with\s+regard\s+to|"
+    r"account|booking|case|claim|contract|invoice|matter|order|policy|quote|"
+    r"return|rma|shipment|subscription|ticket|tracking)\b",
+    re.IGNORECASE,
+)
 _SAFETY_INTENT_WEIGHTS = {
     "hazard": 12,
     "hazardous": 12,
@@ -240,6 +256,53 @@ def _select_applicable_actions(
     return selected
 
 
+def _verified_boolean_state(
+    facts: list[VerifiedFact],
+    state_name: str,
+) -> bool | None:
+    """Read one boolean only from persisted, allowlisted tool evidence."""
+    normalized_state = "".join(character for character in state_name.casefold() if character.isalnum())
+    for fact in facts:
+        path = "".join(character for character in fact.path.casefold() if character.isalnum())
+        value = fact.value
+        if path == normalized_state:
+            if isinstance(value, bool):
+                return value
+            normalized_value = str(value).strip().casefold()
+            if normalized_value in {"true", "false"}:
+                return normalized_value == "true"
+        if isinstance(value, str):
+            match = re.fullmatch(
+                rf"\s*{re.escape(state_name)}\s*:\s*(true|false)\s*",
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).casefold() == "true"
+    return None
+
+
+def _apply_deterministic_action_eligibility(
+    actions: list[IntentAction],
+    verified_facts: list[VerifiedFact],
+) -> list[IntentAction]:
+    """Suppress proposals contradicted by verified business-object state."""
+    if _verified_boolean_state(verified_facts, "address_change_allowed") is not False:
+        return actions
+
+    blocked_names = {"request_address_change"}
+    allowed = [
+        action
+        for action in actions
+        if action.name.strip().casefold().replace("-", "_") not in blocked_names
+    ]
+    if len(allowed) != len(actions):
+        logger.info(
+            "Suppressed direct address-change proposal because verified eligibility is false"
+        )
+    return allowed
+
+
 def _action_selection_error(
     actions: list[IntentAction],
     output: IntentProcessingOutput,
@@ -369,14 +432,7 @@ def _concern_processing_email(
     email: Email,
     route: ConcernRoute,
 ) -> tuple[Email, Email]:
-    """Return focused fallback input plus processing input with shared context.
-
-    Routers intentionally extract only the text that belongs to each concern.
-    Shared identifiers such as order, contract, or tracking numbers can sit
-    elsewhere in the original message, though. Runbook processing therefore
-    receives both the routed concern and the full original message while
-    deterministic action fallbacks stay scoped to the concern alone.
-    """
+    """Return concern-only fallback input plus narrowly shared identifier context."""
     focused = email.model_copy(
         update={
             "subject": route.summary or email.subject,
@@ -386,18 +442,83 @@ def _concern_processing_email(
     if focused.subject == email.subject and focused.body == email.body:
         return focused, focused
 
-    processing = focused.model_copy(
-        update={
-            "body": (
-                "## Routed concern to process\n"
-                f"{focused.body}\n\n"
-                "## Full original customer message context\n"
-                f"Subject: {email.subject}\n\n"
-                f"{email.body}"
+    shared_identifiers = _shared_business_object_identifiers(email, route)
+    processing_sections = [f"## Routed concern to process\n{focused.body}"]
+    if shared_identifiers:
+        processing_sections.append(
+            "## Shared business-object identifiers\n"
+            "These identifiers are context for this concern, not separate requests.\n"
+            + "\n".join(
+                f"- {label}: {value}" for label, value in shared_identifiers
             )
-        }
+        )
+
+    processing = focused.model_copy(
+        update={"body": "\n\n".join(processing_sections)}
     )
     return focused, processing
+
+
+def _business_object_identifiers(value: str) -> list[tuple[str, str]]:
+    """Extract bounded, non-secret business references from customer-visible text."""
+    identifiers: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, raw_value: str, *, labeled: bool) -> None:
+        identifier = raw_value.strip(".,;:()[]{}<>")
+        normalized = identifier.casefold()
+        if not identifier or normalized in seen or not any(character.isdigit() for character in identifier):
+            return
+        if not labeled and (
+            not any(character.isalpha() for character in identifier)
+            or not any(character.isupper() for character in identifier)
+            or (len(identifier) < 6 and not re.search(r"[-_/]", identifier))
+        ):
+            return
+        identifiers.append((label.casefold(), identifier))
+        seen.add(normalized)
+
+    for match in _LABELED_BUSINESS_OBJECT_IDENTIFIER_PATTERN.finditer(value):
+        add(match.group("label"), match.group("value"), labeled=True)
+    for match in _BUSINESS_OBJECT_IDENTIFIER_CANDIDATE_PATTERN.finditer(value):
+        add("reference", match.group("value"), labeled=False)
+    return identifiers
+
+
+def _shared_business_object_identifiers(
+    email: Email,
+    route: ConcernRoute,
+) -> list[tuple[str, str]]:
+    """Bind safe shared references to one concern without importing sibling semantics."""
+    full_identifiers = _business_object_identifiers(f"{email.subject}\n{email.body}")
+    labels_by_value = {
+        value.casefold(): label
+        for label, value in full_identifiers
+        if label != "reference"
+    }
+
+    def with_best_labels(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        return [
+            (labels_by_value.get(value.casefold(), label), value)
+            for label, value in items
+        ][:8]
+
+    routed = _business_object_identifiers(f"{route.summary}\n{route.source_text}")
+    if routed:
+        return with_best_labels(routed)
+
+    subject_identifiers = _business_object_identifiers(email.subject)
+    if len(subject_identifiers) == 1:
+        return with_best_labels(subject_identifiers)
+
+    leading_context = re.split(r"[.;\n]", email.body, maxsplit=1)[0]
+    leading_identifiers = _business_object_identifiers(leading_context)
+    if (
+        _SHARED_BUSINESS_OBJECT_PREFIX_PATTERN.match(leading_context)
+        and len(leading_identifiers) == 1
+    ):
+        return with_best_labels(leading_identifiers)
+    return []
 
 
 def _is_malformed_function_call_reason(value: Any) -> bool:
@@ -800,6 +921,38 @@ _DIRECT_ACTION_OBLIGATION_PATTERN = re.compile(
     r"change\b",
     re.IGNORECASE,
 )
+_EXPLICIT_REQUEST_ORDERING_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:(?:first|second|third|then|next|finally|also|afterwards?)\s*[,;:]?\s+)+",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUEST_COURTESY_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:please|kindly)\s+",
+    re.IGNORECASE,
+)
+_NEGATIVE_REQUEST_CONSTRAINT_PATTERN = re.compile(
+    r"^\s*(?:(?:i|we|you)\s+)?(?:do\s+not|don't|never|must\s+not|"
+    r"should\s+not|cannot|can't|need\s+not|no\s+need\s+to|avoid|refrain\s+from)\b",
+    re.IGNORECASE,
+)
+_FACTUAL_ACTION_NOUN_SENTENCE_PATTERN = re.compile(
+    r"^\s*(?:(?:review|record)\s+of|(?:answer|reply|report|update)\s+from|"
+    r"change\s+in|(?:address|answer|change|check|issue|list|log|record|reply|"
+    r"report|review|state|stop|update)\s+(?:is|was|were|has|had|remains?))\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUEST_SENTENCE_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)|"
+    r"(?:(?:i|we)\s+(?:need|want|would\s+like)\s+(?:you\s+)?to\s+)|"
+    r"(?:you\s+(?:must|need\s+to|should)\s+)"
+    r")?"
+    r"(?:address|answer|apply|approve|arrange|book|cancel|change|check|confirm|"
+    r"create|delete|dispatch|escalate|explain|find|give|identify|investigate|"
+    r"issue|list|log|look\s+up|notify|open|pause|provide|record|refund|remove|"
+    r"replace|reply|report|reschedule|reset|resolve|restore|review|say|schedule|"
+    r"send|show|state|stop|submit|terminate|tell|update|verify|waive)\b",
+    re.IGNORECASE,
+)
 
 
 def _split_answer_obligation(value: str) -> list[str]:
@@ -811,6 +964,28 @@ def _split_answer_obligation(value: str) -> list[str]:
         return [item]
     parts = [part.strip() for part in _OBLIGATION_CLAUSE_SPLIT_PATTERN.split(item)]
     return [part for part in parts if part]
+
+
+def _explicit_request_sentences(value: str) -> list[str]:
+    """Extract whole imperative request sentences without treating constraints as work."""
+    normalized = re.sub(r"[ \t]*\r?\n[ \t]*", " ", str(value or "")).strip()
+    if not normalized:
+        return []
+
+    requests: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", normalized):
+        item = sentence.strip()
+        if not item or "?" in item:
+            continue
+        candidate = _EXPLICIT_REQUEST_ORDERING_PREFIX_PATTERN.sub("", item)
+        candidate = _EXPLICIT_REQUEST_COURTESY_PREFIX_PATTERN.sub("", candidate)
+        if _NEGATIVE_REQUEST_CONSTRAINT_PATTERN.match(candidate):
+            continue
+        if _FACTUAL_ACTION_NOUN_SENTENCE_PATTERN.match(candidate):
+            continue
+        if _EXPLICIT_REQUEST_SENTENCE_PATTERN.match(candidate):
+            requests.append(item)
+    return _dedupe_strings(requests)
 
 
 def _obligation_tokens(value: str) -> set[str]:
@@ -854,6 +1029,56 @@ _EXPLICIT_COMPOUND_QUESTION_PATTERN = re.compile(
     r"^\s*what\s+(?:is|are)\s+(?P<article>the\s+)?"
     r"(?P<first>[^?]+?)\s+and\s+(?P<second>[^?]+?)\?\s*$",
     re.IGNORECASE,
+)
+_EXPLICIT_LOOKUP_LIST_QUESTION_PATTERN = re.compile(
+    r"^\s*what\s+(?P<facets>[^?]+?)\s+does\s+the\s+"
+    r"(?P<source>lookup|tool|record|system)\s+"
+    r"(?P<verb>show|return|report)\?\s*$",
+    re.IGNORECASE,
+)
+_SIMPLE_LOOKUP_FACET_PATTERN = re.compile(
+    r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+[a-z0-9]+(?:-[a-z0-9]+)*){0,5}$",
+    re.IGNORECASE,
+)
+_UNSAFE_LOOKUP_FACET_TOKENS = frozenset(
+    {
+        "and",
+        "are",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "had",
+        "has",
+        "have",
+        "if",
+        "is",
+        "it",
+        "must",
+        "no",
+        "not",
+        "or",
+        "our",
+        "should",
+        "that",
+        "their",
+        "these",
+        "they",
+        "this",
+        "those",
+        "was",
+        "were",
+        "whether",
+        "which",
+        "will",
+        "would",
+        "you",
+        "your",
+    }
+)
+_UNSPLITTABLE_LOOKUP_FACET_HEAD_SETS = (
+    frozenset({"term", "condition"}),
 )
 _SHARED_COMPOUND_QUESTION_MODIFIERS = frozenset({"standard"})
 _COMPOUND_BILLING_OBJECT_TOKENS = frozenset(
@@ -1111,6 +1336,61 @@ def _split_explicit_compound_question(
     ]
 
 
+def _split_explicit_lookup_list_question(question: str) -> list[str]:
+    """Split only an anchored three-or-four-facet read-only lookup question."""
+    match = _EXPLICIT_LOOKUP_LIST_QUESTION_PATTERN.fullmatch(question)
+    if match is None:
+        return [question]
+    facets_text = match.group("facets")
+    final_separators = tuple(re.finditer(r",\s+and\s+", facets_text, re.IGNORECASE))
+    if len(final_separators) != 1:
+        return [question]
+    final_separator = final_separators[0]
+    leading = facets_text[: final_separator.start()]
+    final = facets_text[final_separator.end() :]
+    facets = [*(part.strip() for part in leading.split(",")), final.strip()]
+    if not 3 <= len(facets) <= 4:
+        return [question]
+
+    heads: list[str] = []
+    for facet in facets:
+        if not facet or _SIMPLE_LOOKUP_FACET_PATTERN.fullmatch(facet) is None:
+            return [question]
+        tokens = re.findall(r"[a-z0-9]+", facet.casefold())
+        if not tokens or set(tokens).intersection(_UNSAFE_LOOKUP_FACET_TOKENS):
+            return [question]
+        heads.append(tokens[-1])
+    if len(heads) != len(set(heads)):
+        return [question]
+    normalized_heads = {
+        {"conditions": "condition", "terms": "term"}.get(head, head)
+        for head in heads
+    }
+    if any(blocked.issubset(normalized_heads) for blocked in _UNSPLITTABLE_LOOKUP_FACET_HEAD_SETS):
+        return [question]
+
+    source = match.group("source").casefold()
+    verb = match.group("verb").casefold()
+    return [f"What {facet} does the {source} {verb}?" for facet in facets]
+
+
+def _expand_lookup_list_obligations_within_limit(
+    questions: list[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """Expand safe lookup lists only when no later obligation can be truncated."""
+    expanded: list[str] = []
+    for index, question in enumerate(questions):
+        parts = _split_explicit_lookup_list_question(question)
+        remaining_count = len(questions) - index - 1
+        if len(parts) > 1 and len(expanded) + len(parts) + remaining_count <= limit:
+            expanded.extend(parts)
+        else:
+            expanded.append(question)
+    return expanded
+
+
 def _answer_obligations(
     concern_id: str,
     route: ConcernRoute,
@@ -1130,18 +1410,31 @@ def _answer_obligations(
             )
         ]
     )
-    questions = list(explicit_questions)
+    explicit_requests = _explicit_request_sentences(route.source_text)
+    # Router obligations may intentionally split one compound sentence into safer,
+    # independently auditable units. Supplement only when the source contains more
+    # explicit request sentences than the router returned, which proves a
+    # sentence-level omission without replacing that cautious compound logic.
+    missing_request_sentences = (
+        explicit_requests if len(explicit_requests) > len(routed_questions) else []
+    )
+    explicit_obligations = _dedupe_strings(explicit_questions, missing_request_sentences)
+    questions = list(explicit_obligations)
     for routed_question in routed_questions:
         if any(
             _obligation_covers_question(routed_question, question)
             or _obligation_restates_part_of_question(routed_question, question)
-            for question in explicit_questions
+            for question in explicit_obligations
         ):
             continue
         questions.append(routed_question)
     if not questions:
         fallback = route.summary.strip() or route.source_text.strip()
         questions = [fallback] if fallback else []
+    questions = _expand_lookup_list_obligations_within_limit(
+        questions,
+        limit=10,
+    )
     return [
         AnswerObligation(
             obligation_id=f"{concern_id}:obligation-{index}",
@@ -1307,15 +1600,19 @@ def _build_routed_concern_outcome(
             tenant_id,
             project_id,
         )
-        if intent_result.actions and isinstance(output, IntentProcessingOutput):
-            action_selection_error = _action_selection_error(intent_result.actions, output)
-            applicable_actions = _select_applicable_actions(intent_result.actions, output)
-            fills_count = _merge_action_fills(applicable_actions, output)
-            fills_count += _ensure_open_ticket_action_task(applicable_actions, focused_email)
     else:
         logger.info("Intent '%s' requires no tool or action processing", intent_name)
 
     tool_evidence = _tool_evidence(collection.tool_calls)
+    verified_facts = _verified_facts(tool_evidence)
+    if intent_result.actions and isinstance(output, IntentProcessingOutput):
+        action_selection_error = _action_selection_error(intent_result.actions, output)
+        applicable_actions = _apply_deterministic_action_eligibility(
+            _select_applicable_actions(intent_result.actions, output),
+            verified_facts,
+        )
+        fills_count = _merge_action_fills(applicable_actions, output)
+        fills_count += _ensure_open_ticket_action_task(applicable_actions, focused_email)
     review_reasons = []
     if requires_review:
         review_reasons.append("Intent is configured to require human review.")
@@ -1345,7 +1642,7 @@ def _build_routed_concern_outcome(
         summary=output.summary or route.summary,
         actions=applicable_actions,
         action_outcomes=_action_outcomes(applicable_actions),
-        verified_facts=_verified_facts(tool_evidence),
+        verified_facts=verified_facts,
         tool_evidence=tool_evidence,
         missing_information=output.missing_information,
         reply_requirements=_dedupe_strings(

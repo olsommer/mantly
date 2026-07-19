@@ -27,9 +27,11 @@ from automail.models import (
     IntentReviewOutput,
     PhishingResult,
     PromptInjectionResult,
+    VerifiedFact,
 )
 from automail.pipeline import orchestrator
 from automail.pipeline.intent.agent import (
+    _apply_deterministic_action_eligibility,
     _build_process_user_message,
     _concern_id,
     _execute_routed_concern,
@@ -81,6 +83,137 @@ def test_processing_prompt_requires_exact_materially_applicable_action_selection
     assert "security or safety incident" in prompt
     assert "remains pending human approval" in prompt
     assert "Return an empty array" in prompt
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected_names"),
+    [
+        pytest.param(False, ["request_carrier_redirect"], id="ineligible-direct-change"),
+        pytest.param(
+            True,
+            ["request_address_change", "request_carrier_redirect"],
+            id="eligible-direct-change",
+        ),
+    ],
+)
+def test_verified_address_change_eligibility_filters_only_direct_change(
+    allowed: bool,
+    expected_names: list[str],
+) -> None:
+    actions = [
+        IntentAction(name="request_address_change", label="Request address change"),
+        IntentAction(name="request_carrier_redirect", label="Request carrier redirect"),
+    ]
+    facts = [
+        VerifiedFact(
+            path="address_change_allowed",
+            value=allowed,
+            source="tool:shipment_lookup",
+        ),
+        VerifiedFact(path="status", value="in_transit", source="tool:shipment_lookup"),
+    ]
+
+    filtered = _apply_deterministic_action_eligibility(actions, facts)
+
+    assert [action.name for action in filtered] == expected_names
+
+
+def test_verified_address_change_ineligibility_preserves_unrelated_actions() -> None:
+    actions = [
+        IntentAction(name="request_address_change", label="Request address change"),
+        IntentAction(name="request_refund", label="Request refund"),
+    ]
+    facts = [
+        VerifiedFact(
+            path="fixture_evidence.result.0",
+            value="address_change_allowed: false",
+            source="tool:shipment_lookup",
+        )
+    ]
+
+    filtered = _apply_deterministic_action_eligibility(actions, facts)
+
+    assert [action.name for action in filtered] == ["request_refund"]
+
+
+def test_e05_verified_in_transit_state_suppresses_direct_address_change(monkeypatch) -> None:
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "request_address_change",
+                "label": "Request address change",
+                "type": "button",
+            },
+            {
+                "name": "request_carrier_redirect",
+                "label": "Request carrier redirect",
+                "type": "button",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "shipment_lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def process(*_args, **_kwargs):
+        _record_tool_call(
+            ToolDefinition(
+                name="shipment_lookup",
+                description="Lookup shipment",
+                method="GET",
+                url_template="https://example.test/shipments",
+            ),
+            status="success",
+            response_text=json.dumps(
+                {
+                    "found": True,
+                    "status": "in_transit",
+                    "address_change_allowed": False,
+                }
+            ),
+        )
+        return IntentProcessingOutput(
+            summary="Direct change unavailable; redirect prepared.",
+            selected_action_names=[
+                "request_address_change",
+                "request_carrier_redirect",
+            ],
+        )
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+    route = ConcernRoute(
+        summary="Address change",
+        source_text="Change the address and request a redirect if already shipped.",
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "e05-address-change",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [action.name for action in outcome.actions] == ["request_carrier_redirect"]
+    assert [action.name for action in outcome.action_outcomes] == [
+        "request_carrier_redirect"
+    ]
+    assert any(
+        fact.path == "address_change_allowed" and fact.value is False
+        for fact in outcome.verified_facts
+    )
 
 
 @pytest.mark.parametrize(
@@ -328,15 +461,14 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
             "cancel-contract",
             "Cancel contract C-1",
             "## Routed concern to process\nCancel contract C-1.\n\n"
-            "## Full original customer message context\nSubject: Cancel and buy\n\n"
-            "Cancel contract C-1. I also want to buy three XYZ units.",
+            "## Shared business-object identifiers\n"
+            "These identifiers are context for this concern, not separate requests.\n"
+            "- contract: C-1",
         ),
         (
             "buy-product",
             "Buy three XYZ units",
-            "## Routed concern to process\nI also want to buy three XYZ units.\n\n"
-            "## Full original customer message context\nSubject: Cancel and buy\n\n"
-            "Cancel contract C-1. I also want to buy three XYZ units.",
+            "## Routed concern to process\nI also want to buy three XYZ units.",
         ),
     ]
     assert response is None
@@ -563,6 +695,94 @@ def test_explicit_questions_fill_router_obligation_omissions(monkeypatch):
         "Is a retainer required?",
         "When is the invoice due?",
         "Can the retainer be waived?",
+    ]
+
+
+def test_explicit_request_sentences_fill_router_obligation_omissions(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = (
+        "For MAT-2026-221, Westbridge SA may have been advised by the firm on a related transaction. "
+        "First look up the current matter and say whether substantive discussion is already paused. "
+        "Then stop substantive discussion, record the potential conflict, and escalate it for review. "
+        "Do not conclude there is a conflict or that representation continues."
+    )
+    route = ConcernRoute(
+        summary="Review a potential conflict",
+        source_text=source_text,
+        answer_obligations=[
+            (
+                "Look up the current matter and say whether substantive discussion is already paused; "
+                "then stop discussion, record the potential conflict, and escalate it for review."
+            )
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "potential-conflict",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "First look up the current matter and say whether substantive discussion is already paused.",
+        "Then stop substantive discussion, record the potential conflict, and escalate it for review.",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        "potential-conflict:obligation-1",
+        "potential-conflict:obligation-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Westbridge SA may have been advised by the firm on a related transaction.",
+        "The client asked the firm to stop substantive discussion.",
+        "Stopping substantive discussion would preserve the current position.",
+        "Review of the matter remains pending. Update from the client arrived yesterday.",
+        "Do not conclude there is a conflict or that representation continues.",
+        "Then do not stop substantive discussion or record a confirmed conflict.",
+        "Please never escalate this as a confirmed conflict.",
+        "No action is required while the review remains open.",
+    ],
+)
+def test_narrative_and_negative_sentences_are_not_supplementary_obligations(
+    monkeypatch,
+    source_text: str,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Review reported background",
+        source_text=source_text,
+        answer_obligations=["Review reported background."],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "reported-background",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "Review reported background.",
     ]
 
 
@@ -893,6 +1113,179 @@ def test_mc01_billing_shape_splits_without_router_variance(monkeypatch):
     assert [item.question for item in outcome.answer_obligations] == [
         "What is the standard initial consultation fee?",
         "What is the standard advance retainer?",
+    ]
+
+
+def test_s05_explicit_lookup_list_becomes_independent_obligations(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    lookup_question = (
+        "What exact status, first-failure time, affected events, and relevant "
+        "recent change does the lookup show?"
+    )
+    source_text = (
+        f"{lookup_question} Which redacted request ID do you need for diagnosis? "
+        "Rotate the signing secret. Replay every failed event. Confirm delivery "
+        "is fixed. Acknowledge the offer to send the current secret."
+    )
+    route = ConcernRoute(
+        summary="Recover the production webhook",
+        source_text=source_text,
+        answer_obligations=[
+            lookup_question,
+            "Which redacted request ID do you need for diagnosis?",
+            "Rotate the signing secret.",
+            "Replay every failed event.",
+            "Confirm delivery is fixed.",
+            "Acknowledge the offer to send the current secret.",
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "saas-webhook-recovery",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "What exact status does the lookup show?",
+        "What first-failure time does the lookup show?",
+        "What affected events does the lookup show?",
+        "What relevant recent change does the lookup show?",
+        "Which redacted request ID do you need for diagnosis?",
+        "Rotate the signing secret.",
+        "Replay every failed event.",
+        "Confirm delivery is fixed.",
+        "Acknowledge the offer to send the current secret.",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        f"saas-webhook-recovery:obligation-{index}" for index in range(1, 10)
+    ]
+
+
+def test_lookup_list_does_not_split_coordinated_idiom(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    question = "What terms, conditions, and exceptions does the lookup show?"
+    route = ConcernRoute(
+        summary="Explain the policy",
+        source_text=question,
+        answer_obligations=[question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "policy-lookup",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [question]
+
+
+def test_lookup_list_does_not_split_clause_facet(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    question = (
+        "What exact status, whether delivery is fixed, and affected events does "
+        "the lookup show?"
+    )
+    route = ConcernRoute(
+        summary="Inspect delivery recovery",
+        source_text=question,
+        answer_obligations=[question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "delivery-recovery",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [question]
+
+
+def test_lookup_list_does_not_split_two_item_question(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    question = "What exact status and first-failure time does the lookup show?"
+    route = ConcernRoute(
+        summary="Inspect webhook status",
+        source_text=question,
+        answer_obligations=[question],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "webhook-status",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [question]
+
+
+def test_lookup_list_split_is_rejected_before_obligation_cap_overflow(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    lookup_question = (
+        "What exact status, first-failure time, affected events, and relevant "
+        "recent change does the lookup show?"
+    )
+    other_obligations = [f"Explain independent request {index}." for index in range(1, 9)]
+    route = ConcernRoute(
+        summary="Keep every bounded obligation",
+        source_text=lookup_question,
+        answer_obligations=[lookup_question, *other_obligations],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "bounded-lookup",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        lookup_question,
+        *other_obligations,
     ]
 
 
@@ -1229,11 +1622,13 @@ def test_same_runbook_executes_distinct_source_excerpts_independently(monkeypatc
 
     assert calls == [
         "## Routed concern to process\nCancel contract C-1.\n\n"
-        "## Full original customer message context\nSubject: Cancel and buy\n\n"
-        "Cancel contract C-1. I also want to buy three XYZ units.",
+        "## Shared business-object identifiers\n"
+        "These identifiers are context for this concern, not separate requests.\n"
+        "- contract: C-1",
         "## Routed concern to process\nCancel contract C-2.\n\n"
-        "## Full original customer message context\nSubject: Cancel and buy\n\n"
-        "Cancel contract C-1. I also want to buy three XYZ units.",
+        "## Shared business-object identifiers\n"
+        "These identifiers are context for this concern, not separate requests.\n"
+        "- contract: C-2",
     ]
     assert response is None
     assert len(result.concerns) == 2
@@ -1290,10 +1685,174 @@ def test_each_concern_processing_input_keeps_shared_identifier_from_original_mes
     assert response is None
     assert len(result.concerns) == 2
     assert all("ZF-20991" in body for body in processing_bodies)
+    assert all("## Full original customer message context" not in body for body in processing_bodies)
     assert processing_bodies[0].startswith("## Routed concern to process\nTell me the current shipment status and ETA.")
     assert processing_bodies[1].startswith(
         "## Routed concern to process\nChange the delivery address to 24 New Street."
     )
+    assert "Change the delivery address" not in processing_bodies[0]
+    assert "current shipment status" not in processing_bodies[1]
+
+
+def test_e04_split_concerns_each_keep_the_shared_order_identifier(monkeypatch):
+    _base_stubs(monkeypatch)
+    email = Email(
+        id="message-e04",
+        subject="Stalled shipment exception for ZF-88310",
+        from_address="merchant@example.test",
+        body=(
+            "Order ZF-88310 has not moved for 3 days. Give the last scan, location, "
+            "and delivery window, and open a delivery-exception investigation now."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Shipment status facts",
+            source_text="Give the last scan, location, and delivery window.",
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Delivery exception",
+            source_text="Open a delivery-exception investigation now.",
+            intent_name="buy-product",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "shipment_lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    processing_bodies: list[str] = []
+
+    def process(_intent_name, _actions, concern_email, *_args, **_kwargs):
+        processing_bodies.append(concern_email.body)
+        return IntentReviewOutput(summary="Processed")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert len(result.concerns) == 2
+    assert all("- order: ZF-88310" in body for body in processing_bodies)
+    assert "Open a delivery-exception" not in processing_bodies[0]
+    assert "last scan" not in processing_bodies[1]
+
+
+def test_leading_labeled_object_is_shared_when_generic_subject_drops_identifier(monkeypatch):
+    _base_stubs(monkeypatch)
+    email = Email(
+        id="message-leading-order",
+        subject="Shipment needs attention",
+        from_address="merchant@example.test",
+        body=(
+            "Order ZF-12345 has not moved for three days. "
+            "Give the last scan and open an investigation."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Shipment status",
+            source_text="Give the last scan.",
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Investigation",
+            source_text="Open an investigation.",
+            intent_name="buy-product",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "shipment_lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    processing_bodies: list[str] = []
+
+    def process(_intent_name, _actions, concern_email, *_args, **_kwargs):
+        processing_bodies.append(concern_email.body)
+        return IntentReviewOutput(summary="Processed")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert len(result.concerns) == 2
+    assert all("- order: ZF-12345" in body for body in processing_bodies)
+
+
+def test_distinct_business_objects_do_not_cross_concern_processing(monkeypatch):
+    _base_stubs(monkeypatch)
+    email = Email(
+        id="message-two-orders",
+        subject="Two separate order requests",
+        from_address="merchant@example.test",
+        body=(
+            "Give shipment status for order ZF-11111. "
+            "Cancel order ZF-22222."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Status for ZF-11111",
+            source_text="Give shipment status for order ZF-11111.",
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            summary="Cancellation for ZF-22222",
+            source_text="Cancel order ZF-22222.",
+            intent_name="buy-product",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "order_lookup", "method": "GET"}],
+    )
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    processing_bodies: list[str] = []
+
+    def process(_intent_name, _actions, concern_email, *_args, **_kwargs):
+        processing_bodies.append(concern_email.body)
+        return IntentReviewOutput(summary="Processed")
+
+    monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
+
+    result, response = run_intent_agent(email)
+
+    assert response is None
+    assert len(result.concerns) == 2
+    assert "ZF-11111" in processing_bodies[0]
+    assert "ZF-22222" not in processing_bodies[0]
+    assert "ZF-22222" in processing_bodies[1]
+    assert "ZF-11111" not in processing_bodies[1]
 
 
 def test_unmatched_concern_preserves_matched_work_and_requires_human(monkeypatch):

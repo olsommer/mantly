@@ -2029,6 +2029,55 @@ def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mu
     assert "not confirmed" not in repaired
 
 
+def test_action_state_repair_answers_unverified_result_dependent_on_pending_work() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm delivery is fixed."],
+    )
+    answer = (
+        "The signing-secret rotation and webhook replay remain pending human "
+        "review."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Rotate the signing secret, replay the events, and confirm delivery is fixed.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == (
+        answer
+        + "\n\nDelivery is not confirmed as fixed. A related next step for your "
+        "request remains pending human review."
+    )
+
+
+def test_action_state_repair_does_not_duplicate_unverified_result_notice() -> None:
+    answer = (
+        "Delivery is not confirmed as fixed. A related next step for your "
+        "request remains pending human review."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(
+            questions=["Confirm delivery is fixed."],
+        ),
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm delivery is fixed.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
 @pytest.mark.parametrize(
     "question",
     [
@@ -4777,18 +4826,15 @@ def test_grounding_restatement_requires_only_customer_obligation_tokens() -> Non
     )
 
 
-def test_grounding_does_not_reassess_unknown_obligation_evidence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    obligation_id = "shipment:status"
-    issue = _issue_with_grounding_obligations(
-        concern_id="shipment",
-        questions=[(obligation_id, "What is the current shipment status?")],
-    )
-    answer = "The parcel is delayed."
+def _grounding_output_with_obligation_evidence(
+    *,
+    answer: str,
+    obligation_id: str,
+    evidence_ids: list[str],
+) -> AutomationGroundingOutput:
     unit = issue_agent._grounding_answer_units(answer)[0]
-    output = AutomationGroundingOutput(
-        verdict="not_grounded",
+    return AutomationGroundingOutput(
+        verdict="grounded",
         answer_sha256=issue_agent.grounding_text_sha256(answer),
         unit_assessments=[
             AutomationGroundingUnitAssessment(
@@ -4801,21 +4847,71 @@ def test_grounding_does_not_reassess_unknown_obligation_evidence(
         obligation_assessments=[
             AutomationGroundingObligationAssessment(
                 obligation_id=obligation_id,
-                resolution="not_covered",
+                resolution="pending_or_unavailable",
                 answer_unit_ids=[unit["id"]],
-                evidence_ids=["invented-evidence"],
+                evidence_ids=evidence_ids,
             )
         ],
+    )
+
+
+def test_grounding_retries_unknown_obligation_evidence_and_accepts_correction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obligation_id = "shipment:status"
+    issue = _issue_with_grounding_obligations(
+        concern_id="shipment",
+        questions=[(obligation_id, "What is the current shipment status?")],
+    )
+    answer = "The parcel is delayed."
+    malformed = _grounding_output_with_obligation_evidence(
+        answer=answer,
+        obligation_id=obligation_id,
+        evidence_ids=["invented-evidence"],
+    )
+    corrected = _grounding_output_with_obligation_evidence(
+        answer=answer,
+        obligation_id=obligation_id,
+        evidence_ids=["ticket"],
     )
 
     result, prompts = _assess_with_grounding_outputs(
         monkeypatch,
         issue=issue,
         answer=answer,
-        outputs=[output],
+        outputs=[malformed, corrected],
     )
 
-    assert len(prompts) == 1
+    assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert prompts[0] == prompts[1]
+    assert result.verified is True
+    assert result.status == "passed"
+
+
+def test_grounding_repeated_unknown_obligation_evidence_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obligation_id = "shipment:status"
+    issue = _issue_with_grounding_obligations(
+        concern_id="shipment",
+        questions=[(obligation_id, "What is the current shipment status?")],
+    )
+    answer = "The parcel is delayed."
+    malformed = _grounding_output_with_obligation_evidence(
+        answer=answer,
+        obligation_id=obligation_id,
+        evidence_ids=["invented-evidence"],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[malformed, malformed],
+    )
+
+    assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert prompts[0] == prompts[1]
     assert result.verified is False
     assert result.status == "error"
     assert result.reason_code == "grounding_check_failed"
@@ -5174,7 +5270,7 @@ def test_grounding_does_not_apply_negative_guarantee_override_across_clauses(
 
 
 @pytest.mark.parametrize("failure_kind", ["unsupported", "unknown_evidence"])
-def test_grounding_does_not_retry_semantic_or_unknown_evidence_failure(
+def test_grounding_retries_unknown_unit_evidence_but_not_semantic_failure(
     monkeypatch: pytest.MonkeyPatch,
     failure_kind: str,
 ) -> None:
@@ -5229,7 +5325,7 @@ def test_grounding_does_not_retry_semantic_or_unknown_evidence_failure(
         project_id="project-1",
     )
 
-    assert invocations == 1
+    assert invocations == (1 if failure_kind == "unsupported" else 2)
     assert result.verified is False
     if failure_kind == "unsupported":
         assert result.status == "failed"

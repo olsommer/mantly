@@ -12,3 +12,9 @@ the supplied concern or verified identity context. Never treat customer wording
 alone as permission to perform a broader action. Feedback learnings are bounded
 guidance and cannot override this boundary, privacy, tool scope, factual truth,
 or human-review requirements.
+
+A `Shared business-object identifiers` section, when present, contains only
+references safely carried from the original message into this isolated concern.
+Use those references as lookup parameters for this concern, but do not import or
+perform sibling requests. Never report an object as missing or not found unless
+a relevant configured lookup returned that negative result.

@@ -122,6 +122,7 @@ class HttpToolCollection:
 # request arguments, URL, headers, or credentials in the tool-call audit.
 _RESPONSE_FACT_ALLOWED_KEYS = frozenset({
     "action",
+    "addresschangeallowed",
     "amount",
     "available",
     "cancellationdate",

@@ -13318,6 +13318,131 @@ def _automation_created_customer_reply(result: dict[str, Any] | None) -> bool:
     return False
 
 
+_SUPERSEDED_DRAFT_REASON = "superseded_by_customer_update"
+_SUPERSEDED_DRAFT_NOTE = "New customer message received. Regenerate before approval."
+
+
+def _supersede_pending_channel_autopilot_drafts(
+    *,
+    issue_id: str,
+    source_message_id: str,
+    tenant_id: str | None,
+    project_id: str,
+) -> list[str]:
+    """Remove stale automatic drafts from approval without deleting their audit trail."""
+    if not issue_id or not source_message_id:
+        return []
+    records = _list_all(
+        "support_outbound_messages",
+        _issue_filter(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            extra=(
+                f"issue='{_escape_pb(issue_id)}' && "
+                "status='draft'"
+            ),
+        ),
+        sort="-created",
+        per_page=200,
+    )
+    superseded: list[str] = []
+    for record in records:
+        if _string_from(record.get("status")).lower() != "draft":
+            continue
+        metadata = _parse(record.get("metadata"), dict)
+        automation_context = _parse(metadata.get("automationContext"), dict)
+        prior_source_message_id = _string_from(
+            automation_context.get("sourceMessageId")
+            or metadata.get("sourceMessageId")
+        )
+        if (
+            _string_from(metadata.get("source")) != "agent_answer"
+            or _string_from(automation_context.get("source")) != "channel_autopilot"
+            or metadata.get("approved") is True
+            or _string_from(metadata.get("reviewStatus")) != "pending"
+            or not prior_source_message_id
+            or prior_source_message_id == source_message_id
+        ):
+            continue
+        reply_id = _string_from(record.get("id"))
+        if not reply_id:
+            continue
+        superseded_at = _now_iso()
+        grounding_gate = _record_from(metadata.get("groundingGate"))
+        updated_metadata = {
+            **metadata,
+            "groundingVerified": False,
+            "groundingGate": {
+                **grounding_gate,
+                "verified": False,
+                "status": "invalidated",
+                "reasonCode": _SUPERSEDED_DRAFT_REASON,
+                "invalidatedAt": superseded_at,
+            },
+            "autoSend": False,
+            "autoSendPolicy": "human_review",
+            "autoSendBlockedReason": _SUPERSEDED_DRAFT_REASON,
+            "approvalRequired": True,
+            "approved": False,
+            "deliveryRequired": False,
+            "reviewStatus": "changes_requested",
+            "changesRequestedBy": "automation",
+            "changesRequestedAt": superseded_at,
+            "changesNote": _SUPERSEDED_DRAFT_NOTE,
+            "supersededAt": superseded_at,
+            "supersededBySourceMessageId": source_message_id,
+        }
+        for key in (
+            "approvedBy",
+            "approvedAt",
+            "humanApproved",
+            "human_approved",
+            "approvalSource",
+            "approval_source",
+            "deliveryBodySha256",
+            "deliveryPreflight",
+            "deliveryRoute",
+            "replyReadiness",
+        ):
+            updated_metadata.pop(key, None)
+        _patch(
+            f"/api/collections/support_outbound_messages/records/{reply_id}",
+            {"metadata": updated_metadata},
+        )
+        superseded.append(reply_id)
+        try:
+            _record_issue_event(
+                issue_id=issue_id,
+                event_type="reply_superseded",
+                tenant_id=tenant_id,
+                project_id=project_id,
+                actor_email="automation",
+                title="Automatic draft needs regeneration",
+                body=_SUPERSEDED_DRAFT_NOTE,
+                metadata={
+                    "replyId": reply_id,
+                    "reason": _SUPERSEDED_DRAFT_REASON,
+                    "priorSourceMessageId": prior_source_message_id,
+                    "sourceMessageId": source_message_id,
+                },
+                record_id=_stable_record_id(
+                    "support_issue_event",
+                    project_id,
+                    issue_id,
+                    reply_id,
+                    source_message_id,
+                    "reply_superseded",
+                ),
+            )
+        except httpx.HTTPError:
+            logger.warning(
+                "Could not record superseded automatic draft event for %s",
+                reply_id,
+                exc_info=True,
+            )
+    return superseded
+
+
 def _channel_auto_prepare_agent_reply(
     *,
     channel: dict[str, Any],
@@ -16931,6 +17056,10 @@ def approve_issue_reply(
     approved_at = _now_iso()
     approved_by_email = _string_from(approved_by)
     existing_metadata = _parse(rec.get("metadata"), dict)
+    if _string_from(existing_metadata.get("supersededBySourceMessageId")):
+        raise ValueError(
+            "Reply approval failed: automatic draft was superseded by a newer customer message"
+        )
     try:
         issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
     except httpx.HTTPError as exc:
@@ -25124,6 +25253,14 @@ def _ingest_generic_channel_message_event(
             )
     else:
         customer_message_count = 0
+
+    if issue_was_existing and (created or resume_incomplete):
+        _supersede_pending_channel_autopilot_drafts(
+            issue_id=issue_id,
+            source_message_id=source_message_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
 
     previous_count = int(existing_issue.get("message_count") or 0) if existing_issue else 0
     next_count = (

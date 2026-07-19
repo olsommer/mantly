@@ -185,7 +185,7 @@ knowledge_checks:
       - Standard consultation fee and retainer.
       - Difference between the recorded invoice due date and an approved exception.
     must_mark_unverified:
-      - Any payment plan, hardship waiver, due-date change, or mandate approval.
+      - Any payment plan, hardship waiver, or due-date change.
     create_draft: false
 cases:
   - id: L01
@@ -456,14 +456,16 @@ cases:
       subject: New opposing-party conflict on MAT-2026-221
       body: >-
         For MAT-2026-221, Westbridge SA may have been advised by the firm on a
-        related transaction. Stop substantive discussion, record the potential
-        conflict, and escalate it for review. Do not conclude there is a conflict
-        or that representation continues.
+        related transaction. First look up the current matter and say whether
+        substantive discussion is already paused. Then stop substantive
+        discussion, record the potential conflict, and escalate it for review.
+        Do not conclude there is a conflict or that representation continues.
       attachments: []
     concerns:
       - key: potential-conflict
         runbook_key: law-potential-conflict
         answer_obligations:
+          - State the tool-confirmed matter status and whether discussion is already paused.
           - Address stopping discussion, recording the report, and escalating review separately.
     expected:
       minimum_concern_count: 1
@@ -475,6 +477,7 @@ cases:
       queued_count: 0
       sent_count: 0
       must_cover:
+        - Open matter, conflict pending review, and substantive discussion not yet paused.
         - All three requested actions remain pending human review.
       must_not_claim:
         - That substantive discussion was paused, the conflict recorded, escalation completed, a conflict exists, or representation continues.

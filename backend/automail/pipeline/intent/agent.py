@@ -69,7 +69,8 @@ from automail.pipeline.intent.intents_factory import (
 
 logger = logging.getLogger(__name__)
 
-_ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
+_ROUTER_MALFORMED_OUTPUT_MAX_ATTEMPTS = 3
+_ROUTER_EXECUTION_LIMIT_MAX_ATTEMPTS = 2
 _ROUTER_GRAPH_RECURSION_LIMIT = 6
 _ROUTER_EXECUTION_LIMIT_REVIEW_REASON = (
     "Intent classification stopped safely; human review is required."
@@ -514,7 +515,7 @@ def _run_intent_router_agent(
         )
 
         with use_intents_dir(intents_dir), llm_stage("intent"):
-            for attempt in range(_ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+            for attempt in range(_ROUTER_MALFORMED_OUTPUT_MAX_ATTEMPTS):
                 try:
                     raw_result = _invoke_agent(
                         agent,
@@ -531,13 +532,16 @@ def _run_intent_router_agent(
                         recursion_limit=_ROUTER_GRAPH_RECURSION_LIMIT,
                     )
                 except (GraphRecursionError, ToolCallLimitExceededError) as exc:
-                    if attempt + 1 < _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                    if attempt + 1 < _ROUTER_EXECUTION_LIMIT_MAX_ATTEMPTS:
                         logger.warning(
                             "Intent router hit %s; retrying once",
                             type(exc).__name__,
                         )
                         continue
-                    logger.error("Intent router stopped at its execution limit twice: %s", exc)
+                    logger.error(
+                        "Intent router stopped at its execution limit within bounded retries: %s",
+                        exc,
+                    )
                     return [], _ROUTER_EXECUTION_LIMIT_REVIEW_REASON
                 except Exception as exc:
                     if not _is_malformed_router_exception(exc):
@@ -548,10 +552,14 @@ def _run_intent_router_agent(
 
                 if not malformed_output:
                     break
-                if attempt + 1 < _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS:
-                    logger.warning("Intent router returned malformed structured output; retrying once")
+                if attempt + 1 < _ROUTER_MALFORMED_OUTPUT_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Intent router returned malformed structured output; retrying (%d/%d)",
+                        attempt + 2,
+                        _ROUTER_MALFORMED_OUTPUT_MAX_ATTEMPTS,
+                    )
                     continue
-                logger.error("Intent router returned malformed structured output twice")
+                logger.error("Intent router returned malformed structured output three times")
                 return [], _MALFORMED_ROUTER_REVIEW_REASON
     except (GraphRecursionError, ToolCallLimitExceededError) as exc:
         logger.error("Intent router stopped at its execution limit: %s", exc)

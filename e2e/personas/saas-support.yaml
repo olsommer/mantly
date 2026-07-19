@@ -239,6 +239,10 @@ runbooks:
   - key: saas-webhook-recovery
     purpose: Explain verified integration failures and prepare secret rotation or event replay.
     proposed_actions: [rotate_signing_secret, replay_webhook_events]
+    required_guidance:
+      - >-
+        State that delivery remains unverified until approved recovery actions
+        complete and a separate post-action delivery check succeeds.
   - key: saas-token-exposure
     purpose: Give containment guidance without exposing the token and prepare security actions.
     proposed_actions: [revoke_api_token, create_replacement_token, open_security_incident]
@@ -270,14 +274,15 @@ knowledge_checks:
     question: >-
       Using only reviewed knowledge and verified status facts: What is incident
       INC-204's status, affected service and region, and exact start time? Is an
-      ETA known? Is a root cause known? Is Acme Analytics AG eligible for an SLA
-      credit, and is any credit approved or quantified?
+      ETA known? Is a root cause known? May Acme Analytics AG's Enterprise plan
+      request an SLA-credit review, and is incident eligibility or any credit
+      approved or quantified?
     expected_citation_ids: [saas-incidents-sla]
     must_cover:
       - Investigating status, affected EU authentication service, start time, and absent ETA.
-      - Credit review is possible but not approved.
+      - The Enterprise plan may request credit review, but incident eligibility and credit are not approved.
     must_mark_unverified:
-      - Resolution time, root cause, eligibility, and SLA-credit amount.
+      - Resolution time, root cause, incident eligibility, credit approval, and SLA-credit amount.
     create_draft: false
 cases:
   - id: S01
@@ -478,8 +483,9 @@ cases:
       sent_count: 0
       must_cover:
         - 401 status, first failure time, affected events, certificate change, redacted request ID need, and pending actions.
+        - Delivery remains unverified until recovery actions complete and a post-action check succeeds.
       must_not_claim:
-        - Received secret, rotated secret, replayed events, fixed delivery, or root cause beyond the evidence.
+        - Received secret, rotated secret, replayed events, delivery is currently fixed, or root cause beyond the evidence.
       knowledge_ids: [saas-webhooks]
       tool_fixture_ids: [saas-webhook-acme-orders]
       pending_actions: [rotate_signing_secret, replay_webhook_events]
@@ -487,9 +493,10 @@ cases:
     follow_ups:
       - id: S05-F1
         body: >-
-          Follow-up for the same endpoint: the latest redacted request ID is
-          req_qa_901 and order.updated is still returning 401. Please attach this
-          to the existing investigation; do not open a second ticket.
+          Follow-up for ACME-4421 endpoint wh_orders_prod: the latest redacted
+          request ID is req_qa_901 and order.updated is still returning 401.
+          Re-run the read-only lookup, keep this update on the existing ticket,
+          and state only the currently verified status. Do not claim recovery.
         same_ticket: true
         new_message_id: true
   - id: S06

@@ -1158,7 +1158,7 @@ class TestIntentAttachmentContext:
         "malformed_kind",
         ["finish-reason", "invalid-tool-call", "invalid-route-args"],
     )
-    def test_classification_retries_malformed_output_then_accepts_valid_route(
+    def test_classification_retries_two_malformed_outputs_then_accepts_valid_route(
         self,
         monkeypatch,
         malformed_kind,
@@ -1214,7 +1214,7 @@ class TestIntentAttachmentContext:
 
             def invoke(self, _payload, config=None):
                 assert config is not None
-                response = [malformed_message, valid_message][self.calls]
+                response = [malformed_message, malformed_message, valid_message][self.calls]
                 self.calls += 1
                 return {"messages": [response]}
 
@@ -1247,12 +1247,12 @@ class TestIntentAttachmentContext:
             "project-one",
         )
 
-        assert agent.calls == 2
+        assert agent.calls == 3
         assert [concern.intent_name for concern in concerns] == ["claim"]
         assert reason is None
 
     @pytest.mark.no_gemini
-    def test_classification_repeated_malformed_output_requires_human(self, monkeypatch):
+    def test_classification_three_malformed_outputs_requires_human(self, monkeypatch):
         from langchain.messages import AIMessage
 
         from automail.core.config import AdminConfig
@@ -1304,7 +1304,7 @@ class TestIntentAttachmentContext:
             "Intent classification returned malformed structured output; "
             "human review is required."
         )
-        assert agent.calls == 2
+        assert agent.calls == 3
         assert intent_result.matched is False
         assert intent_result.error == reason
         assert agent_response is not None

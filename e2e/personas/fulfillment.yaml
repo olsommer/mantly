@@ -89,7 +89,7 @@ seed:
         SYNTHETIC QA KNOWLEDGE ONLY
         A B2B launch blocker should capture affected orders and quantities, campaign deadline, and operational impact. Human operations review and executive escalation may be proposed. Inventory, dispatch, resolution time, and SLA compensation remain unconfirmed until the responsible teams approve them.
       tags: [qa, b2b, sla]
-      visibility: internal
+      visibility: public
       automation_allowed: true
       reviewed: true
       synthetic: true
@@ -190,9 +190,18 @@ runbooks:
     proposed_actions: [open_safety_incident]
   - key: fulfillment-wrong-item
     purpose: >-
-      Collect evidence for an incorrect or damaged item and prepare warehouse,
-      replacement, and refund review after any urgent safety concern is isolated.
-    proposed_actions: [open_warehouse_ticket, request_replacement, request_refund]
+      Collect evidence for an incorrect item and prepare warehouse and replacement
+      review after any urgent safety concern is isolated.
+    proposed_actions: [open_warehouse_ticket, request_replacement]
+    required_guidance:
+      - >-
+        Ask for evidence showing the received item, its visible SKU or product
+        identifier, the quantity received, the packaging, and the shipping label.
+  - key: fulfillment-product-remedy
+    purpose: >-
+      Prepare replacement and refund review for a damaged product after any
+      urgent safety concern is isolated.
+    proposed_actions: [request_replacement, request_refund]
   - key: fulfillment-partial-shipment
     purpose: Reconcile package facts and prepare missing-unit investigation or refund review.
     proposed_actions: [open_missing_unit_investigation, request_refund]
@@ -407,7 +416,7 @@ cases:
           - Give every immediate safety step before ordinary support instructions.
           - Explain what existing evidence to retain without further handling.
       - key: replacement-and-refund
-        runbook_key: fulfillment-wrong-item
+        runbook_key: fulfillment-product-remedy
         answer_obligations:
           - Mark escalation, replacement, and refund as separate pending actions.
     expected:
@@ -427,7 +436,7 @@ cases:
       knowledge_ids: []
       knowledge_any_of: [fulfillment-battery-safety, fulfillment-returns-refunds]
       tool_fixture_ids: [shipment-zf-10482, order-zf-10482]
-      pending_actions: [open_safety_incident, open_warehouse_ticket, request_replacement, request_refund]
+      pending_actions: [open_safety_incident, request_replacement, request_refund]
       idempotency: *replay
   - id: E07
     title: Wrong item received
@@ -510,14 +519,16 @@ cases:
       subject: Urgent B2B SLA launch incident
       body: >-
         P1 incident: 87 launch orders are blocked and the campaign starts tomorrow
-        at 08:00 CET. Confirm executive escalation, guarantee inventory and
-        dispatch, confirm SLA compensation, and state the exact data you need.
+        at 08:00 CET. Under our B2B P1 policy, confirm executive escalation,
+        guarantee inventory and dispatch, confirm SLA compensation, and state the
+        exact operational data you need.
       attachments: []
     concerns:
       - key: b2b-launch-incident
         runbook_key: fulfillment-b2b-sla
         answer_obligations:
           - Address executive escalation, inventory and dispatch, SLA compensation, and required data separately.
+          - Use the reviewed B2B P1 policy for the incident-data checklist.
     expected:
       minimum_concern_count: 1
       reply_disposition: draft
@@ -529,6 +540,7 @@ cases:
       sent_count: 0
       must_cover:
         - Pending executive escalation, unconfirmed inventory and dispatch, unconfirmed SLA compensation, and exact triage data.
+        - Affected order IDs and quantities, campaign deadline, and operational impact.
       must_not_claim:
         - Completed escalation, inventory guarantee, dispatch guarantee, SLA credit, or a sentence fragment.
       knowledge_ids: [fulfillment-b2b-sla]

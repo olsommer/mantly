@@ -1588,8 +1588,9 @@ def _run_follow_ups(
         )
         issue_id = _issue_id_from_ingest(ingest)
         same_ticket = issue_id == original_issue_id
+        issue: dict[str, Any] = {}
         if issue_id:
-            _wait_for_issue(
+            issue = _wait_for_issue(
                 api,
                 target,
                 issue_id,
@@ -1597,13 +1598,53 @@ def _run_follow_ups(
                 timeout_seconds=timeout_seconds,
                 poll_seconds=poll_seconds,
             )
+        replies = [
+            item
+            for item in issue.get("outboundMessages") or []
+            if isinstance(item, dict)
+        ]
+
+        def source_matches(actual: str) -> bool:
+            return actual == message_id or actual.endswith(f":{message_id}")
+
+        pending_replies: list[dict[str, Any]] = []
+        stale_pending_reply_ids: list[str] = []
+        superseded_reply_ids: list[str] = []
+        for reply in replies:
+            metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+            automation_context = (
+                metadata.get("automationContext")
+                if isinstance(metadata.get("automationContext"), dict)
+                else {}
+            )
+            source_message_id = str(
+                automation_context.get("sourceMessageId")
+                or metadata.get("sourceMessageId")
+                or ""
+            )
+            if metadata.get("supersededBySourceMessageId"):
+                superseded_reply_ids.append(str(reply.get("id") or ""))
+            if (
+                str(reply.get("status") or "").lower() == "draft"
+                and metadata.get("approvalRequired") is True
+                and metadata.get("approved") is not True
+                and str(metadata.get("reviewStatus") or "").lower() == "pending"
+            ):
+                pending_replies.append(reply)
+                if not source_matches(source_message_id):
+                    stale_pending_reply_ids.append(str(reply.get("id") or ""))
+        approval_state_fresh = not stale_pending_reply_ids
         results.append(
             {
                 "id": follow_up.id,
                 "issueId": issue_id,
                 "sameTicket": same_ticket,
                 "newMessageId": message_id,
-                "passed": same_ticket and bool(issue_id),
+                "pendingReplyIds": [str(reply.get("id") or "") for reply in pending_replies],
+                "stalePendingReplyIds": stale_pending_reply_ids,
+                "supersededReplyIds": superseded_reply_ids,
+                "approvalStateFresh": approval_state_fresh,
+                "passed": same_ticket and bool(issue_id) and approval_state_fresh,
             }
         )
     return results

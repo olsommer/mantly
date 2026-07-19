@@ -13748,6 +13748,52 @@ def test_approve_issue_reply_records_approval_metadata(monkeypatch):
     assert posted[0][1]["metadata"]["replyId"] == "reply123"
 
 
+def test_approve_issue_reply_rejects_superseded_automatic_draft(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        issues,
+        "_first",
+        lambda collection, *_args, **_kwargs: {
+            "id": "reply123",
+            "issue": "issue1",
+            "status": "draft",
+            "body": "Stale automatic answer.",
+            "metadata": {
+                "source": "agent_answer",
+                "approvalRequired": True,
+                "approved": False,
+                "reviewStatus": "changes_requested",
+                "supersededBySourceMessageId": "email:thread:message-2",
+            },
+        }
+        if collection == "support_outbound_messages"
+        else None,
+    )
+    monkeypatch.setattr(
+        issues,
+        "get_issue",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("superseded draft must fail before ticket lookup")
+        ),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda path, data: patched.append((path, data)) or data,
+    )
+
+    with pytest.raises(ValueError, match="superseded by a newer customer message"):
+        issues.approve_issue_reply(
+            "issue1",
+            "reply123",
+            tenant_id="tenant1",
+            project_id="project1",
+            approved_by="lead@example.com",
+        )
+
+    assert patched == []
+
+
 def test_approve_issue_reply_claims_and_moves_open_ticket(monkeypatch):
     patched: list[tuple[str, dict]] = []
     posted: list[tuple[str, dict]] = []
@@ -22311,6 +22357,92 @@ def test_ingest_channel_webhook_auto_prepares_agent_reply(monkeypatch):
     assert autopilot_event["metadata"]["aiRunId"] == "run1"
     assert autopilot_event["metadata"]["source"] == "discord"
     assert autopilot_event["metadata"]["automationContext"]["source"] == "channel_autopilot"
+
+
+def test_supersede_pending_channel_autopilot_drafts_is_narrow_and_audited(monkeypatch):
+    patched: list[tuple[str, dict]] = []
+    posted: list[tuple[str, dict]] = []
+    current_source = "email:thread:message-2"
+
+    def automatic_draft(
+        reply_id: str,
+        source_message_id: str,
+        *,
+        status: str = "draft",
+        approved: bool = False,
+        review_status: str = "pending",
+    ) -> dict:
+        return {
+            "id": reply_id,
+            "issue": "issue1",
+            "status": status,
+            "metadata": {
+                "source": "agent_answer",
+                "approvalRequired": True,
+                "approved": approved,
+                "reviewStatus": review_status,
+                "groundingVerified": True,
+                "groundingGate": {"verified": True, "status": "passed"},
+                "automationContext": {
+                    "source": "channel_autopilot",
+                    "sourceMessageId": source_message_id,
+                },
+            },
+        }
+
+    records = [
+        automatic_draft("old-auto", "email:thread:message-1"),
+        automatic_draft("current-auto", current_source),
+        automatic_draft("approved-auto", "email:thread:message-0", approved=True),
+        automatic_draft("queued-auto", "email:thread:message-0", status="queued"),
+        {
+            "id": "manual-draft",
+            "issue": "issue1",
+            "status": "draft",
+            "metadata": {
+                "source": "admin_inbox",
+                "approvalRequired": True,
+                "approved": False,
+                "reviewStatus": "pending",
+            },
+        },
+    ]
+    monkeypatch.setattr(issues, "_now_iso", lambda: "2026-07-19T21:00:00+00:00")
+    monkeypatch.setattr(issues, "_list_all", lambda *_args, **_kwargs: records)
+    monkeypatch.setattr(
+        issues,
+        "_patch",
+        lambda path, data: patched.append((path, data)) or data,
+    )
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda path, data: posted.append((path, data)) or data,
+    )
+
+    result = issues._supersede_pending_channel_autopilot_drafts(
+        issue_id="issue1",
+        source_message_id=current_source,
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert result == ["old-auto"]
+    assert [path for path, _data in patched] == [
+        "/api/collections/support_outbound_messages/records/old-auto"
+    ]
+    metadata = patched[0][1]["metadata"]
+    assert metadata["groundingVerified"] is False
+    assert metadata["groundingGate"]["status"] == "invalidated"
+    assert metadata["groundingGate"]["reasonCode"] == "superseded_by_customer_update"
+    assert metadata["reviewStatus"] == "changes_requested"
+    assert metadata["changesRequestedBy"] == "automation"
+    assert metadata["supersededBySourceMessageId"] == current_source
+    assert metadata["autoSend"] is False
+    assert metadata["deliveryRequired"] is False
+    event = next(data for path, data in posted if path == "/api/collections/support_issue_events/records")
+    assert event["event_type"] == "reply_superseded"
+    assert event["metadata"]["replyId"] == "old-auto"
 
 
 def test_channel_auto_prepare_runs_full_ticket_prep(monkeypatch):

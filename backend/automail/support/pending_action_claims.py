@@ -925,6 +925,51 @@ _FUTURE_LIFECYCLE_PASSIVE_ACTION_PATTERN = re.compile(
     rf"(?:{'|'.join(_LIFECYCLE_COMPLETED_ACTIONS)})\b",
     re.IGNORECASE,
 )
+_SUBSTANTIVE_DISCUSSION_ACTIVE_ACTION_PATTERN = re.compile(
+    rf"\b(?:"
+    rf"(?:(?:we|i)\s+did\s+|{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+did\s+)"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:pause|stop)|"
+    rf"(?:(?:we|i)\s+(?:(?:have|had)\s+)?|(?:we|i)['’]ve\s+|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:(?:has|have|had)\s+)?)"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:paused|stopped)|"
+    rf"(?:(?:we|i)\s+(?:am|are|was|were)\s+|(?:we|i)['’](?:re|m)\s+|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:is|are|was|were)\s+)"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:pausing|stopping)"
+    rf")\s+(?:the\s+)?substantive\s+discussions?\b",
+    re.IGNORECASE,
+)
+_SUBSTANTIVE_DISCUSSION_PASSIVE_ACTION_PATTERN = re.compile(
+    r"\b(?:the\s+)?substantive\s+discussions?\b[^.!?\n]{0,60}?\b"
+    r"(?:has|have|is|are|was|were|remain|remains|remained)\s+"
+    r"(?!(?:not|never)\b)"
+    rf"{_ACTION_MODIFIER_PATTERN}(?:been\s+|being\s+)?(?:paused|stopped)\b",
+    re.IGNORECASE,
+)
+_SUBSTANTIVE_DISCUSSION_FUTURE_ACTIVE_ACTION_PATTERN = re.compile(
+    rf"\b(?:"
+    rf"(?:we|i)\s+(?:(?:will|shall)(?:\s+(?:need\s+to|have\s+to|be))?|"
+    rf"{_DEFINITE_ACTION_MODIFIER_PATTERN}\s+(?:will|shall)|"
+    rf"(?:am|are)\s+(?:(?:going|planning)\s+to|(?:set|due|scheduled)\s+to)|"
+    rf"(?:plan|intend|expect|aim|undertake|agree|promise|need)\s+to|commit\s+to)|"
+    rf"(?:we|i)['’]ll(?:\s+(?:need\s+to|have\s+to|be))?|"
+    rf"(?:we|i)['’]re\s+(?:(?:going|planning)\s+to|(?:set|due|scheduled)\s+to)|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:(?:will|shall)"
+    rf"(?:\s+(?:need\s+to|have\s+to|be))?|"
+    rf"{_DEFINITE_ACTION_MODIFIER_PATTERN}\s+(?:will|shall)|"
+    rf"(?:is|are)\s+(?:(?:going|planning)\s+to|(?:set|due|scheduled)\s+to)|"
+    rf"(?:plans?|intends?|expects?|aims?|undertakes?|agrees?|promises?|needs?)\s+to|"
+    rf"commits?\s+to)"
+    rf")\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"(?:pause|stop|pausing|stopping)\s+"
+    rf"(?:the\s+)?substantive\s+discussions?\b",
+    re.IGNORECASE,
+)
+_SUBSTANTIVE_DISCUSSION_FUTURE_PASSIVE_ACTION_PATTERN = re.compile(
+    r"\b(?:the\s+)?substantive\s+discussions?\b[^.!?\n]{0,60}?\b"
+    r"(?:will|shall)\s+(?!(?:not|never)\b)"
+    rf"{_ACTION_MODIFIER_PATTERN}be\s+(?:paused|stopped)\b",
+    re.IGNORECASE,
+)
 
 _GERMAN_COMPLETED_PATTERN = re.compile(
     rf"\b(?:wir\s+haben|ich\s+habe)\s+"
@@ -1089,6 +1134,8 @@ _CLAIM_PATTERNS = (
     _BARE_LIFECYCLE_PASSIVE_ACTION_PATTERN,
     _TARGET_MUTATION_PASSIVE_ACTION_PATTERN,
     _LIFECYCLE_PASSIVE_ACTION_PATTERN,
+    _SUBSTANTIVE_DISCUSSION_ACTIVE_ACTION_PATTERN,
+    _SUBSTANTIVE_DISCUSSION_PASSIVE_ACTION_PATTERN,
     _NARROW_LIFECYCLE_CANCELLATION_PATTERN,
     _TERSE_COMPLETED_ACTION_PATTERN,
     _TERSE_ACTION_FIRST_PATTERN,
@@ -1140,6 +1187,8 @@ _FUTURE_CLAIM_PATTERNS = (
     _BARE_FUTURE_PASSIVE_ACTION_PATTERN,
     _BARE_FUTURE_LIFECYCLE_PASSIVE_ACTION_PATTERN,
     _TARGET_MUTATION_FUTURE_PASSIVE_ACTION_PATTERN,
+    _SUBSTANTIVE_DISCUSSION_FUTURE_ACTIVE_ACTION_PATTERN,
+    _SUBSTANTIVE_DISCUSSION_FUTURE_PASSIVE_ACTION_PATTERN,
     _GERMAN_FUTURE_PATTERN,
     _GERMAN_FUTURE_PASSIVE_PATTERN,
     _GERMAN_SIMPLE_ACTION_PATTERN,
@@ -1364,6 +1413,7 @@ _EXTERNAL_STATE_PASSIVE_PATTERNS = frozenset(
         _TARGET_MUTATION_PASSIVE_ACTION_PATTERN,
         _LIFECYCLE_PASSIVE_ACTION_PATTERN,
         _NARROW_LIFECYCLE_CANCELLATION_PATTERN,
+        _SUBSTANTIVE_DISCUSSION_PASSIVE_ACTION_PATTERN,
     }
 )
 

@@ -2582,12 +2582,12 @@ def _pending_action_obligation_notices(
 
 
 _ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE = re.compile(
-    r"^to\s+(?:confirm|verify|check|review|process|update|escalate|investigate|"
+    r"^to\s+(?:assess|confirm|verify|check|review|process|update|escalate|investigate|"
     r"open|submit|arrange|schedule)\b[^,;:!?]{0,180}[.!?]*$",
     re.IGNORECASE,
 )
 _ENGLISH_DEPENDENT_ACTION_FRAGMENT_START_RE = re.compile(
-    r"To\s+(?:confirm|verify|check|review|process|update|escalate|investigate|"
+    r"To\s+(?:assess|confirm|verify|check|review|process|update|escalate|investigate|"
     r"open|submit|arrange|schedule)\b",
 )
 _ACTION_REPAIR_NONTERMINAL_ABBREVIATIONS = frozenset(
@@ -2690,7 +2690,8 @@ def _dependent_action_fragment_spans(text: str) -> tuple[tuple[int, int], ...]:
         end = _dependent_action_fragment_end(text, start)
         if end is None:
             continue
-        if _ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE.fullmatch(text[start:end].strip()):
+        fragment = text[start:end].strip()
+        if _ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE.fullmatch(fragment):
             spans.append((start, end))
     return tuple(spans)
 
@@ -2727,6 +2728,13 @@ def _clean_action_repair_artifacts(answer: str, *, language: str) -> str:
 
     cleaned = re.sub(
         r"(\b[a-z]{2,}|\d+)([.!?])(?=[A-ZÀ-ÖØ-Þ])",
+        r"\1\2 ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\b([A-Z][A-Za-zÀ-ÖØ-öø-ÿ&'-]{1,50}\s+"
+        r"(?:SA|AG|GmbH|Inc|Ltd|LLC|PLC|Corp|Sarl|SARL|SAS|BV|NV))([.!?])"
+        r"(?=(?:A|An|I|It|Our|That|The|These|They|This|Those|We|You|Your)\b)",
         r"\1\2 ",
         cleaned,
     )

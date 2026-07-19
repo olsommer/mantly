@@ -10843,6 +10843,11 @@ def _record_agent_answer_ai_run(
     token_usage: dict[str, Any] | None = None,
     response_attachments: tuple[str, ...] | None = None,
     unresolved_response_attachments: tuple[str, ...] | None = None,
+    covered_concern_ids: tuple[str, ...] | None = None,
+    covered_obligation_ids: tuple[str, ...] | None = None,
+    composer_covered_concern_ids: tuple[str, ...] | None = None,
+    composer_covered_obligation_ids: tuple[str, ...] | None = None,
+    coverage_source: str = "",
     existing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now_iso()
@@ -10885,6 +10890,53 @@ def _record_agent_answer_ai_run(
         for item in (unresolved_response_attachments or ())[:20]
         if item
     ]
+    clean_covered_concern_ids = list(
+        dict.fromkeys(
+            _string_from(value)
+            for value in (
+                covered_concern_ids
+                if covered_concern_ids is not None
+                else _parse(reply_metadata.get("coveredConcernIds"), list)
+            )
+            if _string_from(value)
+        )
+    )[:100]
+    clean_covered_obligation_ids = list(
+        dict.fromkeys(
+            _string_from(value)
+            for value in (
+                covered_obligation_ids
+                if covered_obligation_ids is not None
+                else _parse(reply_metadata.get("coveredObligationIds"), list)
+            )
+            if _string_from(value)
+        )
+    )[:100]
+    clean_composer_covered_concern_ids = list(
+        dict.fromkeys(
+            _string_from(value)
+            for value in (
+                composer_covered_concern_ids
+                if composer_covered_concern_ids is not None
+                else _parse(reply_metadata.get("composerCoveredConcernIds"), list)
+            )
+            if _string_from(value)
+        )
+    )[:100]
+    clean_composer_covered_obligation_ids = list(
+        dict.fromkeys(
+            _string_from(value)
+            for value in (
+                composer_covered_obligation_ids
+                if composer_covered_obligation_ids is not None
+                else _parse(reply_metadata.get("composerCoveredObligationIds"), list)
+            )
+            if _string_from(value)
+        )
+    )[:100]
+    clean_coverage_source = _string_from(coverage_source) or _string_from(
+        reply_metadata.get("coverageSource")
+    )
     data: dict[str, Any] = {
         "id": _string_from((existing_run or {}).get("id")) or generate_id(),
         "issue": issue_id,
@@ -10966,6 +11018,11 @@ def _record_agent_answer_ai_run(
             "replyStatus": _string_from(reply.get("status")) if reply else "",
             "responseAttachments": clean_response_attachments,
             "unresolvedResponseAttachments": clean_unresolved_response_attachments,
+            "coveredConcernIds": clean_covered_concern_ids,
+            "coveredObligationIds": clean_covered_obligation_ids,
+            "composerCoveredConcernIds": clean_composer_covered_concern_ids,
+            "composerCoveredObligationIds": clean_composer_covered_obligation_ids,
+            "coverageSource": clean_coverage_source,
         },
         "started_at": _string_from((existing_run or {}).get("started_at")) or now,
         "completed_at": now,
@@ -11017,6 +11074,90 @@ def _agent_answer_token_usage(collector: Any, *, event_start: int) -> dict[str, 
         return {}
     captured = [event for event in events[max(0, event_start):] if isinstance(event, dict)]
     return aggregate_usage_calls(captured) if captured else {}
+
+
+def _effective_grounding_coverage(
+    *,
+    grounding_gate: dict[str, Any],
+    expected_answer_sha256: str,
+    composer_concern_ids: tuple[str, ...],
+    composer_obligation_ids: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Promote exact non-system coverage only after a complete verified gate.
+
+    Composer declarations remain the baseline. A deterministic fallback can
+    legitimately omit them, so the grounding gate may fill the audit fields
+    only when every customer obligation in that gate has one covered
+    assessment. System-policy obligations are intentionally excluded from the
+    customer concern/obligation audit.
+    """
+
+    base_concerns = tuple(
+        dict.fromkeys(_string_from(value) for value in composer_concern_ids if _string_from(value))
+    )
+    base_obligations = tuple(
+        dict.fromkeys(_string_from(value) for value in composer_obligation_ids if _string_from(value))
+    )
+    base_source = "composer" if base_concerns or base_obligations else "none"
+    gate = _record_from(grounding_gate)
+    if (
+        not bool(gate.get("verified"))
+        or _string_from(gate.get("status")).lower() != "passed"
+        or not expected_answer_sha256
+        or _string_from(gate.get("answerSha256")) != expected_answer_sha256
+    ):
+        return base_concerns, base_obligations, base_source
+
+    customer_obligations: dict[str, str] = {}
+    system_obligation_ids: set[str] = set()
+    for raw_obligation in _parse(gate.get("answerObligations"), list):
+        obligation = _record_from(raw_obligation)
+        obligation_id = _string_from(obligation.get("id"))
+        concern_id = _string_from(obligation.get("concernId") or obligation.get("concern_id"))
+        is_system = obligation_id.lower().startswith(
+            "system:safety:"
+        ) or concern_id.lower() == "system-safety"
+        if is_system:
+            if obligation_id:
+                system_obligation_ids.add(obligation_id)
+            continue
+        if not obligation_id or not concern_id or obligation_id in customer_obligations:
+            return base_concerns, base_obligations, base_source
+        customer_obligations[obligation_id] = concern_id
+    if not customer_obligations:
+        return base_concerns, base_obligations, base_source
+
+    covered_assessments: set[str] = set()
+    seen_assessments: set[str] = set()
+    for raw_assessment in _parse(gate.get("obligationAssessments"), list):
+        assessment = _record_from(raw_assessment)
+        obligation_id = _string_from(assessment.get("obligationId") or assessment.get("obligation_id"))
+        if obligation_id in system_obligation_ids:
+            continue
+        if obligation_id not in customer_obligations:
+            return base_concerns, base_obligations, base_source
+        if obligation_id in seen_assessments:
+            return base_concerns, base_obligations, base_source
+        seen_assessments.add(obligation_id)
+        if assessment.get("covered") is True and _string_from(
+            assessment.get("resolution")
+        ).lower() in {"answered", "fulfilled_action", "pending_or_unavailable"}:
+            covered_assessments.add(obligation_id)
+    if covered_assessments != set(customer_obligations):
+        return base_concerns, base_obligations, base_source
+
+    effective_concerns = tuple(
+        dict.fromkeys((*base_concerns, *customer_obligations.values()))
+    )
+    effective_obligations = tuple(
+        dict.fromkeys((*base_obligations, *customer_obligations.keys()))
+    )
+    source = (
+        "grounding_gate"
+        if effective_concerns != base_concerns or effective_obligations != base_obligations
+        else "composer"
+    )
+    return effective_concerns, effective_obligations, source
 
 
 def _is_runbook_ai_run(
@@ -11863,6 +12004,16 @@ def _create_issue_agent_answer(
             }
     apply_grounded_citations()
     grounding_verified = bool(grounding_gate.get("verified"))
+    (
+        effective_covered_concern_ids,
+        effective_covered_obligation_ids,
+        coverage_source,
+    ) = _effective_grounding_coverage(
+        grounding_gate=grounding_gate,
+        expected_answer_sha256=grounding_text_sha256(answer),
+        composer_concern_ids=draft.covered_concern_ids,
+        composer_obligation_ids=draft.covered_obligation_ids,
+    )
     grounding_issues = tuple(
         dict.fromkeys(
             _string_from(value)[:500]
@@ -11946,8 +12097,11 @@ def _create_issue_agent_answer(
             "autoSendPolicy": auto_send_policy,
             "responseAttachments": list(selected_response_attachments),
             "unresolvedResponseAttachments": list(unresolved_response_attachments),
-            "coveredConcernIds": list(draft.covered_concern_ids),
-            "coveredObligationIds": list(draft.covered_obligation_ids),
+            "coveredConcernIds": list(effective_covered_concern_ids),
+            "coveredObligationIds": list(effective_covered_obligation_ids),
+            "composerCoveredConcernIds": list(draft.covered_concern_ids),
+            "composerCoveredObligationIds": list(draft.covered_obligation_ids),
+            "coverageSource": coverage_source,
             "composerRequiresHuman": draft.requires_human,
             "composerRequiresHumanReason": draft.requires_human_reason,
         }
@@ -12061,6 +12215,11 @@ def _create_issue_agent_answer(
         token_usage=token_usage,
         response_attachments=selected_response_attachments,
         unresolved_response_attachments=unresolved_response_attachments,
+        covered_concern_ids=effective_covered_concern_ids,
+        covered_obligation_ids=effective_covered_obligation_ids,
+        composer_covered_concern_ids=draft.covered_concern_ids,
+        composer_covered_obligation_ids=draft.covered_obligation_ids,
+        coverage_source=coverage_source,
         existing_run=processing_run if reuse_processing_run else None,
     )
     _require_processing_claim(processing_run)
@@ -12118,8 +12277,11 @@ def _create_issue_agent_answer(
         "autoSendPolicy": auto_send_policy,
         "responseAttachments": list(selected_response_attachments),
         "unresolvedResponseAttachments": list(unresolved_response_attachments),
-        "coveredConcernIds": list(draft.covered_concern_ids),
-        "coveredObligationIds": list(draft.covered_obligation_ids),
+        "coveredConcernIds": list(effective_covered_concern_ids),
+        "coveredObligationIds": list(effective_covered_obligation_ids),
+        "composerCoveredConcernIds": list(draft.covered_concern_ids),
+        "composerCoveredObligationIds": list(draft.covered_obligation_ids),
+        "coverageSource": coverage_source,
         "composerRequiresHuman": draft.requires_human,
         "composerRequiresHumanReason": draft.requires_human_reason,
     }
@@ -12193,8 +12355,11 @@ def _create_issue_agent_answer(
         "draftBlockedReason": draft_blocked_reason,
         "responseAttachments": list(selected_response_attachments),
         "unresolvedResponseAttachments": list(unresolved_response_attachments),
-        "coveredConcernIds": list(draft.covered_concern_ids),
-        "coveredObligationIds": list(draft.covered_obligation_ids),
+        "coveredConcernIds": list(effective_covered_concern_ids),
+        "coveredObligationIds": list(effective_covered_obligation_ids),
+        "composerCoveredConcernIds": list(draft.covered_concern_ids),
+        "composerCoveredObligationIds": list(draft.covered_obligation_ids),
+        "coverageSource": coverage_source,
         "composerRequiresHuman": draft.requires_human,
         "composerRequiresHumanReason": draft.requires_human_reason,
     }

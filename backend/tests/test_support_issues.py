@@ -12641,6 +12641,158 @@ def test_agent_answer_usage_sink_patches_only_new_late_usage_after_bind(monkeypa
     assert [batch for batch, _kwargs in stored_usage] == [[initial_call], [late_call]]
 
 
+@pytest.mark.parametrize(
+    "gate",
+    [
+        {
+            "verified": False,
+            "status": "failed",
+            "answerSha256": grounding_text_sha256("answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"}
+            ],
+            "obligationAssessments": [
+                {"obligationId": "concern-new:obligation-1", "covered": True}
+            ],
+        },
+        {
+            "verified": True,
+            "status": "passed",
+            "answerSha256": grounding_text_sha256("answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"},
+                {"id": "concern-new:obligation-2", "concernId": "concern-new"},
+            ],
+            "obligationAssessments": [
+                {"obligationId": "concern-new:obligation-1", "covered": True}
+            ],
+        },
+        {
+            "verified": True,
+            "status": "passed",
+            "answerSha256": grounding_text_sha256("answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"}
+            ],
+            "obligationAssessments": [
+                {"obligationId": "concern-new:obligation-1", "covered": True},
+                {"obligationId": "concern-new:obligation-1", "covered": True},
+            ],
+        },
+        {
+            "verified": True,
+            "status": "passed",
+            "answerSha256": grounding_text_sha256("answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"},
+                {"id": "concern-malformed:obligation-1"},
+            ],
+            "obligationAssessments": [
+                {"obligationId": "concern-new:obligation-1", "covered": True}
+            ],
+        },
+        {
+            "verified": True,
+            "status": "passed",
+            "answerSha256": grounding_text_sha256("another answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"}
+            ],
+            "obligationAssessments": [
+                {
+                    "obligationId": "concern-new:obligation-1",
+                    "covered": True,
+                    "resolution": "answered",
+                }
+            ],
+        },
+        {
+            "verified": True,
+            "status": "passed",
+            "answerSha256": grounding_text_sha256("answer"),
+            "answerObligations": [
+                {"id": "concern-new:obligation-1", "concernId": "concern-new"}
+            ],
+            "obligationAssessments": [
+                {
+                    "obligationId": "concern-new:obligation-1",
+                    "covered": True,
+                    "resolution": "not_covered",
+                }
+            ],
+        },
+    ],
+)
+def test_effective_grounding_coverage_rejects_unverified_partial_or_duplicate_gate(
+    gate: dict,
+) -> None:
+    concerns, obligations, source = issues._effective_grounding_coverage(
+        grounding_gate=gate,
+        expected_answer_sha256=grounding_text_sha256("answer"),
+        composer_concern_ids=("concern-composer",),
+        composer_obligation_ids=("concern-composer:obligation-1",),
+    )
+
+    assert concerns == ("concern-composer",)
+    assert obligations == ("concern-composer:obligation-1",)
+    assert source == "composer"
+
+
+def test_effective_grounding_coverage_uses_none_without_any_valid_source() -> None:
+    concerns, obligations, source = issues._effective_grounding_coverage(
+        grounding_gate={},
+        expected_answer_sha256=grounding_text_sha256("answer"),
+        composer_concern_ids=(),
+        composer_obligation_ids=(),
+    )
+
+    assert concerns == ()
+    assert obligations == ()
+    assert source == "none"
+
+
+def test_record_agent_answer_ai_run_keeps_explicit_coverage_without_reply(
+    monkeypatch,
+) -> None:
+    posted: list[tuple[str, dict]] = []
+
+    def fake_post(path: str, data: dict) -> dict:
+        posted.append((path, data))
+        return data
+
+    monkeypatch.setattr(issues, "_post", fake_post)
+
+    run = issues._record_agent_answer_ai_run(
+        issue_id="issue-coverage",
+        issue={"id": "issue-coverage"},
+        tenant_id="tenant-1",
+        project_id="project-1",
+        author_email="agent@example.com",
+        question="Prepare a reply",
+        answer="Safe deterministic fallback.",
+        confidence="low",
+        articles=[],
+        reply=None,
+        approval_required=True,
+        generation_mode="deterministic_fallback",
+        covered_concern_ids=("concern-one", "concern-two"),
+        covered_obligation_ids=("concern-one:o1", "concern-two:o1"),
+        composer_covered_concern_ids=(),
+        composer_covered_obligation_ids=(),
+        coverage_source="grounding_gate",
+    )
+
+    assert posted[0][0] == "/api/collections/support_ai_runs/records"
+    assert run["metadata"]["coveredConcernIds"] == ["concern-one", "concern-two"]
+    assert run["metadata"]["coveredObligationIds"] == [
+        "concern-one:o1",
+        "concern-two:o1",
+    ]
+    assert run["metadata"]["composerCoveredConcernIds"] == []
+    assert run["metadata"]["composerCoveredObligationIds"] == []
+    assert run["metadata"]["coverageSource"] == "grounding_gate"
+
+
 def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_citation(monkeypatch):
     posted: list[tuple[str, dict]] = []
     updates: list[dict] = []
@@ -12724,6 +12876,30 @@ def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_cita
                 messages=issue["messages"],
             ),
             answer_sha256=grounding_text_sha256("We can fix this automatically."),
+            answer_obligations=(
+                {
+                    "id": "concern-api:obligation-1",
+                    "concernId": "concern-api",
+                    "question": "Can you fix this?",
+                },
+                {
+                    "id": "system:safety:example",
+                    "concernId": "system-safety",
+                    "question": "Apply the system policy.",
+                },
+            ),
+            obligation_assessments=(
+                {
+                    "obligationId": "concern-api:obligation-1",
+                    "covered": True,
+                    "resolution": "answered",
+                },
+                {
+                    "obligationId": "system:safety:example",
+                    "covered": True,
+                    "resolution": "answered",
+                },
+            ),
             claim_count=1,
             provider="test",
             model="grounding-model",
@@ -12760,6 +12936,13 @@ def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_cita
     assert outbound["metadata"]["autoSendRequested"] is True
     assert outbound["metadata"]["autoSendPolicy"] == "approval_not_required"
     assert outbound["metadata"]["groundingVerified"] is True
+    assert outbound["metadata"]["coveredConcernIds"] == ["concern-api"]
+    assert outbound["metadata"]["coveredObligationIds"] == [
+        "concern-api:obligation-1"
+    ]
+    assert outbound["metadata"]["composerCoveredConcernIds"] == []
+    assert outbound["metadata"]["composerCoveredObligationIds"] == []
+    assert outbound["metadata"]["coverageSource"] == "grounding_gate"
     assert outbound["metadata"]["groundingGate"]["claimCount"] == 1
     assert outbound["metadata"]["groundingGate"]["answerSha256"] == grounding_text_sha256(
         "We can fix this automatically."
@@ -12780,6 +12963,22 @@ def test_create_issue_agent_answer_can_queue_auto_send_with_high_confidence_cita
     assert ai_run["metadata"]["groundingGate"]["model"] == "grounding-model"
     assert ai_run["metadata"]["replyStatus"] == "queued"
     assert ai_run["metadata"]["knowledgeArticleIds"] == ["article1"]
+    assert ai_run["metadata"]["coveredConcernIds"] == ["concern-api"]
+    assert ai_run["metadata"]["coveredObligationIds"] == [
+        "concern-api:obligation-1"
+    ]
+    event = next(
+        data
+        for path, data in posted
+        if path == "/api/collections/support_issue_events/records"
+        and data["event_type"] == "agent_answer_prepared"
+    )
+    assert event["metadata"]["coveredConcernIds"] == ["concern-api"]
+    assert event["metadata"]["coveredObligationIds"] == [
+        "concern-api:obligation-1"
+    ]
+    assert result["coveredConcernIds"] == ["concern-api"]
+    assert result["coveredObligationIds"] == ["concern-api:obligation-1"]
     assert not any(path == "/api/collections/support_knowledge_gaps/records" for path, _data in posted)
     assert updates == [{"assigned_by": "automation", "assignee_email": "automation", "status": "ongoing"}]
 

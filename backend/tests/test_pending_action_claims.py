@@ -124,6 +124,104 @@ def test_pending_action_guard_blocks_completed_or_active_state_claims(answer: st
 @pytest.mark.parametrize(
     "answer",
     [
+        "We paused substantive discussion for MAT-2026-221.",
+        "We have stopped the substantive discussion for MAT-2026-221.",
+        "We've paused substantive discussion for MAT-2026-221.",
+        "We are pausing substantive discussion for MAT-2026-221.",
+        "We're pausing substantive discussion for MAT-2026-221.",
+        "We’ll pause substantive discussion for MAT-2026-221.",
+        "We are going to pause substantive discussion for MAT-2026-221.",
+        "We plan to stop substantive discussion for MAT-2026-221.",
+        "We intend to pause substantive discussion for MAT-2026-221.",
+        "We will need to pause substantive discussion for MAT-2026-221.",
+        "We definitely will pause substantive discussion for MAT-2026-221.",
+        "We will be pausing substantive discussion for MAT-2026-221.",
+        "We promise to pause substantive discussion for MAT-2026-221.",
+        "We commit to pausing substantive discussion for MAT-2026-221.",
+        "We expect to pause substantive discussion for MAT-2026-221.",
+        "We aim to stop substantive discussion for MAT-2026-221.",
+        "We agree to pause substantive discussion for MAT-2026-221.",
+        "We undertake to stop substantive discussion for MAT-2026-221.",
+        "We are scheduled to pause substantive discussion for MAT-2026-221.",
+        "Our legal team will pause substantive discussion for MAT-2026-221.",
+        "Our legal team is scheduled to pause substantive discussion for MAT-2026-221.",
+        "Our conflicts team is pausing substantive discussion for MAT-2026-221.",
+        "We did pause substantive discussion for MAT-2026-221.",
+        "Substantive discussion is paused while the conflict is reviewed.",
+        "Substantive discussion remains paused while the conflict is reviewed.",
+        "The substantive discussion has been stopped.",
+        "We will pause substantive discussion for MAT-2026-221.",
+        "We shall stop the substantive discussion for MAT-2026-221.",
+        "Substantive discussion will be paused while the conflict is reviewed.",
+        "Substantive discussions will be paused while the conflict is reviewed.",
+        "The substantive discussion shall be stopped.",
+    ],
+)
+def test_pending_action_guard_blocks_substantive_discussion_state_claims(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Substantive discussion will not be paused.",
+        "Substantive discussion is not paused.",
+        "We cannot confirm whether substantive discussion will be paused.",
+        "Once human approval is granted, substantive discussion will be paused.",
+        "We do not promise to pause substantive discussion.",
+        "We are not scheduled to pause substantive discussion.",
+        "We definitely will not pause substantive discussion.",
+        "Our legal team is not scheduled to pause substantive discussion.",
+        "We cannot commit to pausing substantive discussion.",
+        "If human approval is granted, we will be pausing substantive discussion.",
+        "Substantive discussion was paused by the client.",
+    ],
+)
+def test_pending_action_guard_allows_safe_substantive_discussion_states(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+
+
+def test_pending_action_repair_removes_live_substantive_discussion_promise() -> None:
+    answer = (
+        "We received the potential-conflict report. Substantive discussion for "
+        "MAT-2026-221 will be paused while the potential conflict is under review."
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert "will be paused" not in repaired
+    assert "We received the potential-conflict report." in repaired
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_guard_blocks_future_third_party_discussion_promise() -> None:
+    answer = "Substantive discussion will be paused by the client."
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "Refund issued.",
         "Order cancelled.",
         "Conflict escalated.",

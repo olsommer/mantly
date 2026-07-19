@@ -1655,11 +1655,12 @@ def test_action_state_repair_does_not_derive_notices_from_unmatched_concern() ->
     concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
     concern["matched"] = False
     concern["requiresHuman"] = True
-    concern["status"] = "requires_human"
+    concern["status"] = "unmatched"
     action = issue["actionExecutions"][0]
     action["type"] = "agent_triage"
     action["metadata"]["source"] = "agent_triage"
     action["metadata"].pop("concernId")
+    action["result"] = {}
 
     answer = "We have received your marketing opt-out request."
     repaired = issue_agent.repair_issue_automation_answer_action_state(
@@ -1670,6 +1671,116 @@ def test_action_state_repair_does_not_derive_notices_from_unmatched_concern() ->
 
     assert repaired == answer
     assert "Recording my marketing opt-out is not confirmed" not in repaired
+
+
+def test_action_state_repair_handles_exact_live_l08_unmatched_conflict() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Stop substantive discussion for MAT-2026-221.",
+            "Record the potential conflict for MAT-2026-221.",
+            "Escalate the potential conflict for review for MAT-2026-221.",
+        ]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["matched"] = False
+    concern["requiresHuman"] = True
+    concern["status"] = "unmatched"
+    action = issue["actionExecutions"][0]
+    action["type"] = "agent_triage"
+    action["metadata"]["source"] = "agent_triage"
+    action["metadata"].pop("concernId")
+    action["result"] = {}
+    answer = (
+        "Thank you for reporting the potential opposing-party conflict for MAT-2026-221. "
+        "We have received your report regarding Westbridge SA.This matter requires human "
+        "review. Substantive discussion for MAT-2026-221 will be paused while the "
+        "potential conflict is under review."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Stop substantive discussion, record the potential conflict, and "
+                    "escalate it for review."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Westbridge SA. This matter" in repaired
+    assert "will be paused" not in repaired
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+    assert "Recording the potential conflict" not in repaired
+    assert "Escalating the potential conflict" not in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_action_state_repair_removes_live_e09_assess_fragment() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm SLA compensation."],
+    )
+    answer = (
+        "To assess SLA compensation. We cannot confirm these actions until a human "
+        "operations review has been completed."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm SLA compensation.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "To assess SLA compensation" not in repaired
+    assert "We cannot confirm these actions" in repaired
+    assert (
+        "SLA compensation is not confirmed. A related next step for your request "
+        "remains pending human review."
+    ) in repaired
+
+
+def test_action_repair_spacing_cleanup_handles_uppercase_company_suffix() -> None:
+    answer = "We received the report regarding Westbridge SA.This matter requires review."
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == "We received the report regarding Westbridge SA. This matter requires review."
+
+
+def test_action_repair_spacing_cleanup_preserves_dotted_identifier() -> None:
+    answer = "Reference ABC.DEF remains pending."
+
+    assert issue_agent._clean_action_repair_artifacts(answer, language="en") == answer
+
+
+def test_action_repair_spacing_cleanup_preserves_url_path() -> None:
+    answer = "The https://example.test/ABC.This page and /files/AG.This item are relevant."
+
+    assert issue_agent._clean_action_repair_artifacts(answer, language="en") == answer
+
+
+def test_action_repair_spacing_cleanup_preserves_company_suffix_url_path() -> None:
+    answer = "See https://example.test/SA.This and /files/AG.This for the records."
+
+    assert issue_agent._clean_action_repair_artifacts(answer, language="en") == answer
+
+
+def test_action_repair_removes_assess_fragment_with_embedded_predicate() -> None:
+    answer = "To assess SLA compensation is part of the review."
+
+    assert issue_agent._clean_action_repair_artifacts(answer, language="en") == ""
 
 
 def test_action_state_repair_handles_exact_live_l03_without_action_snapshot() -> None:

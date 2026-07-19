@@ -10,6 +10,8 @@ immediate guidance in the required reply language:
   unstable item. Keep it away from heat and flammable materials only if safe.
 - Do not ship, return, or otherwise transport it until a human provides confirmed
   hazardous-goods instructions.
+- Use only order details, packaging details, and photos already available. Do not
+  touch, move, open, or otherwise handle the item to collect new evidence.
 - If smoke, fire, or unusual heat is present or develops, move away and contact
   local emergency services or the local fire authority.
 

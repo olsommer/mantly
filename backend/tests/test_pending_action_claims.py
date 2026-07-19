@@ -1143,6 +1143,78 @@ def test_pending_action_guard_allows_multilingual_negative_or_conditional_claims
 @pytest.mark.parametrize(
     "answer",
     [
+        "Changing the address for ZF-20991 is not confirmed.",
+        "Confirming the carrier redirect remains pending approval.",
+        "Opening the warehouse ticket is still unconfirmed.",
+        "Opening the warehouse ticket remains pending review.",
+        "Opening the warehouse ticket is pending confirmation.",
+        "Changing the address is currently pending human approval.",
+    ],
+)
+def test_pending_action_guard_allows_action_subject_with_explicit_negative_state(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Changing the address is not confirmed, but we will change it tomorrow.",
+        "Opening the ticket remains pending approval; we have opened the escalation.",
+    ],
+)
+def test_explicit_negative_state_does_not_hide_later_positive_action_claim(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Opening the warehouse ticket remains pending, then we will do it tomorrow.",
+        "Opening the warehouse ticket remains pending and will happen tomorrow.",
+        "Opening the warehouse ticket remains pending with completion tomorrow.",
+        "Opening the warehouse ticket is not confirmed and we are doing so now.",
+    ],
+)
+def test_explicit_negative_action_state_requires_a_safe_terminal_tail(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We changed the address and the ticket is not confirmed.",
+        "We have changed the address and the request is not approved.",
+        "We opened the escalation and the address change remains pending.",
+        "The address was changed and the refund is not confirmed.",
+        "Address changed and the ticket remains pending.",
+        "We are changing the address and the ticket remains pending.",
+    ],
+)
+def test_unrelated_negative_state_does_not_exempt_a_completed_action(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "We will provide you with updates once the investigation is underway.",
         "We are initiating a warehouse verification.",
         ("Your request for a refund will be reviewed once the warehouse verification is complete."),

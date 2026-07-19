@@ -10603,6 +10603,15 @@ def _agent_answer_text(
     if issue_count > 1 or message_count > len(messages):
         lines.append(f"\nRelated conversation: {issue_count or 1} tickets, {message_count} messages.")
         conversation_messages = _parse(conversation.get("messages"), list)
+        if _string_from(conversation.get("source")).lower() in {"account", "contact"}:
+            current_issue_id = _string_from(issue.get("id"))
+            conversation_messages = [
+                message
+                for message in conversation_messages
+                if isinstance(message, dict)
+                and current_issue_id
+                and _string_from(message.get("issueId")) == current_issue_id
+            ]
         latest_related = next(
             (
                 message

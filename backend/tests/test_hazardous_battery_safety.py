@@ -332,6 +332,185 @@ def test_safety_guidance_checker_requires_every_immediate_policy_element() -> No
     }
 
 
+def test_safety_guidance_rejects_evidence_request_that_could_require_handling() -> None:
+    answer = _COMPLETE_GUIDANCE + " Please collect photos of the item and packaging."
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+def test_safety_guidance_allows_existing_evidence_without_handling_item() -> None:
+    answer = (
+        _COMPLETE_GUIDANCE
+        + " Keep any photos already taken, but do not handle or move the item to collect more evidence."
+    )
+
+    assert missing_lithium_battery_safety_guidance(answer) == ()
+
+
+@pytest.mark.parametrize(
+    "guidance_request",
+    [
+        "Do not handle the item; send existing photos and take additional photos from a distance.",
+        "Please snap pictures of the leaking item.",
+        "Bitte machen Sie Fotos von dem Artikel.",
+        "Veuillez prendre des photos de l’article.",
+        "Por favor, saque fotos del artículo.",
+        "Per favore, faccia delle foto dell’articolo.",
+        "Please inspect the battery and document the damage.",
+        "Do not inspect the battery, then take photos.",
+        "Do not inspect the battery and please take photos.",
+        "Do not handle the item and please send new photos.",
+        "Do not handle the item, then send additional pictures.",
+        "Without touching the item, send more photos.",
+        "Do not inspect the battery, and take photos.",
+        "Do not inspect the battery and now take photos.",
+        "Do not inspect the battery before you take photos.",
+        "Do not inspect the battery while you take photos.",
+        "Do not inspect the battery, please take photos.",
+        "Do not take photos of the battery, only photograph the packaging.",
+    ],
+)
+def test_safety_guidance_rejects_new_physical_evidence_collection(
+    guidance_request: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + guidance_request
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+@pytest.mark.parametrize(
+    "prohibition",
+    [
+        "Do not take new photos.",
+        "Do not take or collect any additional photos.",
+        "Please do not inspect the item or document the damage.",
+        "Do not send more photos.",
+        "Do not take, collect, or send any additional photos.",
+    ],
+)
+def test_safety_guidance_allows_explicit_evidence_collection_prohibition(
+    prohibition: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + prohibition
+
+    assert missing_lithium_battery_safety_guidance(answer) == ()
+
+
+@pytest.mark.parametrize(
+    "unsafe_request",
+    [
+        "Do not fail to take photos.",
+        "Do not forget to take photos.",
+        "Do not hesitate to take photos.",
+        "Do not avoid taking photos.",
+        "Do not stop to take photos.",
+        "Never skip taking photos.",
+        "Do not take photos unless requested by emergency services.",
+    ],
+)
+def test_safety_guidance_rejects_negated_or_weakened_photo_prohibition(
+    unsafe_request: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + unsafe_request
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+@pytest.mark.parametrize(
+    "prohibition",
+    [
+        "You should not take new photos.",
+        "It is not necessary to take photos.",
+    ],
+)
+def test_safety_guidance_allows_nonimperative_photo_prohibition(
+    prohibition: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + prohibition
+
+    assert missing_lithium_battery_safety_guidance(answer) == ()
+
+
+@pytest.mark.parametrize(
+    "unsafe_request",
+    [
+        "Do not inspect the battery, take photos instead.",
+        "Without moving the item photograph the damage.",
+        "Ne manipulez pas l’article, mais prenez de nouvelles photos.",
+        "No inspeccione el artículo: tome fotos en su lugar.",
+        "Non ispezioni l’articolo: scatti invece delle foto.",
+    ],
+)
+def test_safety_guidance_blocks_positive_evidence_after_unrelated_prohibition(
+    unsafe_request: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + unsafe_request
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+@pytest.mark.parametrize(
+    "unsafe_request",
+    [
+        "Please attach a photo of the damaged battery.",
+        "Please email us a photo of the damaged battery.",
+        "Please share a photo of the damaged battery.",
+        "Please record a video of the damaged battery.",
+        "Please shoot a photo of the damaged battery.",
+        "Ne manipulez pas l’article, envoyez des photos.",
+        "No toque el artículo, envíe fotos.",
+        "Non tocchi l’articolo, invii delle foto.",
+        "Berühren Sie den Artikel nicht, senden Sie Fotos.",
+        "Do not handle the item, send photos.",
+        "Do not handle the item: upload photos.",
+        "Do not handle the item but provide photos.",
+        "Do not inspect the battery - take photos instead.",
+        "Do not inspect the battery / take photos instead.",
+    ],
+)
+def test_safety_guidance_blocks_new_evidence_acquisition_and_transfer_variants(
+    unsafe_request: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + unsafe_request
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+@pytest.mark.parametrize(
+    "unsafe_request",
+    [
+        "Please photograph the existing damage.",
+        "Please take photos of the existing packaging.",
+        "Please inspect the existing battery condition.",
+    ],
+)
+def test_existing_item_state_is_not_existing_evidence(
+    unsafe_request: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + unsafe_request
+
+    assert "no_handling_to_collect_evidence" in missing_lithium_battery_safety_guidance(answer)
+
+
+@pytest.mark.parametrize(
+    "safe_instruction",
+    [
+        "Please send only existing photos.",
+        "Please send only photos already taken.",
+        "Senden Sie nur bereits aufgenommene Fotos.",
+        "Envíe solo fotos ya tomadas.",
+        "Invii solo foto già scattate.",
+        "Machen Sie keine neuen Fotos.",
+    ],
+)
+def test_safety_guidance_allows_existing_evidence_or_localized_prohibition(
+    safe_instruction: str,
+) -> None:
+    answer = _COMPLETE_GUIDANCE + " " + safe_instruction
+
+    assert missing_lithium_battery_safety_guidance(answer) == ()
+
+
 def test_plug_prohibition_does_not_replace_general_no_charging_guidance() -> None:
     answer = (
         "Stop handling and using the item. Do not plug it into this charger. "

@@ -438,11 +438,95 @@ _EMERGENCY_SPELLED_NUMBER_RE = re.compile(
     r"eins[ -]+eins[ -]+zwei|un[ -]+un[ -]+deux|"
     r"uno[ -]+uno[ -]+dos|uno[ -]+uno[ -]+due)\b"
 )
+_EVIDENCE_COLLECTION_RE = re.compile(
+    r"\b(?:attach\w*|collect\w*|email\w*|gather\w*|share\w*|"
+    r"tak(?:e|es|ing)|capture\w*|photograph\w*|record\w*|shoot\w*|snap\w*|"
+    r"inspect\w*|examin\w*|document\w*|provide\w*|send\w*|upload\w*|"
+    r"sammel\w*|aufnehm\w*|fotografier\w*|mach\w*|untersuch\w*|pruf\w*|"
+    r"dokumentier\w*|bereitstell\w*|send\w*|recueill\w*|rassembl\w*|pren\w*|envoy\w*|"
+    r"photographi\w*|inspect\w*|examin\w*|document\w*|fourn\w*|"
+    r"recopil\w*|reun\w*|tom\w*|saqu\w*|fotografi\w*|inspeccion\w*|envi\w*|"
+    r"examin\w*|document\w*|proporcion\w*|raccogli\w*|scatt\w*|facci\w*|"
+    r"fotograf\w*|ispezion\w*|esamin\w*|document\w*|forn\w*|invi\w*)\b"
+    r"[^.!?\n]{0,100}\b"
+    r"(?:evidence|proof|photos?|pictures?|images?|videos?|documents?|condition|damage|"
+    r"beweis\w*|fotos?|"
+    r"nachweis\w*|preuves?|photos?|documents?|pruebas?|fotos?|documentos?|"
+    r"prove|foto|documenti|zustand|schaden|etat|dommages?|estado|danos?|"
+    r"condizione|danni?)\b|"
+    r"\b(?:photos?|pictures?|images?|videos?|fotos?|preuves?|pruebas?|prove|foto)\b"
+    r"[^.!?\n]{0,80}\b(?:attach\w*|email\w*|share\w*|record\w*|shoot\w*|"
+    r"tak(?:e|es|ing)|capture\w*|snap\w*|send\w*|upload\w*|collect\w*|"
+    r"aufnehm\w*|mach\w*|pren\w*|envoy\w*|saqu\w*|tom\w*|envi\w*|"
+    r"scatt\w*|facci\w*|invi\w*)\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_COLLECTION_ACTIVITY_RE = re.compile(
+    r"\b(?:attach\w*|collect\w*|email\w*|gather\w*|share\w*|"
+    r"tak(?:e|es|ing)|capture\w*|photograph\w*|record\w*|shoot\w*|snap\w*|"
+    r"inspect\w*|examin\w*|document\w*|provide\w*|send\w*|upload\w*|"
+    r"sammel\w*|aufnehm\w*|fotografier\w*|mach\w*|untersuch\w*|pruf\w*|"
+    r"dokumentier\w*|bereitstell\w*|send\w*|recueill\w*|rassembl\w*|pren\w*|envoy\w*|"
+    r"photographi\w*|inspect\w*|examin\w*|document\w*|fourn\w*|"
+    r"recopil\w*|reun\w*|tom\w*|saqu\w*|fotografi\w*|inspeccion\w*|envi\w*|"
+    r"proporcion\w*|raccogli\w*|scatt\w*|facci\w*|fotograf\w*|"
+    r"ispezion\w*|esamin\w*|forn\w*|invi\w*)\b",
+    re.IGNORECASE,
+)
+_PHYSICAL_EVIDENCE_ACQUISITION_RE = re.compile(
+    r"\b(?:tak(?:e|es|ing)|capture\w*|photograph\w*|record\w*|shoot\w*|snap\w*|"
+    r"inspect\w*|examin\w*|"
+    r"document\w*|aufnehm\w*|fotografier\w*|mach\w*|untersuch\w*|pruf\w*|"
+    r"dokumentier\w*|pren\w*|photographi\w*|inspect\w*|examin\w*|"
+    r"document\w*|tom\w*|saqu\w*|fotografi\w*|inspeccion\w*|scatt\w*|"
+    r"facci\w*|fotograf\w*|ispezion\w*|esamin\w*)\b",
+    re.IGNORECASE,
+)
+_NEW_EVIDENCE_RE = re.compile(
+    r"\b(?:new|additional|more|further|extra|weitere?n?|zusatzlich\w*|"
+    r"nouvell\w*|supplementair\w*|d['’]autres|nuev\w*|adicional\w*|mas|"
+    r"nuov\w*|ulterior\w*|altr\w*)\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_DIRECTIVE_BOUNDARY_RE = re.compile(
+    r"(?:"
+    r",\s*(?:(?:and\s+)?(?:then|now)|(?:and\s+)?please|and|only)\s+|"
+    r"\s+(?:(?:and\s+)?(?:then|now)|and\s+please|before(?:\s+you)?|"
+    r"while(?:\s+you)?)\s+"
+    r")",
+    re.IGNORECASE,
+)
+_EVIDENCE_COLLECTION_PURPOSE_RE = re.compile(
+    r"\b(?:to|pour|para|per|um)\b",
+    re.IGNORECASE,
+)
+_EXISTING_EVIDENCE_RE = re.compile(
+    r"\b(?:existing|already\s+(?:available|taken|captured)|currently\s+available)\s+"
+    r"(?:evidence|proof|photos?|pictures?|images?|videos?|documents?)\b|"
+    r"\b(?:evidence|proof|photos?|pictures?|images?|videos?|documents?)\s+"
+    r"(?:already\s+(?:available|taken|captured)|currently\s+available)\b|"
+    r"\b(?:vorhanden\w*|bereits\s+(?:vorhanden\w*|aufgenommen\w*))\s+"
+    r"(?:beweis\w*|fotos?|nachweis\w*|dokument\w*)\b|"
+    r"\b(?:beweis\w*|fotos?|nachweis\w*|dokument\w*)\s+"
+    r"(?:bereits\s+(?:vorhanden\w*|aufgenommen\w*)|vorhanden\w*)\b|"
+    r"\b(?:existantes?|deja\s+disponibles?)\s+(?:preuves?|photos?|documents?)\b|"
+    r"\b(?:preuves?|photos?|documents?)\s+(?:deja\s+(?:disponibles?|prises?)|existantes?)\b|"
+    r"\b(?:existentes?|ya\s+disponibles?)\s+(?:pruebas?|fotos?|documentos?)\b|"
+    r"\b(?:pruebas?|fotos?|documentos?)\s+(?:ya\s+(?:disponibles?|tomadas?)|existentes?)\b|"
+    r"\b(?:esistenti|gia\s+disponibili)\s+(?:prove|foto|documenti)\b|"
+    r"\b(?:prove|foto|documenti)\s+(?:gia\s+(?:disponibili|scattate)|esistenti)\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_OBJECT_RE = re.compile(
+    r"\b(?:evidence|proof|photos?|pictures?|images?|videos?|documents?|beweis\w*|fotos?|"
+    r"nachweis\w*|preuves?|pruebas?|documentos?|prove|foto|documenti)\b",
+    re.IGNORECASE,
+)
 _GUIDANCE_CLAUSE_BOUNDARY_RE = re.compile(
     r"(?:[.!?;\n]+|,\s*(?:but|however|although|while|yet|aber|jedoch|"
     r"mais|cependant|pero|aunque|ma|tuttavia)\s+)"
 )
-_POST_VERB_NEGATION_RE = re.compile(r"^.{0,32}\b(?:pas|plus|jamais|nicht)\b")
+_POST_VERB_NEGATION_RE = re.compile(r"^.{0,32}\b(?:pas|plus|jamais|ni|nicht|kein\w*)\b")
 _POST_VERB_NEGATIVE_PREDICATE_RE = re.compile(
     r"^.{0,64}\b(?:is|are|was|were|seems?|remains?)\s+"
     r"(?:not|never)\s+(?:recommended|allowed|advisable|required|necessary|safe)\b"
@@ -453,13 +537,22 @@ _PROHIBITION_WEAKENER_RE = re.compile(
 )
 _NEGATED_PROHIBITION_PREFIX_RE = re.compile(
     r"\b(?:do[ -]?not|don't|must[ -]+not|cannot|can't|never)[ -]+"
-    r"(?:stop|cease|avoid|refrain|skip|fail)\b|"
+    r"(?:stop|cease|avoid|refrain|skip|fail|forget|hesitate)\b|"
     r"\bnot[ -]+(?:forbidden|prohibited|barred|disallowed)\b|"
     r"\bno[ -]+(?:ban|prohibition|restriction)\b|"
     r"\bhor\w*[^.!?;\n]{0,24}\bnicht[^.!?;\n]{0,24}\bauf\b|"
     r"\bne[ -]+cess\w*[^.!?;\n]{0,24}\bpas[ -]+de\b|"
     r"\bno[ -]+dej\w*[ -]+de\b|\bnon[ -]+smett\w*[ -]+di\b"
 )
+_EVIDENCE_NEGATIVE_PREDICATE_RE = re.compile(
+    r"(?:\b(?:should|need)[ -]+not|\bshouldn't|"
+    r"\bnot[ -]+(?:necessary|required)[ -]+to)\s*$"
+)
+_EVIDENCE_NEGATION_CONTRAST_RE = re.compile(
+    r"\b(?:but|yet|instead|however|mais|cependant|pero|sin[ -]+embargo|"
+    r"ma|tuttavia)\b"
+)
+_EVIDENCE_NEGATION_HARD_BOUNDARY_RE = re.compile(r"[:;—–]|\s[-/]\s")
 _POSITIVE_PERMISSION_RE = re.compile(
     r"\b(?:can|may|must|should|safe[ -]+to|okay[ -]+to|ok[ -]+to|continue|keep|resume|"
     r"go[ -]+ahead|feel[ -]+free[ -]+to|allow\w*|permit\w*|recommend\w*|"
@@ -538,26 +631,30 @@ def _verb_has_negative_directive_in_clause(
     clause: str,
     verb_re: re.Pattern[str],
 ) -> bool:
-    for verb in verb_re.finditer(clause):
-        before = clause[max(0, verb.start() - 100) : verb.start()]
-        after = clause[verb.end() : verb.end() + 72]
-        negative_matches = tuple(_NEGATIVE_DIRECTIVE_RE.finditer(before))
-        for negative in reversed(negative_matches):
-            scope = before[negative.end() :]
-            if _POSITIVE_SCOPE_BREAK_RE.search(scope):
-                continue
-            # French uses a split construction: "ne manipulez pas". Other
-            # supported languages place the prohibition before the verb.
-            if re.fullmatch(r"(?:ne|n['’])", negative.group(0)):
-                if _POST_VERB_NEGATION_RE.search(after):
-                    return True
-            else:
+    return any(_verb_match_has_negative_directive(clause, verb) for verb in verb_re.finditer(clause))
+
+
+def _verb_match_has_negative_directive(
+    clause: str,
+    verb: re.Match[str],
+) -> bool:
+    before = clause[max(0, verb.start() - 100) : verb.start()]
+    after = clause[verb.end() : verb.end() + 72]
+    negative_matches = tuple(_NEGATIVE_DIRECTIVE_RE.finditer(before))
+    for negative in reversed(negative_matches):
+        scope = before[negative.end() :]
+        if _POSITIVE_SCOPE_BREAK_RE.search(scope):
+            continue
+        # French uses a split construction: "ne manipulez pas". Other
+        # supported languages place the prohibition before the verb.
+        if re.fullmatch(r"(?:ne|n['’])", negative.group(0)):
+            if _POST_VERB_NEGATION_RE.search(after):
                 return True
-        if re.search(r"\bnicht\b", after):
+        else:
             return True
-        if _POST_VERB_NEGATIVE_PREDICATE_RE.search(after):
-            return True
-    return False
+    if re.search(r"\b(?:nicht|kein\w*)\b", after):
+        return True
+    return bool(_POST_VERB_NEGATIVE_PREDICATE_RE.search(after))
 
 
 def _activity_is_prohibited(text: str, verb_re: re.Pattern[str]) -> bool:
@@ -692,6 +789,98 @@ def _has_jurisdiction_specific_emergency_number(text: str) -> bool:
     )
 
 
+def _has_unsafe_evidence_collection_request(text: str) -> bool:
+    """Reject evidence requests that could make a customer handle the item."""
+
+    clauses = tuple(
+        part.strip()
+        for clause in _guidance_clauses(text)
+        for part in _EVIDENCE_DIRECTIVE_BOUNDARY_RE.split(clause)
+        if part.strip()
+    )
+    for index, clause in enumerate(clauses):
+        collection_request = _EVIDENCE_COLLECTION_RE.search(clause)
+        physical_matches = tuple(_PHYSICAL_EVIDENCE_ACQUISITION_RE.finditer(clause))
+        if collection_request is None and not physical_matches:
+            continue
+        activity_matches = tuple(_EVIDENCE_COLLECTION_ACTIVITY_RE.finditer(clause))
+        if activity_matches and all(
+            _evidence_activity_match_is_prohibited(clause, activity) for activity in activity_matches
+        ):
+            continue
+        if _NEW_EVIDENCE_RE.search(clause):
+            if _activity_is_prohibited(clause, _HANDLING_RE) and _EVIDENCE_COLLECTION_PURPOSE_RE.search(clause):
+                continue
+            return True
+        if (
+            any(not _evidence_activity_match_is_prohibited(clause, activity) for activity in physical_matches)
+            and _EXISTING_EVIDENCE_RE.search(clause) is None
+        ):
+            return True
+        if _EXISTING_EVIDENCE_RE.search(clause) and _activity_is_prohibited(text, _HANDLING_RE):
+            continue
+        window = clauses[max(0, index - 1) : min(len(clauses), index + 2)]
+        if any(
+            _EXISTING_EVIDENCE_RE.search(item) and _verb_has_negative_directive_in_clause(item, _HANDLING_RE)
+            for item in window
+        ):
+            continue
+        combined = " ".join(window)
+        if _EXISTING_EVIDENCE_RE.search(combined) and _activity_is_prohibited(combined, _HANDLING_RE):
+            continue
+        return True
+    return False
+
+
+def _shipping_guidance_without_existing_evidence_transfers(text: str) -> str:
+    """Exclude photo-file transfers from hazardous-item shipping grammar."""
+
+    return ". ".join(
+        clause
+        for clause in _guidance_clauses(text)
+        if not (
+            _EXISTING_EVIDENCE_RE.search(clause)
+            and _EVIDENCE_OBJECT_RE.search(clause)
+            and _ITEM_REFERENCE_RE.search(clause) is None
+        )
+    )
+
+
+def _evidence_activity_match_is_prohibited(
+    clause: str,
+    activity: re.Match[str],
+) -> bool:
+    """Resolve negation for one evidence verb without leaking across a comma."""
+
+    before = clause[max(0, activity.start() - 100) : activity.start()]
+    if _EVIDENCE_NEGATIVE_PREDICATE_RE.search(before):
+        return True
+    if _PROHIBITION_WEAKENER_RE.search(clause) or _has_negated_prohibition(clause, _EVIDENCE_COLLECTION_ACTIVITY_RE):
+        return False
+    if not _verb_match_has_negative_directive(clause, activity):
+        return False
+    negative_matches = tuple(_NEGATIVE_DIRECTIVE_RE.finditer(before))
+    if not negative_matches:
+        return True
+    negative = negative_matches[-1]
+    scope = before[negative.end() :]
+    if negative.group(0).casefold() == "without" and _HANDLING_RE.search(scope):
+        return False
+    if _EVIDENCE_NEGATION_CONTRAST_RE.search(scope) or _EVIDENCE_NEGATION_HARD_BOUNDARY_RE.search(scope):
+        return False
+    if "," in scope:
+        before_comma, after_comma = scope.rsplit(",", 1)
+        prior_activities = tuple(_EVIDENCE_COLLECTION_ACTIVITY_RE.finditer(before_comma.rstrip()))
+        coordinated_list = bool(
+            prior_activities
+            and prior_activities[-1].end() == len(before_comma.rstrip())
+            and re.fullmatch(r"\s*(?:(?:or|nor)\s*)?", after_comma)
+        )
+        if not coordinated_list:
+            return False
+    return True
+
+
 def lithium_battery_reply_safety_blocked_reason(
     *,
     subject: str,
@@ -733,6 +922,8 @@ def missing_lithium_battery_safety_guidance(answer: str) -> tuple[str, ...]:
         missing.append("smoke_fire_heat_emergency_direction")
     if _has_jurisdiction_specific_emergency_number(text):
         missing.append("jurisdiction_specific_emergency_number")
+    if _has_unsafe_evidence_collection_request(text):
+        missing.append("no_handling_to_collect_evidence")
     if (
         _has_unsafe_positive_isolation(text)
         or _has_unsafe_positive_placement(text)
@@ -750,10 +941,11 @@ def missing_lithium_battery_safety_guidance(answer: str) -> tuple[str, ...]:
         for verb_re in (_HANDLING_RE, _USE_RE, _CHARGE_ACTIVITY_RE)
     ):
         missing.append("contradictory_handling_using_or_charging_guidance")
+    shipping_guidance = _shipping_guidance_without_existing_evidence_transfers(text)
     if any(
-        _has_positive_guidance(text, verb_re)
-        or _has_weakened_prohibition(text, verb_re)
-        or _has_negated_prohibition(text, verb_re)
+        _has_positive_guidance(shipping_guidance, verb_re)
+        or _has_weakened_prohibition(shipping_guidance, verb_re)
+        or _has_negated_prohibition(shipping_guidance, verb_re)
         for verb_re in (_SHIP_RE, _RETURN_RE)
     ):
         missing.append("contradictory_shipping_or_return_guidance")

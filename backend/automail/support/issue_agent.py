@@ -53,9 +53,12 @@ AUTOMATION_AGENT_DEADLINE_SECONDS = 55
 AUTOMATION_AGENT_SLOT_WAIT_SECONDS = 40
 _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
-GROUNDING_AGENT_DEADLINE_SECONDS = 40
-GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_MODEL_CALL_LIMIT = 2
+GROUNDING_MODEL_CALL_TIMEOUT_SECONDS = 30
+# A protocol-complete second pass is intentionally allowed. The parent future
+# must therefore outlive two provider calls plus bounded orchestration overhead.
+GROUNDING_AGENT_DEADLINE_SECONDS = 70
+GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_GATE_VERSION = "automation-grounding-v7"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
@@ -2008,11 +2011,31 @@ def _scoped_grounding_ticket_evidence(
 def _automatic_conversation_context(
     conversation_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Keep related-ticket state while excluding the current ticket's queue transition."""
+    """Keep true-thread context without treating account history as a thread."""
     conversation = _conversation_context(conversation_context)
     if not conversation:
         return {}
     current_issue_id = _string_from(conversation.get("currentIssueId"))
+    broad_history_fallback = _string_from(conversation.get("source")).lower() in {
+        "account",
+        "contact",
+    }
+    tickets = [
+        item
+        for item in conversation.get("tickets", [])
+        if isinstance(item, dict)
+        and (not broad_history_fallback or (current_issue_id and _string_from(item.get("id")) == current_issue_id))
+    ]
+    messages = [
+        message
+        for message in conversation.get("messages", [])
+        if isinstance(message, dict)
+        and _string_from(message.get("direction")).lower() in {"customer", "email", "visitor", "user"}
+        and (
+            not broad_history_fallback
+            or (current_issue_id and _string_from(message.get("issueId")) == current_issue_id)
+        )
+    ]
     return {
         "key": conversation.get("key", ""),
         "source": conversation.get("source", ""),
@@ -2035,16 +2058,103 @@ def _automatic_conversation_context(
                     }
                 ),
             }
-            for item in conversation.get("tickets", [])
-            if isinstance(item, dict)
+            for item in tickets
         ],
-        "messages": [
-            message
-            for message in conversation.get("messages", [])
-            if isinstance(message, dict)
-            and _string_from(message.get("direction")).lower() in {"customer", "email", "visitor", "user"}
-        ],
+        "messages": messages,
     }
+
+
+def _automatic_account_context(
+    account_context: dict[str, Any] | None,
+    *,
+    issue_id: str = "",
+    conversation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose bounded account facts without leaking unrelated ticket prose.
+
+    Account rollups can contain free-text signals copied from every ticket in an
+    account. Those signals are useful for internal prioritization, but feeding an
+    unrelated ``bodyPreview`` to the customer composer can merge one customer's
+    incident into another reply. Keep scalar rollups and CRM freshness, and keep
+    signal prose only when its source is the current ticket. Conversation
+    summaries can be grouped by account or contact and are not an authority to
+    expose another ticket's free text.
+    """
+
+    account = _record_from(account_context)
+    if not account:
+        return {}
+
+    del conversation_context
+    allowed_issue_ids = {clean_id for value in (issue_id,) if (clean_id := _string_from(value))}
+
+    safe: dict[str, Any] = {}
+    for key in ("accountId", "id", "name", "domain"):
+        if value := _string_from(account.get(key)):
+            safe[key] = value[:500]
+
+    health = _record_from(account.get("health"))
+    safe_health: dict[str, Any] = {}
+    for key in (
+        "status",
+        "failedExternalSyncRuns",
+        "highPriorityIssues",
+        "lastSignalAt",
+        "openFeatureRequests",
+        "openIssues",
+        "openRisks",
+        "unresolvedSignals",
+        "urgentIssues",
+    ):
+        value = health.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_health[key] = value
+    if safe_health:
+        safe["health"] = safe_health
+
+    insight_summary = _record_from(account.get("insightSummary"))
+    safe_summary: dict[str, Any] = {}
+    for key in ("lastInsightAt", "openFeatureRequests", "openRisks", "total", "unresolved"):
+        value = insight_summary.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_summary[key] = value
+    if safe_summary:
+        safe["insightSummary"] = safe_summary
+
+    crm = _record_from(account.get("crm"))
+    safe_crm: dict[str, Any] = {}
+    for key in ("externalRecordCount", "latestSyncAt", "latestSyncStatus"):
+        value = crm.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_crm[key] = value
+    providers = (
+        [provider[:120] for value in crm.get("providers", [])[:20] if (provider := _string_from(value))]
+        if isinstance(crm.get("providers"), list)
+        else []
+    )
+    if providers:
+        safe_crm["providers"] = providers
+    if safe_crm:
+        safe["crm"] = safe_crm
+
+    related_signals: list[dict[str, Any]] = []
+    raw_signals = account.get("openSignals")
+    if isinstance(raw_signals, list) and allowed_issue_ids:
+        for raw_signal in raw_signals[:100]:
+            signal = _record_from(raw_signal)
+            source_issue_id = _string_from(signal.get("sourceIssueId"))
+            if not source_issue_id or source_issue_id not in allowed_issue_ids:
+                continue
+            clean_signal: dict[str, Any] = {"sourceIssueId": source_issue_id}
+            for key in ("id", "title", "type", "severity", "status", "lastSeenAt", "bodyPreview"):
+                if value := _string_from(signal.get(key)):
+                    clean_signal[key] = value[:1_000]
+            related_signals.append(clean_signal)
+            if len(related_signals) >= 20:
+                break
+    if related_signals:
+        safe["openSignals"] = related_signals
+    return safe
 
 
 def _clean_answer(
@@ -2471,6 +2581,167 @@ def _pending_action_obligation_notices(
     return tuple(notices)
 
 
+_ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE = re.compile(
+    r"^to\s+(?:confirm|verify|check|review|process|update|escalate|investigate|"
+    r"open|submit|arrange|schedule)\b[^,;:!?]{0,180}[.!?]*$",
+    re.IGNORECASE,
+)
+_ENGLISH_DEPENDENT_ACTION_FRAGMENT_START_RE = re.compile(
+    r"To\s+(?:confirm|verify|check|review|process|update|escalate|investigate|"
+    r"open|submit|arrange|schedule)\b",
+)
+_ACTION_REPAIR_NONTERMINAL_ABBREVIATIONS = frozenset(
+    {
+        "a.g",
+        "co",
+        "corp",
+        "dr",
+        "e.k",
+        "e.v",
+        "inc",
+        "jr",
+        "ltd",
+        "mr",
+        "mrs",
+        "ms",
+        "prof",
+        "sr",
+        "u.s",
+        "u.s.a",
+    }
+)
+
+
+_ENGLISH_FINITE_PREDICATE_RE = re.compile(
+    r"\b(?:am|are|is|was|were|can|cannot|can't|could|do|does|did|have|has|had|"
+    r"applies|continues|covers|ends|happens|includes|may|might|must|need|needs|"
+    r"occurs|remain|remains|require|requires|serves|shall|should|starts|will|"
+    r"would)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_LIKELY_SENTENCE_OPENER_RE = re.compile(r"(?:A|An|I|It|Our|That|The|These|They|This|Those|We|You|Your)\b")
+_ENGLISH_PROCESS_FRAGMENT_SUFFIX_RE = re.compile(
+    r"(?:^|(?<=[.!?])[ \t]+)"
+    r"(?P<fragment>[A-Za-z][^.!?\n]{0,180}\bas part of (?:this|the) process\b[.!?]*)",
+    re.IGNORECASE,
+)
+
+
+def _dependent_action_fragment_end(text: str, start: int) -> int | None:
+    """Find one fragment end without treating initials as sentence breaks."""
+
+    limit = min(len(text), start + 240)
+    index = start
+    while index < limit:
+        character = text[index]
+        if character == "\n":
+            return index
+        if character not in ".!?":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and text[end] in ".!?":
+            end += 1
+        if end >= len(text) or text[end] == "\n":
+            return end
+        next_index = end
+        while next_index < len(text) and text[next_index] in " \t":
+            next_index += 1
+        has_space = next_index > end
+        if next_index >= len(text) or text[next_index] == "\n":
+            return end
+        if character in "!?":
+            return end
+        if not has_space:
+            continues_initialism = (
+                text[next_index].isupper() and next_index + 1 < len(text) and text[next_index + 1] == "."
+            )
+            if text[next_index].isupper() and not continues_initialism:
+                return end
+            index = end
+            continue
+        if not text[next_index].isupper():
+            index = end
+            continue
+
+        token_match = re.search(r"([A-Za-z]+(?:\.[A-Za-z]+)*)$", text[:index])
+        token = token_match.group(1).casefold() if token_match else ""
+        token_is_abbreviation = token in _ACTION_REPAIR_NONTERMINAL_ABBREVIATIONS or "." in token
+        if token_is_abbreviation:
+            following = text[next_index : min(len(text), next_index + 180)]
+            if _ENGLISH_LIKELY_SENTENCE_OPENER_RE.match(following) and _ENGLISH_FINITE_PREDICATE_RE.search(following):
+                return end
+            index = end
+            continue
+        return end
+    return None
+
+
+def _dependent_action_fragment_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for match in _ENGLISH_DEPENDENT_ACTION_FRAGMENT_START_RE.finditer(text):
+        start = match.start()
+        if start:
+            if not text[start - 1].isspace():
+                continue
+            prefix = text[:start].rstrip(" \t")
+            if prefix and prefix[-1] not in ".!?\n":
+                continue
+        end = _dependent_action_fragment_end(text, start)
+        if end is None:
+            continue
+        if _ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE.fullmatch(text[start:end].strip()):
+            spans.append((start, end))
+    return tuple(spans)
+
+
+def _clean_action_repair_artifacts(answer: str, *, language: str) -> str:
+    """Remove bounded dependent fragments and restore sentence separators.
+
+    Action repair can retain a safe local clause after deleting an unsafe claim.
+    A retained infinitive or noun fragment is not independently customer-ready,
+    even though it is harmless to the action-state guard. Keep this cleanup
+    intentionally narrow and English-only; grounding remains authoritative.
+    """
+
+    cleaned = answer.strip()
+    if language == "en" and cleaned:
+        cursor = 0
+        parts: list[str] = []
+        for start, end in _dependent_action_fragment_spans(cleaned):
+            parts.append(cleaned[cursor:start])
+            cursor = end
+        if parts:
+            parts.append(cleaned[cursor:])
+            cleaned = "".join(parts).strip()
+        cursor = 0
+        parts = []
+        for process_fragment in _ENGLISH_PROCESS_FRAGMENT_SUFFIX_RE.finditer(cleaned):
+            if _ENGLISH_FINITE_PREDICATE_RE.search(process_fragment.group("fragment")):
+                continue
+            parts.append(cleaned[cursor : process_fragment.start()])
+            cursor = process_fragment.end()
+        if parts:
+            parts.append(cleaned[cursor:])
+            cleaned = "".join(parts).strip()
+
+    cleaned = re.sub(
+        r"(\b[a-z]{2,}|\d+)([.!?])(?=[A-ZÀ-ÖØ-Þ])",
+        r"\1\2 ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"((?:\b[A-Za-z]\.){2,})(?=[A-Z][a-z])",
+        r"\1 ",
+        cleaned,
+    )
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n[ \t]+\n", "\n\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned.strip()
+
+
 def repair_issue_automation_answer_action_state(
     *,
     issue: dict[str, Any],
@@ -2509,15 +2780,37 @@ def repair_issue_automation_answer_action_state(
         tool_evidence=_automatic_tool_evidence_records(ticket),
         repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
     )
+    repaired = _clean_action_repair_artifacts(repaired, language=language)
     notices = _pending_action_obligation_notices(
         ticket=ticket,
         answer=repaired,
         language=language,
     )
-    if not notices:
-        return repaired
     clean_answer = repaired.rstrip()
-    return "\n\n".join((clean_answer, *notices)) if clean_answer else "\n\n".join(notices)
+    candidate = (
+        "\n\n".join((clean_answer, *notices))
+        if notices and clean_answer
+        else "\n\n".join(notices)
+        if notices
+        else clean_answer
+    )
+    candidate = _clean_action_repair_artifacts(candidate, language=language)
+    # Notices are derived after the first repair pass, so make the exact final
+    # customer text pass the same deterministic guard before grounding sees it.
+    final_check = check_pending_action_claims(
+        answer=candidate,
+        runbook_actions=guard_actions,
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+    )
+    if not final_check.blocked:
+        return candidate
+    final_repair = repair_pending_action_claims(
+        answer=candidate,
+        runbook_actions=guard_actions,
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+        repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
+    )
+    return _clean_action_repair_artifacts(final_repair, language=language)
 
 
 def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:
@@ -2654,12 +2947,17 @@ def grounding_context_snapshots(
     global_ticket_evidence = _global_grounding_ticket_evidence(ticket)
     scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket)
     conversation = _automatic_conversation_context(conversation_context)
+    account = _automatic_account_context(
+        account_context,
+        issue_id=_string_from(issue.get("id")),
+        conversation_context=conversation_context,
+    )
 
     payloads: list[tuple[str, Any]] = [
         ("ticket", global_ticket_evidence),
         ("ticket:scoped", scoped_ticket_evidence),
         ("messages", _automatic_message_context(messages)),
-        ("account", _record_from(account_context)),
+        ("account", account),
         ("conversation", conversation),
     ]
     snapshots: list[dict[str, Any]] = []
@@ -2810,8 +3108,12 @@ def draft_issue_agent_answer(
                 safety_assessment,
             ),
             messages=_message_context(messages),
-            account=_record_from(account_context),
-            conversation=_conversation_context(conversation_context),
+            account=_automatic_account_context(
+                account_context,
+                issue_id=_string_from(issue.get("id")),
+                conversation_context=conversation_context,
+            ),
+            conversation=_automatic_conversation_context(conversation_context),
             prior_agent_answers=_agent_chat_context(prior_agent_runs),
             question=clean_question,
             articles=articles,
@@ -3058,7 +3360,13 @@ def draft_issue_automation_answer(
         )
         user_prompt = _AUTOMATION_USER_TEMPLATE.format(
             ticket=_json(ticket_context),
-            account_intelligence=_json(_record_from(account_context)),
+            account_intelligence=_json(
+                _automatic_account_context(
+                    account_context,
+                    issue_id=_string_from(issue.get("id")),
+                    conversation_context=conversation_context,
+                )
+            ),
             conversation_context=_json(_automatic_conversation_context(conversation_context)),
             messages=_json(_automatic_message_context(messages)),
             reply_language=reply_language_name,
@@ -3534,13 +3842,22 @@ def assess_issue_automation_grounding(
         model = _string_from(
             getattr(config, "llm_custom_model", "") if provider == "custom" else getattr(config, "llm_model", "")
         )
-        llm = create_llm(config, timeout=30, max_retries=0, temperature=0)
+        llm = create_llm(
+            config,
+            timeout=GROUNDING_MODEL_CALL_TIMEOUT_SECONDS,
+            max_retries=0,
+            temperature=0,
+        )
         usage_context = getattr(llm, "_mantly_usage_context", None)
         if isinstance(usage_context, dict):
             provider = _string_from(usage_context.get("provider")) or provider
             model = _string_from(usage_context.get("model")) or model
         message_evidence = _automatic_message_context(messages)
-        account_evidence = _record_from(account_context)
+        account_evidence = _automatic_account_context(
+            account_context,
+            issue_id=_string_from(issue.get("id")),
+            conversation_context=conversation_context,
+        )
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]
         if safety_assessment.active:

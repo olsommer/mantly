@@ -860,6 +860,181 @@ def test_automation_draft_uses_structured_selected_citations(
     assert captured["config"]["recursion_limit"] == 6
 
 
+def test_automatic_account_context_excludes_unrelated_ticket_signal_text() -> None:
+    context = issue_agent._automatic_account_context(
+        {
+            "accountId": "account-1",
+            "name": "Example Co",
+            "health": {
+                "status": "at_risk",
+                "reason": "A different customer reported a leaking battery.",
+                "urgentIssues": 2,
+            },
+            "insightSummary": {
+                "openRisks": 2,
+                "risks": ["Leaking lithium battery on unrelated order"],
+            },
+            "openSignals": [
+                {
+                    "id": "signal-current",
+                    "sourceIssueId": "issue-current",
+                    "title": "Current shipment delay",
+                    "bodyPreview": "The current shipment is delayed.",
+                },
+                {
+                    "id": "signal-unrelated",
+                    "sourceIssueId": "issue-other",
+                    "title": "Urgent leaking battery",
+                    "bodyPreview": "A lithium battery is leaking and getting hot.",
+                },
+            ],
+        },
+        issue_id="issue-current",
+        conversation_context={
+            "source": "account",
+            "ticketIds": ["issue-current", "issue-other"],
+            "tickets": [
+                {"id": "issue-current"},
+                {"id": "issue-other"},
+            ],
+        },
+    )
+
+    rendered = issue_agent._json(context)
+    assert context["health"] == {"status": "at_risk", "urgentIssues": 2}
+    assert context["insightSummary"] == {"openRisks": 2}
+    assert [signal["id"] for signal in context["openSignals"]] == ["signal-current"]
+    assert "leaking battery" not in rendered.lower()
+    assert "issue-other" not in rendered
+
+
+def test_automatic_conversation_context_isolates_account_and_contact_history() -> None:
+    for source in ("account", "contact"):
+        context = issue_agent._automatic_conversation_context(
+            {
+                "key": f"{source}:example",
+                "source": source,
+                "currentIssueId": "issue-current",
+                "tickets": [
+                    {"id": "issue-current", "subject": "Current shipment"},
+                    {"id": "issue-other", "subject": "Old battery incident"},
+                ],
+                "messages": [
+                    {
+                        "issueId": "issue-current",
+                        "direction": "customer",
+                        "body": "Where is my shipment?",
+                    },
+                    {
+                        "issueId": "issue-other",
+                        "direction": "customer",
+                        "body": "A lithium battery is leaking and hot.",
+                    },
+                ],
+            }
+        )
+
+        rendered = issue_agent._json(context)
+        assert [ticket["id"] for ticket in context["tickets"]] == ["issue-current"]
+        assert [message["issueId"] for message in context["messages"]] == ["issue-current"]
+        assert "battery" not in rendered.lower()
+        assert "issue-other" not in rendered
+
+
+def test_deterministic_fallback_excludes_broad_conversation_ticket_prose() -> None:
+    answer = issues._agent_answer_text(
+        issue={"id": "issue-current", "subject": "Shipment status"},
+        messages=[
+            {
+                "issueId": "issue-current",
+                "direction": "customer",
+                "body": "Where is my shipment?",
+            }
+        ],
+        question="Prepare a reply.",
+        articles=[],
+        prior_agent_runs=[],
+        conversation_context={
+            "source": "account",
+            "issueCount": 2,
+            "messageCount": 2,
+            "messages": [
+                {
+                    "issueId": "issue-current",
+                    "direction": "customer",
+                    "body": "Where is my shipment?",
+                },
+                {
+                    "issueId": "issue-other",
+                    "direction": "customer",
+                    "body": "A lithium battery is leaking and hot.",
+                },
+            ],
+        },
+    )
+
+    assert "leaking" not in answer.lower()
+    assert "battery" not in answer.lower()
+
+
+def test_automation_prompt_does_not_receive_unrelated_account_signal_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(llm_module, "resolve_effective_config", lambda config, _tenant, _project: config)
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer="Your shipment is in transit.",
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue={"id": "issue-current", "subject": "Shipment status"},
+        messages=[{"direction": "customer", "body": "Where is my shipment?"}],
+        question="Prepare the shipment-status answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+        account_context={
+            "accountId": "account-1",
+            "openSignals": [
+                {
+                    "id": "signal-old",
+                    "sourceIssueId": "issue-other",
+                    "bodyPreview": "An older parcel has a leaking lithium battery and is hot.",
+                }
+            ],
+        },
+        conversation_context={"currentIssueId": "issue-current", "ticketIds": ["issue-current"]},
+    )
+
+    assert result.answer == "Your shipment is in transit."
+    assert len(prompts) == 1
+    assert "leaking lithium battery" not in prompts[0].lower()
+    assert "issue-other" not in prompts[0]
+
+
+def test_grounding_parent_deadline_covers_every_allowed_model_call() -> None:
+    assert issue_agent.GROUNDING_AGENT_DEADLINE_SECONDS >= (
+        issue_agent.GROUNDING_MODEL_CALL_LIMIT * issue_agent.GROUNDING_MODEL_CALL_TIMEOUT_SECONDS + 5
+    )
+
+
 def test_automation_draft_retries_once_in_latest_customer_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1134,6 +1309,130 @@ def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> No
         "request remains pending human review."
     )
     assert "Inventory and dispatch is not confirmed" not in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
+
+
+def test_action_state_repair_removes_dependent_fragments_and_restores_spacing() -> None:
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation."])
+    answer = (
+        "The standard fee is CHF 250.We have opened the executive escalation. "
+        "To confirm the invoice details. SLA compensation as part of this process."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
+        answer=answer,
+    )
+
+    assert "The standard fee is CHF 250." in repaired
+    assert "250.We" not in repaired
+    assert "To confirm the invoice details" not in repaired
+    assert "SLA compensation as part of this process" not in repaired
+    assert "have opened" not in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
+
+
+def test_action_repair_spacing_cleanup_preserves_initialisms() -> None:
+    answer = "The U.S.A. entity is A.G. Holdings. Musterverein e.V. and Händler e.K. are clients."
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == answer
+
+
+def test_action_repair_spacing_cleanup_separates_sentence_after_initialism() -> None:
+    answer = "The client is Musterverein e.V.The filing is pending."
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == "The client is Musterverein e.V. The filing is pending."
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "To confirm the e.V. registration details.",
+        "To confirm Dr. Smith's invoice details.",
+        "To review Acme Inc. records.",
+    ],
+)
+def test_action_repair_removes_whole_abbreviation_bearing_fragment(fragment: str) -> None:
+    answer = f"The standard fee is CHF 250. {fragment}"
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == "The standard fee is CHF 250."
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The client is Acme Inc. To confirm the invoice details.",
+        "The client is Musterverein e.V. To review the registration details.",
+    ],
+)
+def test_action_repair_finds_fragment_after_nonterminal_abbreviation(
+    answer: str,
+) -> None:
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned in {"The client is Acme Inc.", "The client is Musterverein e.V."}
+
+
+@pytest.mark.parametrize("initialism", ["U.K.", "E.U.", "D.C.", "P.O."])
+def test_action_repair_removes_fragment_containing_unlisted_initialism(
+    initialism: str,
+) -> None:
+    answer = f"The standard fee is CHF 250. To confirm the {initialism} VAT record."
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == "The standard fee is CHF 250."
+
+
+@pytest.mark.parametrize("abbreviation", ["Musterverein e.V.", "Acme Inc."])
+def test_action_repair_preserves_valid_sentence_after_fragment_abbreviation(
+    abbreviation: str,
+) -> None:
+    answer = f"The fee is CHF 250. To confirm {abbreviation} The filing remains pending."
+
+    cleaned = issue_agent._clean_action_repair_artifacts(answer, language="en")
+
+    assert cleaned == "The fee is CHF 250. The filing remains pending."
+
+
+def test_action_state_repair_final_notice_with_gerund_is_guard_safe() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Change the address for ZF-20991 and confirm the change."],
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Change the address for ZF-20991 and confirm the change.",
+            }
+        ],
+        answer="The address change requires human review.",
+    )
+
+    assert "is not confirmed" in repaired
     ticket = issue_agent._automatic_ticket_context(issue)
     assert (
         issue_agent.check_pending_action_claims(

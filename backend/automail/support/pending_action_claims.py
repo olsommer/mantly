@@ -723,6 +723,20 @@ _PENDING_CONFIRMATION_REVERSAL_PATTERN = re.compile(
     r"\b(?:complete|completed|done|successful|confirmed)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_NONCOMPLETION_TAIL_PATTERN = re.compile(
+    r"^(?P<scope>[^;:.!?\n]{0,180})\b(?:is|are|remain|remains)\s+"
+    r"(?:(?:still|currently)\s+)*(?:"
+    r"not\s+(?:confirmed|approved|started|completed|done)|"
+    r"unconfirmed|unapproved|"
+    r"pending(?:\s+(?:(?:human|manual)\s+)?(?:approval|review|confirmation))?|"
+    r"awaiting\s+(?:(?:human|manual)\s+)?(?:approval|review|confirmation)"
+    r")\b",
+    re.IGNORECASE,
+)
+_NONCOMPLETION_SCOPE_BREAK_PATTERN = re.compile(
+    r"\b(?:but|however|though|although|yet|whereas)\b",
+    re.IGNORECASE,
+)
 _CONFIRMING_ACTION_COMPLETION_PATTERN = re.compile(
     rf"\bconfirming\s+"
     rf"(?:(?:a|an|the|this|your|our)\s+)?"
@@ -3610,6 +3624,27 @@ def _bare_confirmation_is_safely_pending(
     return _PENDING_CONFIRMATION_REVERSAL_PATTERN.search(tail[pending_match.end() :]) is None
 
 
+def _claim_is_explicitly_not_completed(
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    """Allow a same-clause action subject with an explicit negative state.
+
+    The terse action-first matcher intentionally catches headings such as
+    ``Changing the address``. In ordinary prose that same phrase can instead be
+    the grammatical subject of ``is not confirmed``. Bind the negative state to
+    the matched action before deciding that it is a completion claim. Any later
+    positive promise or completion remains visible to the other claim patterns.
+    """
+
+    tail = unit[match.end() :]
+    pending_match = _EXPLICIT_NONCOMPLETION_TAIL_PATTERN.match(tail)
+    if pending_match is None or _NONCOMPLETION_SCOPE_BREAK_PATTERN.search(pending_match.group("scope")):
+        return False
+    remainder = tail[pending_match.end() :]
+    return re.fullmatch(r"\s*[.!?]*\s*", remainder) is not None
+
+
 def _is_scoped_negative_epistemic_claim(*, prefix: str, claim: str) -> bool:
     return (
         _SAFE_NEGATIVE_EPISTEMIC_PREFIX_PATTERN.search(prefix) is not None
@@ -3762,6 +3797,8 @@ def _has_unsafe_claim(
                 prefix=shadow[: match.start()],
                 claim=match.group(0),
             ):
+                continue
+            if pattern is _TERSE_PROGRESSIVE_ACTION_FIRST_PATTERN and _claim_is_explicitly_not_completed(unit, match):
                 continue
             if pattern is _BARE_CONFIRMING_ACTION_STATE_PATTERN and _bare_confirmation_is_safely_pending(unit, match):
                 continue

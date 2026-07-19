@@ -25,6 +25,7 @@ from automail.support.issue_agent import (
     AutomationGroundingOutput,
     AutomationGroundingUnitAssessment,
     KnowledgeAgentOutput,
+    KnowledgeRequestItemAssessment,
 )
 from automail.support.knowledge_workspace import (
     MAX_COMMAND_CHARS,
@@ -58,6 +59,19 @@ def _articles() -> list[dict[str, Any]]:
             "needsReview": False,
         },
     ]
+
+
+def _knowledge_request_assessment(
+    answer_excerpt: str,
+    *,
+    item_id: str = "request:item-1",
+    resolution: str = "answered",
+) -> KnowledgeRequestItemAssessment:
+    return KnowledgeRequestItemAssessment(
+        request_item_id=item_id,
+        resolution=resolution,
+        answer_excerpt=answer_excerpt,
+    )
 
 
 def _workspace(*, articles: list[dict[str, Any]] | None = None) -> KnowledgeWorkspace:
@@ -637,6 +651,11 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
             citation_ids=["shipping-policy", "shipping-policy"],
             citation_paths=["knowledge/articles/0001--shipping-policy.json"],
             missing_information=[" Tracking number "],
+            request_item_assessments=[
+                _knowledge_request_assessment(
+                    "Your parcel should arrive within seven business days."
+                )
+            ],
         ),
         captured=captured,
     )
@@ -668,8 +687,167 @@ def test_knowledge_agent_contract_keeps_saas_incident_unknowns_explicit() -> Non
     assert "requested eligibility, approval, cause, date, amount" in prompt
     assert "Do not merge several missing items" in prompt
     assert "Every item must have its own evidence-backed answer" in prompt
+    assert "request_item_assessments" in answer_schema["required"]
     assert "explicitly resolves every independent item in the agent request" in answer_description
     assert "unquantified result" in answer_description
+
+
+_LAWYER_K01_QUESTION = (
+    "Based only on reviewed knowledge and verified ticket facts: What are the "
+    "standard consultation fee and retainer? What is invoice QA-LAW-204's "
+    "recorded due date? Is any payment plan approved? Is any due-date change "
+    "approved? Is any waiver approved?"
+)
+_SAAS_K01_QUESTION = (
+    "Using only reviewed knowledge and verified status facts: What is incident "
+    "INC-204's status, affected service and region, and exact start time? Is an "
+    "ETA known? Is a root cause known? May Acme Analytics AG's Enterprise plan "
+    "request an SLA-credit review, and is incident eligibility or any credit "
+    "approved or quantified?"
+)
+
+
+def test_knowledge_request_items_extract_exact_lawyer_and_saas_k01_questions() -> None:
+    lawyer_items = issue_agent._knowledge_request_items(_LAWYER_K01_QUESTION)
+    saas_items = issue_agent._knowledge_request_items(_SAAS_K01_QUESTION)
+
+    assert [item["question"] for item in lawyer_items] == [
+        "What are the standard consultation fee and retainer?",
+        "What is invoice QA-LAW-204's recorded due date?",
+        "Is any payment plan approved?",
+        "Is any due-date change approved?",
+        "Is any waiver approved?",
+    ]
+    assert [item["question"] for item in saas_items] == [
+        "What is incident INC-204's status, affected service and region, and exact start time?",
+        "Is an ETA known?",
+        "Is a root cause known?",
+        "May Acme Analytics AG's Enterprise plan request an SLA-credit review?",
+        "Is incident eligibility or any credit approved or quantified?",
+    ]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What are the standard terms and conditions?",
+        "Is research and development approval available?",
+        "What are security and privacy best practices?",
+    ],
+)
+def test_knowledge_request_items_do_not_split_noun_conjunctions(question: str) -> None:
+    items = issue_agent._knowledge_request_items(question)
+
+    assert [item["question"] for item in items] == [question]
+
+
+def test_lawyer_k01_missing_payment_plan_is_repaired_unknown_with_citations_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = (
+        "The standard initial consultation fee is CHF 350 excluding VAT. "
+        "The standard advance retainer is CHF 5,000 unless a lawyer approves a different amount. "
+        "For Invoice QA-LAW-204, the recorded due date is 25 July 2026. "
+        "No due-date change or waiver has been approved."
+    )
+    items = issue_agent._knowledge_request_items(_LAWYER_K01_QUESTION)
+    _patch_agent_dependencies(
+        monkeypatch,
+        commands=[
+            "cat README.md request.json ticket/ticket.json ticket/messages.jsonl "
+            "ticket/account.json ticket/conversation.json history/agent.jsonl",
+            "cat knowledge/index.jsonl",
+            "cat knowledge/articles/0001--law-fees-retainer.json",
+        ],
+        output=KnowledgeAgentOutput(
+            answer=answer,
+            confidence="high",
+            citation_ids=["law-fees-retainer"],
+            citation_paths=["knowledge/articles/0001--law-fees-retainer.json"],
+            request_item_assessments=[
+                _knowledge_request_assessment(answer, item_id=item["id"])
+                for item in items
+                if item["question"] != "Is any payment plan approved?"
+            ],
+        ),
+    )
+
+    result = issue_agent.draft_issue_agent_answer(
+        issue={"id": "issue-1", "subject": "Invoice QA-LAW-204"},
+        messages=[],
+        question=_LAWYER_K01_QUESTION,
+        articles=[
+            {
+                "id": "law-fees-retainer",
+                "title": "Billing and Retainer Rules",
+                "body": (
+                    "The standard fee is CHF 350 and retainer is CHF 5,000. "
+                    "Payment plans and exceptions require review."
+                ),
+                "status": "published",
+                "reviewStatus": "reviewed",
+                "freshnessStatus": "fresh",
+                "needsReview": False,
+            }
+        ],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert result.generation_mode == "knowledge_agent"
+    assert result.citation_ids == ("law-fees-retainer",)
+    assert '"Is any payment plan approved?"' in result.answer
+    assert "Available evidence does not establish" in result.answer
+    assert "Is any due-date change approved?" not in result.answer
+    assert result.missing_information == (
+        "Unresolved request item: Is any payment plan approved?",
+    )
+    assert result.requires_human is True
+    assert len(result.tool_calls) == 3
+
+
+def test_knowledge_request_item_proof_rejects_unrelated_excerpt() -> None:
+    answer = "No waiver has been approved."
+    item = {"id": "request:item-1", "question": "Is any payment plan approved?"}
+
+    repaired, uncovered = issue_agent._repair_knowledge_request_item_coverage(
+        answer=answer,
+        question=item["question"],
+        items=(item,),
+        assessments=[_knowledge_request_assessment(answer)],
+    )
+
+    assert uncovered == (item,)
+    assert repaired.endswith(
+        'Available evidence does not establish this requested item: "Is any payment plan approved?"'
+    )
+
+
+def test_saas_k01_complete_item_specific_answer_needs_no_repair() -> None:
+    answer = (
+        "Incident INC-204 is currently under investigation, affecting authentication services in the EU. "
+        "It started on 2026-07-19T07:40:00Z. An estimated time of arrival for resolution is not yet "
+        "available, and the root cause is not yet known. Acme Analytics AG, as an Enterprise customer, "
+        "may request an SLA-credit review after an eligible incident. However, incident eligibility or "
+        "any specific credit amount is not yet approved or quantified."
+    )
+    items = issue_agent._knowledge_request_items(_SAAS_K01_QUESTION)
+
+    repaired, uncovered = issue_agent._repair_knowledge_request_item_coverage(
+        answer=answer,
+        question=_SAAS_K01_QUESTION,
+        items=items,
+        assessments=[
+            _knowledge_request_assessment(answer, item_id=item["id"])
+            for item in items
+        ],
+    )
+
+    assert repaired == answer
+    assert uncovered == ()
 
 
 def test_draft_removes_terminal_thank_you_closing(
@@ -682,6 +860,11 @@ def test_draft_removes_terminal_thank_you_closing(
             answer="The motor claim is ready for lawyer review.\n\nThank you,",
             confidence="medium",
             citation_ids=[],
+            request_item_assessments=[
+                _knowledge_request_assessment(
+                    "The motor claim is ready for lawyer review."
+                )
+            ],
         ),
     )
 
@@ -727,6 +910,15 @@ def test_draft_real_agent_completes_at_configured_tool_boundary(
                         "citation_ids": ["shipping-policy"],
                         "citation_paths": ["knowledge/articles/0001--shipping-policy.json"],
                         "missing_information": [],
+                        "request_item_assessments": [
+                            {
+                                "request_item_id": "request:item-1",
+                                "resolution": "answered",
+                                "answer_excerpt": (
+                                    "Your parcel should arrive within seven business days."
+                                ),
+                            }
+                        ],
                     },
                     "id": "knowledge-answer",
                     "type": "tool_call",
@@ -776,6 +968,9 @@ def test_draft_rejects_hallucinated_citations_and_downgrades_high_confidence(
             answer="We are reviewing the delay.",
             confidence="high",
             citation_ids=["invented-policy"],
+            request_item_assessments=[
+                _knowledge_request_assessment("We are reviewing the delay.")
+            ],
         ),
     )
 
@@ -804,6 +999,11 @@ def test_draft_downgrades_high_confidence_for_unreviewed_citation(
             confidence="high",
             citation_ids=["shipping-policy"],
             citation_paths=["knowledge/articles/0001--shipping-policy.json"],
+            request_item_assessments=[
+                _knowledge_request_assessment(
+                    "Your parcel should arrive within seven business days."
+                )
+            ],
         ),
     )
 
@@ -4441,7 +4641,7 @@ def test_grounding_missing_obligation_assessment_is_reported_as_uncovered(
 
 
 @pytest.mark.parametrize("second_attempt_valid", [True, False])
-def test_grounding_retries_unknown_obligation_protocol_once_with_identical_input(
+def test_grounding_retries_unknown_obligation_protocol_once_with_corrective_input(
     monkeypatch: pytest.MonkeyPatch,
     second_attempt_valid: bool,
 ) -> None:
@@ -4515,7 +4715,12 @@ def test_grounding_retries_unknown_obligation_protocol_once_with_identical_input
     )
 
     assert len(invocations) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
-    assert invocations[0] == invocations[1]
+    assert invocations[0][1] == invocations[1][1]
+    assert invocations[0][0] != invocations[1][0]
+    retry_prompt = invocations[1][0]["messages"][0]["content"]
+    assert "## Required Protocol Correction" in retry_prompt
+    assert "Exact Answer Obligation IDs" in retry_prompt
+    assert '"delivery:status"' in retry_prompt
     assert captured_agent_kwargs["middleware"][0].run_limit == 1
     assert result.as_metadata()["modelCallLimit"] == 2
     assert result.verified is second_attempt_valid
@@ -5003,12 +5208,67 @@ def test_grounding_retries_unknown_obligation_evidence_and_accepts_correction(
     )
 
     assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
-    assert prompts[0] == prompts[1]
+    assert prompts[0] != prompts[1]
+    assert "## Required Protocol Correction" in prompts[1]
+    assert "Invalid evidence IDs from the rejected response" in prompts[1]
+    assert '"invented-evidence"' in prompts[1]
+    assert "Exact Allowed Evidence IDs" in prompts[1]
+    assert '"ticket"' in prompts[1]
     assert result.verified is True
     assert result.status == "passed"
 
 
-def test_grounding_repeated_unknown_obligation_evidence_fails_closed(
+def test_grounding_retries_unknown_runbook_actions_label_with_exact_allowed_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "concern-export"
+    obligation_id = f"{concern_id}:obligation-1"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, "Confirm the export link")],
+    )
+    answer = "The export link is not confirmed and remains pending human review."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+
+    def output(evidence_ids: list[str]) -> AutomationGroundingOutput:
+        return AutomationGroundingOutput(
+            verdict="grounded",
+            answer_sha256=issue_agent.grounding_text_sha256(answer),
+            unit_assessments=[
+                AutomationGroundingUnitAssessment(
+                    unit_id=unit["id"],
+                    unit_sha256=unit["sha256"],
+                    supported=True,
+                    evidence_ids=evidence_ids,
+                )
+            ],
+            obligation_assessments=[
+                AutomationGroundingObligationAssessment(
+                    obligation_id=obligation_id,
+                    resolution="pending_or_unavailable",
+                    answer_unit_ids=[unit["id"]],
+                    evidence_ids=evidence_ids,
+                )
+            ],
+        )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output(["ticket", "runbookActions"]), output(["ticket"])],
+    )
+
+    assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert prompts[0] != prompts[1]
+    assert '"runbookActions"' in prompts[1]
+    assert "structural labels such as" in prompts[1]
+    assert "Exact Allowed Evidence IDs" in prompts[1]
+    assert result.verified is True
+    assert result.status == "passed"
+
+
+def test_grounding_repeated_unknown_runbook_actions_evidence_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     obligation_id = "shipment:status"
@@ -5020,7 +5280,7 @@ def test_grounding_repeated_unknown_obligation_evidence_fails_closed(
     malformed = _grounding_output_with_obligation_evidence(
         answer=answer,
         obligation_id=obligation_id,
-        evidence_ids=["invented-evidence"],
+        evidence_ids=["runbookActions"],
     )
 
     result, prompts = _assess_with_grounding_outputs(
@@ -5031,11 +5291,13 @@ def test_grounding_repeated_unknown_obligation_evidence_fails_closed(
     )
 
     assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
-    assert prompts[0] == prompts[1]
+    assert prompts[0] != prompts[1]
+    assert '"runbookActions"' in prompts[1]
+    assert "Exact Allowed Evidence IDs" in prompts[1]
     assert result.verified is False
     assert result.status == "error"
     assert result.reason_code == "grounding_check_failed"
-    assert "unknown evidence IDs: invented-evidence" in result.error
+    assert "unknown evidence IDs: runbookActions" in result.error
 
 
 def test_grounding_resolves_knowledge_backed_negative_refund_guarantee(
@@ -5794,6 +6056,7 @@ def test_draft_falls_back_when_agent_does_not_read_workspace(monkeypatch: pytest
             answer="Unsupported answer.",
             confidence="high",
             citation_ids=[],
+            request_item_assessments=[],
         ),
     )
 
@@ -5853,13 +6116,20 @@ def test_knowledge_agent_deadline_returns_fallback_and_holds_slot_until_worker_f
                 "structured_response": KnowledgeAgentOutput(
                     answer="Late answer.",
                     confidence="low",
+                    request_item_assessments=[
+                        _knowledge_request_assessment("Late answer.")
+                    ],
                 )
             }
 
     _patch_agent_dependencies(
         monkeypatch,
         commands=[],
-        output=KnowledgeAgentOutput(answer="unused", confidence="low"),
+        output=KnowledgeAgentOutput(
+            answer="unused",
+            confidence="low",
+            request_item_assessments=[],
+        ),
     )
     monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: SlowAgent())
     monkeypatch.setattr(issue_agent, "_KNOWLEDGE_AGENT_SLOTS", TrackingSlot())
@@ -6070,6 +6340,7 @@ def test_draft_falls_back_when_bash_tool_fails(monkeypatch: pytest.MonkeyPatch) 
             answer="Unsupported answer.",
             confidence="high",
             citation_ids=[],
+            request_item_assessments=[],
         ),
     )
 

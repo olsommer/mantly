@@ -216,15 +216,33 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     lawyer_cases = {case.id: case for case in personas["lawyer"].cases}
     fulfillment_cases = {case.id: case for case in personas["fulfillment"].cases}
     saas_cases = {case.id: case for case in personas["saas-support"].cases}
+    lawyer_knowledge_checks = {
+        check.id: check for check in personas["lawyer"].knowledge_checks
+    }
 
     assert "law-gmbh-formation" in lawyer_cases["L06"].expected.knowledge_ids
-    assert {
+    assert [
         concern.runbook_key for concern in lawyer_cases["L08"].concerns
-    } == {"law-matter-status", "law-potential-conflict"}
-    assert lawyer_cases["L08"].expected.minimum_concern_count == 2
+    ] == ["law-potential-conflict"]
+    assert lawyer_cases["L08"].concerns[0].answer_obligations == [
+        (
+            "State the tool-confirmed matter status and whether substantive "
+            "discussion is already paused."
+        ),
+        (
+            "Address stopping discussion, recording the report, and escalating "
+            "review separately."
+        ),
+    ]
+    assert lawyer_cases["L08"].expected.minimum_concern_count == 1
     assert lawyer_cases["L08"].expected.tool_fixture_ids == [
         "matter-mat-2026-221"
     ]
+    assert "Is any payment plan approved?" in lawyer_knowledge_checks["K01"].question
+    assert any(
+        "payment plan" in requirement
+        for requirement in lawyer_knowledge_checks["K01"].must_mark_unverified
+    )
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
     assert fulfillment_cases["E06"].expected.knowledge_ids == []
     assert set(fulfillment_cases["E06"].expected.knowledge_any_of) == {
@@ -232,6 +250,13 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "fulfillment-returns-refunds",
     }
     assert fulfillment_cases["E06"].expected.tool_fixture_ids == []
+    assert fulfillment_cases["E07"].expected.tool_fixture_ids == []
+    assert fulfillment_cases["E08"].expected.tool_fixture_ids == [
+        "order-zf-10482"
+    ]
+    assert fulfillment_cases["E10"].expected.tool_fixture_ids == [
+        "order-zf-20991"
+    ]
     assert fulfillment_cases["E05"].expected.single_combined_reply is True
     assert saas_cases["S03"].expected.minimum_concern_count == 1
     assert sum(
@@ -262,13 +287,13 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert any(case.follow_ups for case in saas_cases.values())
 
 
-def test_l08_seeds_matter_lookup_on_the_status_runbook() -> None:
+def test_l08_seeds_matter_lookup_on_the_conflict_runbook() -> None:
     persona = next(
         item for item in load_personas(PERSONA_DIR) if item.id == "lawyer"
     )
     content = build_intent_content(
         persona,
-        "law-matter-status",
+        "law-potential-conflict",
         "https://api.mantly.io",
     )
     frontmatter = yaml.safe_load(content.split("---", 2)[1])
@@ -278,7 +303,7 @@ def test_l08_seeds_matter_lookup_on_the_status_runbook() -> None:
     }
 
 
-def test_e06_skips_logistics_lookups_without_losing_relevant_tool_coverage() -> None:
+def test_policy_only_cases_skip_logistics_lookups_without_losing_tool_coverage() -> None:
     persona = next(
         item for item in load_personas(PERSONA_DIR) if item.id == "fulfillment"
     )
@@ -294,10 +319,13 @@ def test_e06_skips_logistics_lookups_without_losing_relevant_tool_coverage() -> 
         return {tool["name"] for tool in frontmatter["tools"]}
 
     assert cases["E06"].expected.tool_fixture_ids == []
+    assert cases["E07"].expected.tool_fixture_ids == []
     assert tool_names("fulfillment-hazardous-battery") == set()
     assert tool_names("fulfillment-product-remedy") == set()
+    assert tool_names("fulfillment-wrong-item") == set()
     assert "fixture_shipment_zf_10482" in tool_names("fulfillment-shipment-status")
     assert "fixture_order_zf_10482" in tool_names("fulfillment-partial-shipment")
+    assert "fixture_order_zf_20991" in tool_names("fulfillment-return-refund")
 
 
 def test_pending_actions_must_belong_to_a_matched_runbook() -> None:

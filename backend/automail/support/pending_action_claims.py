@@ -979,6 +979,15 @@ _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_COMPLETED_DATA_EXPORT_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:(?:a|an|the|this|your|our|requested)\s+)?"
+    r"(?:(?:customer|workspace|account)\s+)?data\s+export"
+    r"(?:\s+(?:archive|file|job|link|package|report))?\b"
+    r"[^.!?\n]{0,80}?\b(?:has|have|is|are|was|were)\s+"
+    r"(?!(?:not|never)\b)(?:(?:already|successfully|now|currently)\s+)*"
+    r"(?:been\s+)?(?:prepared|generated)\b",
+    re.IGNORECASE,
+)
 _CONFIRMABLE_COMPLETION_SUBJECT_PATTERN = (
     rf"(?:{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}|"
     r"(?:(?:account|data|workspace|tenant|requested)\s+){0,2}"
@@ -1302,6 +1311,7 @@ _CLAIM_PATTERNS = (
     _SPANISH_PASSIVE_PATTERN,
     _ITALIAN_COMPLETED_PATTERN,
     _ITALIAN_PASSIVE_PATTERN,
+    _COMPLETED_DATA_EXPORT_ARTIFACT_PATTERN,
     _MARKDOWN_TABLE_ACTION_PATTERN,
 )
 _FUTURE_CLAIM_PATTERNS = (
@@ -4335,7 +4345,14 @@ def repair_pending_action_claims(
     preserved = re.sub(r"\n[ \t]+\n", "\n\n", preserved)
     preserved = re.sub(r"\n{3,}", "\n\n", preserved)
     notice = repair_notice.strip() or PENDING_ACTION_REPAIR_NOTICE
-    repaired = f"{preserved}\n\n{notice}" if preserved else notice
+    notice_already_present = any(
+        unit.strip() == notice for unit in _answer_units(preserved)
+    )
+    repaired = (
+        preserved
+        if notice_already_present
+        else (f"{preserved}\n\n{notice}" if preserved else notice)
+    )
 
     final = check_pending_action_claims(
         answer=repaired,

@@ -770,6 +770,111 @@ def test_pending_action_guard_blocks_conditional_action_artifact_delivery(
     assert result.claims == (answer,)
 
 
+def test_pending_action_repair_removes_exact_live_prepared_export_claim() -> None:
+    actions = [
+        {
+            "name": "request_data_export",
+            "label": "Request Data Export",
+            "status": "pending_approval",
+        }
+    ]
+    unsafe_claim = (
+        "Regarding your request to export every customer record from ACME-4421, "
+        "a data export has been prepared and is currently pending human review."
+    )
+    safe_deletion = (
+        "For your request to permanently delete the ACME-4421 workspace, this action "
+        "is currently blocked. Workspace deletion requires authorization from the "
+        "workspace owner and completion of a retention review."
+    )
+    safe_export_status = (
+        "The export link is not confirmed. A related next step for your request "
+        "remains pending human review."
+    )
+    answer = "\n\n".join(
+        (
+            "Hello Priya,",
+            "Thank you for reaching out.",
+            unsafe_claim,
+            safe_deletion,
+            PENDING_ACTION_REPAIR_NOTICE,
+            safe_export_status,
+        )
+    )
+
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+
+    assert result.blocked is True
+    assert result.claims == (unsafe_claim,)
+    assert unsafe_claim not in repaired
+    assert safe_deletion in repaired
+    assert safe_export_status in repaired
+    assert repaired.count(PENDING_ACTION_REPAIR_NOTICE) == 1
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=actions,
+    ).blocked is False
+
+
+def test_pending_action_repair_preserves_safe_clause_before_generated_export_claim() -> None:
+    actions = [
+        {
+            "name": "request_data_export",
+            "label": "Request Data Export",
+            "status": "pending_approval",
+        }
+    ]
+    answer = (
+        "The workspace owner remains Ava Chen, but a data export has been generated "
+        "and is currently pending review."
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=actions,
+    )
+
+    assert repaired == (
+        "The workspace owner remains Ava Chen.\n\n"
+        f"{PENDING_ACTION_REPAIR_NOTICE}"
+    )
+    assert "generated" not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=actions,
+    ).blocked is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The data export has not been prepared.",
+        "We cannot confirm that the data export has been generated.",
+    ],
+)
+def test_pending_action_guard_allows_explicitly_unprepared_export(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=[
+            {
+                "name": "request_data_export",
+                "label": "Request Data Export",
+                "status": "pending_approval",
+            }
+        ],
+    )
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
 @pytest.mark.parametrize(
     "answer",
     [

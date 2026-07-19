@@ -235,6 +235,7 @@ runbooks:
   - key: saas-subscription-change
     purpose: Treat cancellation, seat, purchase, and refund requests as separate actions.
     proposed_actions: [cancel_add_on, reduce_seats, purchase_add_on, request_refund]
+    required_read_only_tools: [fixture_saas_subscription_acme]
   - key: saas-privacy-export
     purpose: Verify authority and prepare a customer-data export.
     proposed_actions: [request_data_export]

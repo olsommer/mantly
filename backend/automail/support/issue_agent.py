@@ -47,6 +47,7 @@ _KNOWLEDGE_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix
 KNOWLEDGE_AGENT_DEADLINE_SECONDS = 75
 KNOWLEDGE_AGENT_MODEL_CALL_LIMIT = 9
 KNOWLEDGE_AGENT_TOOL_CALL_LIMIT = 8
+_KNOWLEDGE_REQUEST_ITEM_LIMIT = 20
 _AUTOMATION_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _AUTOMATION_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="automation-agent")
 AUTOMATION_AGENT_DEADLINE_SECONDS = 55
@@ -101,6 +102,9 @@ _AUTOMATION_GROUNDING_REPAIR_TEMPLATE = (
 )
 _GROUNDING_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_grounding_eval_system_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_USER_TEMPLATE = (_PROMPTS_DIR / "issue_grounding_eval_user_prompt.md").read_text(encoding="utf-8").strip()
+_GROUNDING_PROTOCOL_REPAIR_TEMPLATE = (
+    (_PROMPTS_DIR / "issue_grounding_protocol_repair.md").read_text(encoding="utf-8").strip()
+)
 _GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION = """
 
 ## Required Second-Pass Obligation Adjudication
@@ -250,6 +254,20 @@ class AutomationGroundingAssessment:
         }
 
 
+class KnowledgeRequestItemAssessment(BaseModel):
+    """Answer-span proof for one runtime-extracted agent question item."""
+
+    request_item_id: str = Field(description="Exact request item ID from the runtime checklist")
+    resolution: Literal["answered", "unknown_or_unavailable"]
+    answer_excerpt: str = Field(
+        max_length=1_000,
+        description=(
+            "Exact non-empty contiguous excerpt from the customer answer that resolves "
+            "this item or states its item-specific unknown/unavailable result"
+        ),
+    )
+
+
 class KnowledgeAgentOutput(BaseModel):
     """Structured result produced after searching the isolated workspace."""
 
@@ -271,6 +289,13 @@ class KnowledgeAgentOutput(BaseModel):
     response_attachments: list[str] = Field(default_factory=list)
     covered_concern_ids: list[str] = Field(default_factory=list)
     covered_obligation_ids: list[str] = Field(default_factory=list)
+    request_item_assessments: list[KnowledgeRequestItemAssessment] = Field(
+        max_length=_KNOWLEDGE_REQUEST_ITEM_LIMIT * 2,
+        description=(
+            "Exactly one answer-span assessment for every runtime request item ID, "
+            "with no missing, duplicate, or invented IDs"
+        )
+    )
     requires_human: bool = False
     requires_human_reason: str = ""
 
@@ -363,8 +388,12 @@ def _grounding_retryable_protocol_errors(
             for value in assessment.evidence_ids
             if (evidence_id := _string_from(value))
         }
-        if not evidence_ids.issubset(allowed_evidence_ids):
-            errors.append("Answer unit uses unknown evidence IDs")
+        unknown_evidence_ids = sorted(evidence_ids - allowed_evidence_ids)
+        if unknown_evidence_ids:
+            errors.append(
+                "Answer unit uses unknown evidence IDs: "
+                + ", ".join(unknown_evidence_ids[:5])
+            )
 
     if len(structured.obligation_assessments) > 100:
         errors.append("Evaluator returned too many obligation assessments")
@@ -384,9 +413,36 @@ def _grounding_retryable_protocol_errors(
             for value in assessment.evidence_ids
             if (evidence_id := _string_from(value))
         }
-        if not evidence_ids.issubset(allowed_evidence_ids):
-            errors.append("Answer obligation uses unknown evidence IDs")
+        unknown_evidence_ids = sorted(evidence_ids - allowed_evidence_ids)
+        if unknown_evidence_ids:
+            errors.append(
+                "Answer obligation uses unknown evidence IDs: "
+                + ", ".join(unknown_evidence_ids[:5])
+            )
     return tuple(dict.fromkeys(errors))
+
+
+def _grounding_unknown_evidence_ids(
+    structured: Any,
+    *,
+    allowed_evidence_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """List malformed evidence references for one bounded corrective retry."""
+    if not isinstance(structured, AutomationGroundingOutput):
+        return ()
+    supplied_ids = {
+        evidence_id
+        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
+        for value in assessment.evidence_ids
+        if (evidence_id := _string_from(value))
+    }
+    supplied_ids.update(
+        evidence_id
+        for assessment in structured.obligation_assessments[:100]
+        for value in assessment.evidence_ids
+        if (evidence_id := _string_from(value))
+    )
+    return tuple(sorted(supplied_ids - allowed_evidence_ids)[:100])
 
 
 def _grounding_needs_obligation_reassessment(
@@ -1382,6 +1438,241 @@ def _detected_supported_language(*values: str) -> str:
 def _latest_customer_language(messages: list[dict[str, Any]]) -> str:
     context = _automatic_message_context(messages, limit=1)
     return _detected_supported_language(context[-1]["body"] if context else "")
+
+
+_KNOWLEDGE_QUESTION_START_PATTERN = re.compile(
+    r"^(?:what|when|where|which|who|whom|whose|why|how|"
+    r"is|are|was|were|has|have|had|can|could|may|might|"
+    r"will|would|do|does|did|should|must)\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_QUESTION_PATTERN = re.compile(
+    r"\s*,?\s+(?:and|or)\s+(?="
+    r"(?:is|are|was|were|has|have|had|can|could|may|might|"
+    r"will|would|do|does|did|should|must)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "answer",
+        "any",
+        "are",
+        "as",
+        "at",
+        "based",
+        "be",
+        "been",
+        "being",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "exact",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "known",
+        "may",
+        "might",
+        "must",
+        "of",
+        "on",
+        "only",
+        "or",
+        "our",
+        "please",
+        "request",
+        "requested",
+        "should",
+        "tell",
+        "that",
+        "the",
+        "their",
+        "they",
+        "this",
+        "to",
+        "using",
+        "verified",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "whether",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
+_KNOWLEDGE_REQUEST_TOKEN_ALIASES = {
+    "affected": "affect",
+    "affecting": "affect",
+    "approval": "approv",
+    "approved": "approv",
+    "approves": "approv",
+    "approving": "approv",
+    "quantification": "quantifi",
+    "quantified": "quantifi",
+    "quantify": "quantifi",
+    "services": "service",
+}
+_KNOWLEDGE_REQUEST_GENERIC_STATE_TOKENS = frozenset(
+    {
+        "approv",
+        "known",
+        "quantifi",
+    }
+)
+
+
+def _knowledge_request_items(question: str) -> tuple[dict[str, str], ...]:
+    """Extract bounded direct question clauses without splitting noun conjunctions."""
+    normalized = re.sub(r"\s+", " ", str(question or "")).strip()
+    if not normalized:
+        return ()
+    raw_questions = re.findall(r"[^?]*\?", normalized)
+    if len(raw_questions) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
+        raise ValueError("Knowledge agent request contains too many direct questions")
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw_question in raw_questions:
+        candidate = raw_question.strip(" .;\t\r\n")
+        for separator in (":", ".", ";"):
+            tail = candidate.rsplit(separator, 1)[-1].strip()
+            if _KNOWLEDGE_QUESTION_START_PATTERN.match(tail):
+                candidate = tail
+                break
+        candidate = candidate.rstrip("?").strip()
+        if not _KNOWLEDGE_QUESTION_START_PATTERN.match(candidate):
+            continue
+        clauses = _KNOWLEDGE_RESTARTED_QUESTION_PATTERN.split(candidate)
+        for clause in clauses:
+            item = clause.strip(" ,;\t\r\n")
+            if not item:
+                continue
+            item = item[0].upper() + item[1:] + "?"
+            normalized_item = " ".join(item.casefold().split())
+            if normalized_item in seen:
+                continue
+            seen.add(normalized_item)
+            items.append(item[:1_000])
+            if len(items) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
+                raise ValueError("Knowledge agent request contains too many direct question items")
+    return tuple(
+        {"id": f"request:item-{index}", "question": item}
+        for index, item in enumerate(items, start=1)
+    )
+
+
+def _knowledge_request_tokens(value: str) -> set[str]:
+    normalized = re.sub(
+        r"\bestimated\s+time\s+of\s+arrival\b",
+        " eta ",
+        value.casefold(),
+    )
+    tokens: set[str] = set()
+    for raw in re.findall(r"[a-z0-9]+", normalized):
+        if raw in _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS or (len(raw) == 1 and not raw.isdigit()):
+            continue
+        token = _KNOWLEDGE_REQUEST_TOKEN_ALIASES.get(raw, raw)
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("ing") and len(token) > 5:
+            token = token[:-3]
+        elif token.endswith("ed") and len(token) > 4:
+            token = token[:-2]
+        elif token.endswith("s") and len(token) > 4:
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _knowledge_request_excerpt_matches(item: dict[str, str], excerpt: str) -> bool:
+    topic_tokens = _knowledge_request_tokens(item["question"])
+    if not topic_tokens:
+        return bool(excerpt.strip())
+    excerpt_tokens = _knowledge_request_tokens(excerpt)
+    specific_tokens = topic_tokens - _KNOWLEDGE_REQUEST_GENERIC_STATE_TOKENS
+    compared_tokens = specific_tokens or topic_tokens
+    matched = len(compared_tokens & excerpt_tokens)
+    required = max(1, (len(compared_tokens) * 2 + 4) // 5)
+    return matched >= required
+
+
+def _uncovered_knowledge_request_items(
+    *,
+    items: tuple[dict[str, str], ...],
+    answer: str,
+    assessments: list[KnowledgeRequestItemAssessment],
+) -> tuple[dict[str, str], ...]:
+    """Accept only unique exact answer spans with enough item-specific topic proof."""
+    assessments_by_id: dict[str, list[KnowledgeRequestItemAssessment]] = {}
+    for assessment in assessments[:_KNOWLEDGE_REQUEST_ITEM_LIMIT * 2]:
+        assessments_by_id.setdefault(assessment.request_item_id.strip(), []).append(assessment)
+
+    uncovered: list[dict[str, str]] = []
+    for item in items:
+        candidates = assessments_by_id.get(item["id"], [])
+        if len(candidates) != 1:
+            uncovered.append(item)
+            continue
+        excerpt = candidates[0].answer_excerpt.strip()
+        if not excerpt or excerpt not in answer or not _knowledge_request_excerpt_matches(item, excerpt):
+            uncovered.append(item)
+    return tuple(uncovered)
+
+
+def _knowledge_unknown_item_answer(item: str, *, language: str) -> str:
+    templates = {
+        "de": 'Die verfügbaren Belege klären diesen angefragten Punkt nicht: "{item}"',
+        "fr": 'Les éléments disponibles ne permettent pas d’établir ce point demandé : « {item} »',
+        "es": 'La información disponible no permite establecer este punto solicitado: «{item}»',
+        "it": 'Le informazioni disponibili non consentono di stabilire questo punto richiesto: «{item}»',
+        "en": 'Available evidence does not establish this requested item: "{item}"',
+    }
+    return templates.get(language, templates["en"]).format(item=item)
+
+
+def _repair_knowledge_request_item_coverage(
+    *,
+    answer: str,
+    question: str,
+    items: tuple[dict[str, str], ...],
+    assessments: list[KnowledgeRequestItemAssessment],
+) -> tuple[str, tuple[dict[str, str], ...]]:
+    """Fail closed per omitted item by appending one explicit evidence-unknown result."""
+    uncovered = _uncovered_knowledge_request_items(
+        items=items,
+        answer=answer,
+        assessments=assessments,
+    )
+    if not uncovered:
+        return answer, ()
+    language = _detected_supported_language(question)
+    repair = " ".join(
+        _knowledge_unknown_item_answer(item["question"], language=language)
+        for item in uncovered
+    )
+    return f"{answer.rstrip()}\n\n{repair}".strip(), uncovered
 
 
 def _knowledge_failure_answer(
@@ -3548,6 +3839,7 @@ def draft_issue_agent_answer(
         llm = create_llm(config, timeout=30, max_retries=0, temperature=0.2)
         usage_context = getattr(llm, "_mantly_usage_context", None)
         clean_question = (question.strip() or "Prepare the best support answer and next step.")[:4_000]
+        request_items = _knowledge_request_items(clean_question)
         workspace = KnowledgeWorkspace(
             ticket=_with_safety_prompt_context(
                 _ticket_context(issue),
@@ -3588,7 +3880,10 @@ def draft_issue_agent_answer(
             ],
             name="ticket_knowledge_agent",
         )
-        user_prompt = _USER_TEMPLATE.format(question=clean_question)
+        user_prompt = _USER_TEMPLATE.format(
+            question=clean_question,
+            request_items=_json(request_items),
+        )
         invoke_config = {
             "recursion_limit": 48,
             "run_name": "ticket_knowledge_agent",
@@ -3639,6 +3934,12 @@ def draft_issue_agent_answer(
         )
         if not answer:
             raise ValueError("Issue agent returned an empty answer")
+        answer, uncovered_request_items = _repair_knowledge_request_item_coverage(
+            answer=answer,
+            question=clean_question,
+            items=request_items,
+            assessments=structured.request_item_assessments,
+        )
         missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
         if missing_safety:
             raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
@@ -3665,14 +3966,30 @@ def draft_issue_agent_answer(
         ):
             confidence = "medium"
         missing_information = [item.strip()[:500] for item in structured.missing_information[:10] if item.strip()]
+        missing_information.extend(
+            f"Unresolved request item: {item['question']}"[:500]
+            for item in uncovered_request_items
+        )
         if truncated_citation_ids:
             missing_information.append(
                 "Full source content requires human review: " + ", ".join(truncated_citation_ids)
             )
         model_requires_human, model_reason = _safety_review_state(
             safety_assessment,
-            model_requires_human=structured.requires_human,
-            model_reason=structured.requires_human_reason,
+            model_requires_human=bool(structured.requires_human or uncovered_request_items),
+            model_reason=" ".join(
+                part
+                for part in (
+                    structured.requires_human_reason.strip(),
+                    (
+                        "One or more direct agent questions lacked item-specific answer proof; "
+                        "the runtime marked each omitted item unknown."
+                        if uncovered_request_items
+                        else ""
+                    ),
+                )
+                if part
+            ),
         )
         (
             covered_concern_ids,
@@ -4436,6 +4753,20 @@ def assess_issue_automation_grounding(
                     logger.warning(
                         "Grounding evaluator returned malformed protocol output; retrying once: %s",
                         "; ".join(retryable_errors),
+                    )
+                    active_prompt = prompt + "\n\n" + _GROUNDING_PROTOCOL_REPAIR_TEMPLATE.format(
+                        protocol_errors=_json(list(retryable_errors)),
+                        invalid_evidence_ids=_json(
+                            list(
+                                _grounding_unknown_evidence_ids(
+                                    structured,
+                                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                                )
+                            )
+                        ),
+                        allowed_evidence_ids=_json(sorted(allowed_evidence_ids)),
+                        answer_unit_ids=_json(sorted(expected_unit_ids_for_retry)),
+                        answer_obligation_ids=_json(sorted(expected_obligation_ids_for_retry)),
                     )
                     continue
                 if attempt + 1 < GROUNDING_MODEL_CALL_LIMIT and _grounding_needs_obligation_reassessment(

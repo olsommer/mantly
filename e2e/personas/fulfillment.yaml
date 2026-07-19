@@ -469,9 +469,10 @@ cases:
       must_not_claim:
         - Opened warehouse ticket, approved replacement, stock, dispatch, or tomorrow delivery.
       # The evidence checklist is explicit runbook guidance for this concern;
-      # requiring a knowledge citation here would falsely attribute its source.
+      # requiring knowledge or order lookup evidence here would falsely attribute
+      # policy guidance and make a safe reply depend on unrelated order facts.
       knowledge_ids: []
-      tool_fixture_ids: [order-zf-20991]
+      tool_fixture_ids: []
       pending_actions: [open_warehouse_ticket, request_replacement]
       idempotency: *replay
   - id: E08

@@ -97,6 +97,7 @@ class RunbookExpectation(StrictModel):
     proposed_actions: list[str] = Field(default_factory=list)
     response_rules: list[str] = Field(default_factory=list)
     required_guidance: list[str] = Field(default_factory=list)
+    required_read_only_tools: list[str] = Field(default_factory=list)
 
 
 class ConcernExpectation(StrictModel):
@@ -223,8 +224,28 @@ class E2EPersona(StrictModel):
         runbook_actions = {
             runbook.key: set(runbook.proposed_actions) for runbook in self.runbooks
         }
+        runbook_tools = {
+            runbook.key: {
+                f"fixture_{fixture_id.replace('-', '_')}"
+                for case in self.cases
+                if runbook.key
+                in {concern.runbook_key for concern in case.concerns}
+                for fixture_id in case.expected.tool_fixture_ids
+            }
+            for runbook in self.runbooks
+        }
         knowledge_id_set = set(knowledge_ids)
         tool_fixture_id_set = set(tool_fixture_ids)
+
+        for runbook in self.runbooks:
+            unknown_required_tools = (
+                set(runbook.required_read_only_tools) - runbook_tools[runbook.key]
+            )
+            if unknown_required_tools:
+                raise ValueError(
+                    f"runbook {runbook.key} requires undeclared read-only tools: "
+                    f"{unknown_required_tools}"
+                )
 
         for case in self.cases:
             if expected_case_pattern.fullmatch(case.id) is None:

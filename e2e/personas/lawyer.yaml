@@ -165,7 +165,9 @@ runbooks:
     proposed_actions: []
   - key: law-potential-conflict
     purpose: >-
-      For an existing or open matter, record and escalate a newly reported
+      For an existing or open matter, retrieve current matter facts, including
+      whether substantive discussion is paused, before preparing pending actions
+      to pause discussion, record the report, and escalate a newly reported
       potential conflict without drawing a conclusion.
     proposed_actions: [record_potential_conflict, open_conflict_review, pause_substantive_discussion]
   - key: law-consultation-reschedule
@@ -179,7 +181,8 @@ knowledge_checks:
     question: >-
       Based only on reviewed knowledge and verified ticket facts: What are the
       standard consultation fee and retainer? What is invoice QA-LAW-204's
-      recorded due date? Is any due-date change approved? Is any waiver approved?
+      recorded due date? Is any payment plan approved? Is any due-date change
+      approved? Is any waiver approved?
     expected_citation_ids: [law-fees-retainer]
     must_cover:
       - Standard consultation fee and retainer.
@@ -462,16 +465,13 @@ cases:
         Do not conclude there is a conflict or that representation continues.
       attachments: []
     concerns:
-      - key: matter-status
-        runbook_key: law-matter-status
-        answer_obligations:
-          - State the tool-confirmed matter status and whether substantive discussion is already paused.
       - key: potential-conflict
         runbook_key: law-potential-conflict
         answer_obligations:
+          - State the tool-confirmed matter status and whether substantive discussion is already paused.
           - Address stopping discussion, recording the report, and escalating review separately.
     expected:
-      minimum_concern_count: 2
+      minimum_concern_count: 1
       reply_disposition: draft
       grounding_status: passed
       approval_required: true

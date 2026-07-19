@@ -14,10 +14,13 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededErr
 from langchain.agents.structured_output import ToolStrategy
 from langgraph.errors import GraphRecursionError
 
+from automail.core.runtime_secrets import load_runtime_secrets
 from automail.integrations.http_tool import (
     HttpToolCollection,
+    _make_http_tool,
     isolated_http_tool_collection,
     merge_http_tool_collection,
+    raw_tool_to_definition,
 )
 from automail.llm.usage import llm_stage
 from automail.models import (
@@ -61,6 +64,7 @@ from automail.pipeline.intent.intents_factory import (
     get_intent_actions,
     get_intent_body,
     get_intent_require_review,
+    get_intent_required_read_only_tools,
     get_intent_response_attachments,
     get_intent_response_config,
     get_intent_tools,
@@ -81,6 +85,9 @@ _MALFORMED_ROUTER_REVIEW_REASON = (
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _PROCESSING_SECURITY_BOUNDARY = (_PROMPTS_DIR / "processing_security_boundary.md").read_text(encoding="utf-8").strip()
+_REQUIRED_LOOKUP_UNAVAILABLE_REPLY_REQUIREMENT = (
+    _PROMPTS_DIR / "processing_required_lookup_unavailable.md"
+).read_text(encoding="utf-8").strip()
 
 _FULFILLMENT_CONTEXT_PATTERN = re.compile(
     r"\b(?:delivery|item|order|package|parcel|product|shipment)\w*\b",
@@ -215,6 +222,125 @@ def _intent_needs_processing(
     # separate phase and never owns runbook tools.
     del response_enabled
     return bool(actions or get_intent_tools(intent_name, intents_dir=intents_dir))
+
+
+def _tool_call_names(
+    collection: HttpToolCollection,
+    *,
+    successful_only: bool,
+) -> set[str]:
+    names: set[str] = set()
+    for call in collection.tool_calls:
+        if successful_only and str(call.get("status") or "").casefold() != "success":
+            continue
+        name = str(call.get("name") or "").strip().casefold()
+        if name:
+            names.add(name)
+    return names
+
+
+def _has_required_runtime_input(raw_tool: dict[str, Any]) -> bool:
+    input_schema = raw_tool.get("inputSchema", raw_tool.get("input_schema", []))
+    if not isinstance(input_schema, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and bool(str(item.get("key") or "").strip())
+        and item.get("required", True) is not False
+        for item in input_schema
+    )
+
+
+def _has_unresolved_tool_placeholder(value: Any) -> bool:
+    if isinstance(value, str):
+        return any(
+            name != "sender_email"
+            for name in re.findall(r"\{([^{}]+)\}", value)
+        )
+    if isinstance(value, dict):
+        return any(_has_unresolved_tool_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_unresolved_tool_placeholder(item) for item in value)
+    return False
+
+
+def _enforce_required_read_only_tool_postcondition(
+    intent_name: str,
+    email: Email,
+    intents_dir: Any,
+    tenant_id: str | None,
+    project_id: str | None,
+    collection: HttpToolCollection,
+) -> list[str]:
+    """Run skipped static GET contracts once, then return any unmet names."""
+    required_names = get_intent_required_read_only_tools(
+        intent_name,
+        intents_dir=intents_dir,
+    )
+    if not required_names:
+        return []
+
+    raw_tools = get_intent_tools(intent_name, intents_dir=intents_dir)
+    raw_by_name = {
+        str(raw.get("name") or "").strip().casefold(): raw
+        for raw in raw_tools
+        if isinstance(raw, dict) and str(raw.get("name") or "").strip()
+    }
+    called_names = _tool_call_names(collection, successful_only=False)
+    successful_names = _tool_call_names(collection, successful_only=True)
+    skipped_names = [
+        name for name in required_names if name.casefold() not in called_names
+    ]
+    if not skipped_names:
+        return [
+            name for name in required_names if name.casefold() not in successful_names
+        ]
+    try:
+        secrets = load_runtime_secrets(tenant_id, project_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not load secrets for required read-only tools on intent '%s': %s",
+            intent_name,
+            exc,
+        )
+        return [
+            name for name in required_names if name.casefold() not in successful_names
+        ]
+
+    for required_name in skipped_names:
+        normalized_name = required_name.casefold()
+        raw_tool = raw_by_name.get(normalized_name)
+        method = str((raw_tool or {}).get("method") or "").upper()
+        if raw_tool is None or method != "GET" or _has_required_runtime_input(raw_tool):
+            logger.warning(
+                "Required read-only tool '%s' on intent '%s' cannot run deterministically",
+                required_name,
+                intent_name,
+            )
+            continue
+        definition = raw_tool_to_definition(raw_tool, secrets)
+        if (
+            definition is None
+            or definition.method != "GET"
+            or _has_unresolved_tool_placeholder(definition.url_template)
+            or _has_unresolved_tool_placeholder(definition.headers)
+            or _has_unresolved_tool_placeholder(definition.body)
+        ):
+            continue
+        try:
+            _make_http_tool(definition, sender_email=email.from_address).invoke({})
+        except Exception as exc:
+            logger.warning(
+                "Required read-only tool '%s' on intent '%s' failed: %s",
+                required_name,
+                intent_name,
+                exc,
+            )
+
+    successful_names = _tool_call_names(collection, successful_only=True)
+    return [
+        name for name in required_names if name.casefold() not in successful_names
+    ]
 
 
 def _merge_action_fills(actions: list[IntentAction], output: IntentProcessingOutput) -> int:
@@ -1654,6 +1780,36 @@ def _build_routed_concern_outcome(
         )
     else:
         logger.info("Intent '%s' requires no tool or action processing", intent_name)
+
+    missing_required_tools = _enforce_required_read_only_tool_postcondition(
+        intent_name,
+        processing_email,
+        intents_dir,
+        tenant_id,
+        project_id,
+        collection,
+    )
+    if missing_required_tools:
+        required_reason = (
+            "Required read-only lookup did not succeed: "
+            + ", ".join(missing_required_tools)
+            + "."
+        )
+        output.requires_human = True
+        output.requires_human_reason = "; ".join(
+            _dedupe_strings(
+                [str(output.requires_human_reason or "")],
+                [required_reason],
+            )
+        )
+        output.missing_information = _dedupe_strings(
+            output.missing_information,
+            [required_reason],
+        )
+        output.reply_requirements = _dedupe_strings(
+            output.reply_requirements,
+            [_REQUIRED_LOOKUP_UNAVAILABLE_REPLY_REQUIREMENT],
+        )
 
     tool_evidence = _tool_evidence(collection.tool_calls)
     verified_facts = _verified_facts(tool_evidence)

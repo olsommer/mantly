@@ -742,6 +742,73 @@ def test_explicit_request_sentences_fill_router_obligation_omissions(monkeypatch
     ]
 
 
+def test_explicit_request_sentence_fills_equal_count_router_omission(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = (
+        "For MAT-2026-221, Westbridge SA may have been advised by the firm on a related transaction. "
+        "First look up the current matter and say whether substantive discussion is already paused. "
+        "Then stop substantive discussion, record the potential conflict, and escalate it for review."
+    )
+    route = ConcernRoute(
+        summary="Review a potential conflict",
+        source_text=source_text,
+        answer_obligations=[
+            "Confirm if substantive discussion on MAT-2026-221 is already paused.",
+            (
+                "Confirm that substantive discussion on MAT-2026-221 will be stopped, "
+                "the potential conflict recorded, and escalated for review."
+            ),
+        ],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "potential-conflict",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    questions = [item.question.casefold() for item in outcome.answer_obligations]
+    assert any(
+        "look up the current matter" in question
+        and "substantive discussion" in question
+        and "paus" in question
+        for question in questions
+    )
+    assert any(
+        "mat-2026-221" in question
+        and "substantive discussion" in question
+        and "paus" in question
+        for question in questions
+    )
+    assert any(
+        all(
+            term in question
+            for term in (
+                "substantive discussion",
+                "stop",
+                "potential conflict",
+                "record",
+                "escalat",
+                "review",
+            )
+        )
+        for question in questions
+    )
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        f"potential-conflict:obligation-{index}"
+        for index in range(1, len(outcome.answer_obligations) + 1)
+    ]
+
+
 def test_first_person_noun_request_fills_equal_count_router_omission(monkeypatch):
     _base_stubs(monkeypatch)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])

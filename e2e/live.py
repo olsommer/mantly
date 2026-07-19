@@ -250,6 +250,7 @@ def build_intent_content(persona: E2EPersona, runbook_key: str, api_base: str) -
         "description": runbook.purpose,
         "active": True,
         "require_review": True,
+        "required_read_only_tools": runbook.required_read_only_tools,
         "tools": tools,
         "actions": actions,
         "response": {
@@ -607,6 +608,12 @@ def _preflight_target_for_run(
         actual_tools = {str(tool.get("name") or ""): tool for tool in tools}
         if set(actual_tools) != set(expected_tools):
             raise LiveE2EError(f"QA runbook {name!r} tool set drifted")
+        if set(intent.get("required_read_only_tools") or []) != set(
+            expected.required_read_only_tools
+        ):
+            raise LiveE2EError(
+                f"QA runbook {name!r} required read-only tool contract drifted"
+            )
         for tool_name, expected_url in expected_tools.items():
             tool = actual_tools[tool_name]
             unsafe_tool_fields = [

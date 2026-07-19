@@ -31,6 +31,7 @@ from automail.support.knowledge_workspace import (
     MAX_STDOUT_CHARS,
     KnowledgeWorkspace,
 )
+from automail.support.pending_action_claims import PENDING_ACTION_REPAIR_NOTICE
 
 
 def _articles() -> list[dict[str, Any]]:
@@ -1004,9 +1005,45 @@ def _pending_action_obligation_issue(
     }
 
 
+def _successful_runbook_action_execution(
+    *,
+    concern_id: str,
+    action_name: str,
+    action_label: str,
+    execution_id: str,
+) -> dict[str, Any]:
+    return {
+        "id": execution_id,
+        "type": "runbook_webhook",
+        "status": "success",
+        "completedAt": "2026-07-18T10:00:00Z",
+        "metadata": {
+            "source": "runbook",
+            "sourceMessageId": "message-b2b-urgent",
+            "concernId": concern_id,
+            "runbook": concern_id,
+        },
+        "result": {
+            "proposedAction": {
+                "name": action_name,
+                "label": action_label,
+            },
+            "application": {
+                "applied": True,
+                "webhookResult": {
+                    "status": "ok",
+                    "response": {
+                        "status": "complete",
+                        "reference": f"proof-{execution_id}",
+                    },
+                },
+            },
+        },
+    }
+
+
 _EXECUTIVE_ESCALATION_PENDING_NOTICE = (
-    "Executive escalation is not confirmed. A related next step for your request "
-    "remains pending human review."
+    "Executive escalation is not confirmed. A related next step for your request remains pending human review."
 )
 
 
@@ -1047,10 +1084,13 @@ def test_action_state_repair_answers_only_omitted_e09_obligation() -> None:
     assert "SLA compensation is not confirmed" not in repaired
 
     ticket = issue_agent._automatic_ticket_context(issue)
-    assert issue_agent.check_pending_action_claims(
-        answer=repaired,
-        runbook_actions=ticket["runbookActions"],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
 
 
 def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> None:
@@ -1095,10 +1135,13 @@ def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> No
     )
     assert "Inventory and dispatch is not confirmed" not in repaired
     ticket = issue_agent._automatic_ticket_context(issue)
-    assert issue_agent.check_pending_action_claims(
-        answer=repaired,
-        runbook_actions=ticket["runbookActions"],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -1113,9 +1156,7 @@ def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> No
 def test_action_state_repair_removes_positive_confirmation_gerund(
     answer: str,
 ) -> None:
-    issue = _pending_action_obligation_issue(
-        questions=["Confirm executive escalation."]
-    )
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation."])
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
         issue=issue,
@@ -1126,10 +1167,13 @@ def test_action_state_repair_removes_positive_confirmation_gerund(
     assert answer not in repaired
     assert _EXECUTIVE_ESCALATION_PENDING_NOTICE in repaired
     ticket = issue_agent._automatic_ticket_context(issue)
-    assert issue_agent.check_pending_action_claims(
-        answer=repaired,
-        runbook_actions=ticket["runbookActions"],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
 
 
 def test_action_state_repair_does_not_duplicate_safe_negative_paraphrase() -> None:
@@ -1139,9 +1183,7 @@ def test_action_state_repair_does_not_duplicate_safe_negative_paraphrase() -> No
     )
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=["Confirm executive escalation."]
-        ),
+        issue=_pending_action_obligation_issue(questions=["Confirm executive escalation."]),
         messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
         answer=answer,
     )
@@ -1169,9 +1211,7 @@ def test_action_state_repair_does_not_duplicate_safe_negative_paraphrase() -> No
 def test_action_state_repair_does_not_borrow_unrelated_pending_clause(
     answer: str,
 ) -> None:
-    issue = _pending_action_obligation_issue(
-        questions=["Confirm executive escalation."]
-    )
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation."])
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
         issue=issue,
@@ -1182,19 +1222,20 @@ def test_action_state_repair_does_not_borrow_unrelated_pending_clause(
     assert answer not in repaired
     assert _EXECUTIVE_ESCALATION_PENDING_NOTICE in repaired
     ticket = issue_agent._automatic_ticket_context(issue)
-    assert issue_agent.check_pending_action_claims(
-        answer=repaired,
-        runbook_actions=ticket["runbookActions"],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
 
 
 def test_action_state_repair_is_noop_when_subject_is_already_answered() -> None:
     answer = _EXECUTIVE_ESCALATION_PENDING_NOTICE
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=["Confirm executive escalation"]
-        ),
+        issue=_pending_action_obligation_issue(questions=["Confirm executive escalation"]),
         messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
         answer=answer,
     )
@@ -1218,16 +1259,12 @@ def test_action_state_repair_is_noop_without_pending_human_action() -> None:
 
 
 def test_action_state_repair_ignores_unscoped_pending_triage() -> None:
-    issue = _pending_action_obligation_issue(
-        questions=["Confirm executive escalation"]
-    )
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation"])
     action = issue["actionExecutions"][0]
     action["type"] = "agent_triage"
     action["metadata"]["source"] = "agent_triage"
     action["metadata"].pop("concernId")
-    action["metadata"]["automationContext"] = {
-        "messageId": "message-b2b-urgent"
-    }
+    action["metadata"]["automationContext"] = {"messageId": "message-b2b-urgent"}
     answer = "We have received the P1 incident report."
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
@@ -1239,13 +1276,148 @@ def test_action_state_repair_ignores_unscoped_pending_triage() -> None:
     assert repaired == answer
 
 
+def test_action_state_repair_uses_concern_review_state_without_scoping_generic_triage() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Record the potential conflict for MAT-2026-221.",
+            "Escalate the potential conflict for review.",
+        ]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        {
+            "actionKey": "agent_triage",
+            "type": "agent_triage",
+            "status": "pending",
+            "label": "Prepare legal conflict triage",
+            "metadata": {
+                "source": "agent_triage",
+                "approvalRequired": True,
+                "sourceMessageId": "message-b2b-urgent",
+                "automationContext": {
+                    "sourceMessageId": "message-b2b-urgent",
+                },
+            },
+            "result": {
+                "proposedAction": {
+                    "type": "triage_ticket",
+                    "priority": "high",
+                    "status": "ongoing",
+                }
+            },
+        }
+    ]
+    answer = "We have noted the potential conflict for MAT-2026-221 and will escalate it for review."
+
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert ticket["runbookActions"] == [
+        {
+            "name": "agent_triage",
+            "label": "Prepare legal conflict triage",
+            "status": "pending_approval",
+        }
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": ("Stop substantive discussion, record the potential conflict, and escalate it for review."),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "We have noted" not in repaired
+    assert "will escalate" not in repaired
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+    assert (
+        "Recording the potential conflict for MAT-2026-221 is not confirmed. "
+        "A related next step for your request remains pending human review."
+    ) in repaired
+    assert (
+        "Escalating the potential conflict for review is not confirmed. A related next step for your request "
+        "remains pending human review."
+    ) in repaired
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
+
+
+def test_action_state_repair_does_not_derive_notices_from_unmatched_concern() -> None:
+    issue = _pending_action_obligation_issue(questions=["Record my marketing opt-out."])
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["matched"] = False
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    action = issue["actionExecutions"][0]
+    action["type"] = "agent_triage"
+    action["metadata"]["source"] = "agent_triage"
+    action["metadata"].pop("concernId")
+
+    answer = "We have received your marketing opt-out request."
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Record my marketing opt-out."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "Recording my marketing opt-out is not confirmed" not in repaired
+
+
+def test_action_state_repair_handles_exact_live_l03_without_action_snapshot() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Provide an urgent consultation today.",
+            "Identify and escalate the deadline.",
+            "Explain the triage information needed.",
+        ],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    answer = (
+        "The Zurich Commercial Court response is due on July 20, 2026, at 12:00. "
+        "We understand the urgency and are escalating this deadline for immediate "
+        "human review. We are taking steps to address your request."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "I need an urgent consultation today. Identify and escalate "
+                    "the deadline and explain the triage information needed."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "are escalating" not in repaired
+    assert "taking steps" not in repaired
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+    assert (
+        "Escalating the deadline is not confirmed. A related next step for your request remains pending human review."
+    ) in repaired
+
+
 def test_action_state_repair_preserves_topic_only_policy_mention() -> None:
     answer = "Our executive escalation criteria apply to P1 incidents."
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=["Confirm executive escalation"]
-        ),
+        issue=_pending_action_obligation_issue(questions=["Confirm executive escalation"]),
         messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
         answer=answer,
     )
@@ -1257,9 +1429,7 @@ def test_action_state_repair_preserves_positive_topic_answer_byte_for_byte() -> 
     answer = "Shipment status is in transit."
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=["Confirm shipment status"]
-        ),
+        issue=_pending_action_obligation_issue(questions=["Confirm shipment status"]),
         messages=[{"direction": "customer", "body": "Confirm shipment status."}],
         answer=answer,
     )
@@ -1281,9 +1451,7 @@ def test_action_state_repair_ignores_pronoun_only_confirmation_clause(
     answer = "We have received your escalation request."
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=[question]
-        ),
+        issue=_pending_action_obligation_issue(questions=[question]),
         messages=[
             {
                 "direction": "customer",
@@ -1299,9 +1467,7 @@ def test_action_state_repair_ignores_pronoun_only_confirmation_clause(
 
 
 def test_action_state_repair_does_not_cross_concern_boundaries() -> None:
-    issue = _pending_action_obligation_issue(
-        questions=["Confirm executive escalation"]
-    )
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation"])
     issue["aiRuns"][0]["intentResult"]["concerns"].append(
         {
             "concernId": "concern-refund",
@@ -1331,13 +1497,557 @@ def test_action_state_repair_does_not_cross_concern_boundaries() -> None:
     assert repaired == answer
 
 
+def test_action_state_repair_does_not_borrow_same_action_success_from_other_concern() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Escalate the conflict."],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": "concern-other-conflict",
+            "matched": True,
+            "intentName": "other-conflict",
+            "answerObligations": [
+                {
+                    "obligationId": "concern-other-conflict:obligation-1",
+                    "question": "Escalate the conflict.",
+                }
+            ],
+        }
+    )
+    issue["actionExecutions"].append(
+        _successful_runbook_action_execution(
+            concern_id="concern-other-conflict",
+            action_name="escalate_conflict",
+            action_label="Escalate conflict",
+            execution_id="execution-other-conflict",
+        )
+    )
+    answer = "Conflict proof-execution-other-conflict has been escalated."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate both conflict matters.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired.startswith(answer)
+    assert repaired.count("Escalating the conflict is not confirmed") == 1
+
+
+def test_action_state_repair_preserves_same_concern_proven_success() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Cancel the order."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="cancel_order",
+            action_label="Cancel order",
+            execution_id="execution-cancel-order",
+        )
+    ]
+    answer = "Your order has been cancelled."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Please cancel my order."}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "not confirmed" not in repaired
+
+
+@pytest.mark.parametrize(
+    ("action_name", "action_label", "question", "answer"),
+    [
+        (
+            "escalate_conflict",
+            "Escalate conflict",
+            "Escalate the conflict.",
+            "Conflict proof-execution-escalate-conflict has been escalated.",
+        ),
+        (
+            "record_conflict",
+            "Record conflict",
+            "Record the potential conflict.",
+            "The potential conflict proof-execution-record-conflict has been recorded.",
+        ),
+        (
+            "escalate_conflict",
+            "Escalate conflict",
+            "Escalate the conflict.",
+            "Conflict proof-execution-escalate-conflict escalated.",
+        ),
+        (
+            "record_conflict",
+            "Record conflict",
+            "Record the potential conflict.",
+            "Potential conflict proof-execution-record-conflict recorded.",
+        ),
+    ],
+)
+def test_action_state_repair_does_not_contradict_same_obligation_success(
+    action_name: str,
+    action_label: str,
+    question: str,
+    answer: str,
+) -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=[question],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name=action_name,
+            action_label=action_label,
+            execution_id=f"execution-{action_name.replace('_', '-')}",
+        )
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": question}],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "not confirmed" not in repaired
+
+
+def test_action_state_repair_keeps_other_obligation_notice_after_success() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Escalate the conflict.", "Record the potential conflict."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="escalate_conflict",
+            action_label="Escalate conflict",
+            execution_id="execution-escalate-conflict",
+        )
+    ]
+    answer = "Conflict proof-execution-escalate-conflict has been escalated."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate and record the potential conflict.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired.startswith(answer)
+    assert "Escalating the conflict is not confirmed" not in repaired
+    assert "Recording the potential conflict is not confirmed" in repaired
+
+
+def test_action_state_repair_isolates_pending_and_successful_concerns() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation."],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"].append(
+        {
+            "concernId": "concern-cancellation",
+            "matched": True,
+            "intentName": "order-cancellation",
+            "requiresHuman": True,
+            "status": "requires_human",
+            "answerObligations": [
+                {
+                    "obligationId": "concern-cancellation:obligation-1",
+                    "question": "Cancel the order.",
+                }
+            ],
+        }
+    )
+    issue["actionExecutions"].append(
+        _successful_runbook_action_execution(
+            concern_id="concern-cancellation",
+            action_name="cancel_order",
+            action_label="Cancel order",
+            execution_id="execution-cancel-order",
+        )
+    )
+    answer = _EXECUTIVE_ESCALATION_PENDING_NOTICE + "\n\nYour order has been cancelled."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate my case and cancel my order.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "Order cancellation is not confirmed" not in repaired
+
+
+def test_action_state_repair_isolates_success_within_one_human_review_concern() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Cancel the order.", "Escalate the deadline."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="cancel_order",
+            action_label="Cancel order",
+            execution_id="execution-cancel-order",
+        )
+    ]
+    answer = "Your order CAN-1 has been cancelled. We will escalate the deadline."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Cancel my order and escalate the deadline.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Your order CAN-1 has been cancelled." in repaired
+    assert "will escalate the deadline" not in repaired
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+    assert (
+        "Escalating the deadline is not confirmed. A related next step for your request remains pending human review."
+    ) in repaired
+
+
+def test_action_state_repair_rejects_bundled_object_but_keeps_success_state_truthful() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Escalate the conflict.", "Escalate the deadline."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="escalate_conflict",
+            action_label="Escalate conflict",
+            execution_id="execution-escalate-conflict",
+        )
+    ]
+    unsafe = "The conflict proof-execution-escalate-conflict and deadline have been escalated."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate the conflict and deadline.",
+            }
+        ],
+        answer=unsafe,
+    )
+
+    assert unsafe not in repaired
+    assert "Escalating the conflict is not confirmed" not in repaired
+    assert "Escalating the deadline is not confirmed" in repaired
+
+
+def test_action_state_repair_does_not_match_obligations_by_generic_request_word() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Escalate the conflict request.",
+            "Escalate the deadline request.",
+        ],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="escalate_conflict_request",
+            action_label="Escalate conflict request",
+            execution_id="execution-escalate-conflict-request",
+        )
+    ]
+    answer = "Conflict proof-execution-escalate-conflict-request has been escalated."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate the conflict request and deadline request.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Escalating the conflict request is not confirmed" not in repaired
+    assert "Escalating the deadline request is not confirmed" in repaired
+
+
+def test_action_state_repair_reports_only_unproven_part_of_compound_obligation() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Escalate the conflict and deadline."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="escalate_conflict",
+            action_label="Escalate conflict",
+            execution_id="execution-escalate-conflict",
+        )
+    ]
+    answer = "Conflict proof-execution-escalate-conflict has been escalated."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Escalate the conflict and deadline.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Escalating the conflict and deadline is not confirmed" not in repaired
+    assert "Escalating the conflict is not confirmed" not in repaired
+    assert "Escalating the deadline is not confirmed" in repaired
+
+
+@pytest.mark.parametrize(
+    (
+        "question",
+        "action_name",
+        "action_label",
+        "absent_notice",
+        "present_notice",
+    ),
+    [
+        (
+            "Cancel the order and issue the refund.",
+            "cancel_order",
+            "Cancel order",
+            "Cancelling the order is not confirmed",
+            "Issuing the refund is not confirmed",
+        ),
+        (
+            "Record and escalate the conflict.",
+            "record_conflict",
+            "Record conflict",
+            "Recording the conflict is not confirmed",
+            "Escalating the conflict is not confirmed",
+        ),
+    ],
+)
+def test_action_state_repair_tracks_each_verb_in_a_compound_obligation(
+    question: str,
+    action_name: str,
+    action_label: str,
+    absent_notice: str,
+    present_notice: str,
+) -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=[question],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name=action_name,
+            action_label=action_label,
+            execution_id=f"execution-{action_name}",
+        )
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": question}],
+        answer="",
+    )
+
+    assert absent_notice not in repaired
+    assert present_notice in repaired
+
+
+def test_action_state_repair_does_not_treat_a_final_target_as_a_new_verb() -> None:
+    question = "Escalate the conflict, deadline, and refund."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(questions=[question]),
+        messages=[{"direction": "customer", "body": question}],
+        answer="",
+    )
+
+    assert "Escalating the conflict, deadline, and refund is not confirmed" in repaired
+    assert "Refunding" not in repaired
+
+
+def test_action_state_repair_splits_three_distinct_action_verbs() -> None:
+    question = "Cancel the order, issue the refund, and notify the warehouse."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(questions=[question]),
+        messages=[{"direction": "customer", "body": question}],
+        answer="",
+    )
+
+    assert "Cancelling the order is not confirmed" in repaired
+    assert "Issuing the refund is not confirmed" in repaired
+    assert "Notifying the warehouse is not confirmed" in repaired
+
+
+def test_action_state_repair_keeps_same_action_different_entity_obligation_pending() -> None:
+    concern_id = "concern-b2b-urgent"
+    issue = _pending_action_obligation_issue(
+        questions=["Cancel order A.", "Cancel order B."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiresHuman"] = True
+    concern["status"] = "requires_human"
+    issue["actionExecutions"] = [
+        _successful_runbook_action_execution(
+            concern_id=concern_id,
+            action_name="cancel_order_a",
+            action_label="Cancel order A",
+            execution_id="execution-cancel-order-a",
+        )
+    ]
+    answer = "Order proof-execution-cancel-order-a has been cancelled."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Cancel order A and order B.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Cancelling order A is not confirmed" not in repaired
+    assert "Cancelling order B is not confirmed" in repaired
+
+
+@pytest.mark.parametrize(
+    ("question", "message", "expected_notice"),
+    [
+        (
+            "Eskalieren Sie den Konflikt.",
+            "Bitte eskalieren Sie den Konflikt. Vielen Dank.",
+            "Für den Konflikt liegt keine Bestätigung vor.",
+        ),
+        (
+            "Escaladez le conflit.",
+            "Veuillez escalader le conflit, s'il vous plaît.",
+            "Aucune confirmation n’est disponible pour le conflit.",
+        ),
+        (
+            "Remboursez le client.",
+            "Veuillez rembourser le client.",
+            "Aucune confirmation n’est disponible pour le client.",
+        ),
+        (
+            "Erstatten Sie dem Kunden.",
+            "Erstatten Sie dem Kunden.",
+            "Für den Kunden liegt keine Bestätigung vor.",
+        ),
+        (
+            "Rückerstatten Sie dem Kunden den Betrag.",
+            "Rückerstatten Sie dem Kunden den Betrag.",
+            "Für den Kunden den Betrag liegt keine Bestätigung vor.",
+        ),
+        (
+            "Escale el conflicto.",
+            "Por favor, escale el conflicto.",
+            "No hay confirmación para el conflicto.",
+        ),
+        (
+            "Reembolse al cliente.",
+            "Por favor, reembolse al cliente.",
+            "No hay confirmación para el cliente.",
+        ),
+        (
+            "Escalate il conflitto.",
+            "Per favore, escalate il conflitto.",
+            "Non c’è una conferma per il conflitto.",
+        ),
+    ],
+)
+def test_action_state_repair_localizes_direct_action_obligation_notices(
+    question: str,
+    message: str,
+    expected_notice: str,
+) -> None:
+    answer = (
+        "Grazie."
+        if "conflitto" in question
+        else "Merci."
+        if "conflit" in question
+        else "Danke."
+        if "Konflikt" in question
+        else "Gracias."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_pending_action_obligation_issue(questions=[question]),
+        messages=[{"direction": "customer", "body": message}],
+        answer=answer,
+    )
+
+    assert expected_notice in repaired
+
+
 def test_action_state_repair_localizes_missing_obligation_notice() -> None:
     answer = "Wir benötigen dafür eine menschliche Prüfung."
 
     repaired = issue_agent.repair_issue_automation_answer_action_state(
-        issue=_pending_action_obligation_issue(
-            questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"]
-        ),
+        issue=_pending_action_obligation_issue(questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"]),
         messages=[
             {
                 "direction": "customer",
@@ -1351,20 +2061,20 @@ def test_action_state_repair_localizes_missing_obligation_notice() -> None:
     )
 
     assert repaired == (
-        answer
-        + "\n\nFür die Eskalation an die Geschäftsleitung liegt keine Bestätigung "
+        answer + "\n\nFür die Eskalation an die Geschäftsleitung liegt keine Bestätigung "
         "vor. Ein damit verbundener nächster Schritt für Ihre Anfrage wartet "
         "weiterhin auf menschliche Prüfung."
     )
     ticket = issue_agent._automatic_ticket_context(
-        _pending_action_obligation_issue(
-            questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"]
-        )
+        _pending_action_obligation_issue(questions=["Bestätigen Sie die Eskalation an die Geschäftsleitung"])
     )
-    assert issue_agent.check_pending_action_claims(
-        answer=repaired,
-        runbook_actions=ticket["runbookActions"],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=ticket["runbookActions"],
+        ).blocked
+        is False
+    )
 
 
 def test_automation_draft_retries_once_for_pending_action_claim(
@@ -1450,19 +2160,20 @@ def test_automation_draft_retries_once_for_pending_action_claim(
     assert len(prompts) == 2
     assert "pending business action" in prompts[1]
     assert result.answer == "The investigation is pending approval. We can open it after review."
-    assert issue_agent.check_pending_action_claims(
-        answer=result.answer,
-        runbook_actions=[{"label": "Open delivery investigation", "status": "pending_approval"}],
-    ).blocked is False
+    assert (
+        issue_agent.check_pending_action_claims(
+            answer=result.answer,
+            runbook_actions=[{"label": "Open delivery investigation", "status": "pending_approval"}],
+        ).blocked
+        is False
+    )
 
 
 def test_automation_draft_accepts_exact_readonly_tracking_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompts: list[str] = []
-    answer = (
-        "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
-    )
+    answer = "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
     monkeypatch.setattr(config_module, "read_config", lambda: {})
     monkeypatch.setattr(
         llm_module,
@@ -1591,9 +2302,7 @@ def test_business_identifier_sources_are_exact_and_exclude_dates_and_plain_numbe
         "ZF-20991",
         "DHL00340434292135100123",
     )
-    assert issue_agent._business_identifiers(
-        "2026-07-17 1234567890 ordinary words 24-hours"
-    ) == ()
+    assert issue_agent._business_identifiers("2026-07-17 1234567890 ordinary words 24-hours") == ()
 
 
 def test_automatic_context_omits_current_workflow_state_but_binds_related_tickets() -> None:
@@ -1698,11 +2407,8 @@ def _assess_with_grounding_output(
     answer_units = issue_agent._grounding_answer_units(answer)
     evidence_ids = unit_evidence_ids or ["ticket"]
     output = AutomationGroundingOutput(
-        verdict=verdict or (
-            "not_grounded"
-            if any(resolution == "not_covered" for _, resolution, _ in resolutions)
-            else "grounded"
-        ),
+        verdict=verdict
+        or ("not_grounded" if any(resolution == "not_covered" for _, resolution, _ in resolutions) else "grounded"),
         answer_sha256=issue_agent.grounding_text_sha256(answer),
         unit_assessments=[
             AutomationGroundingUnitAssessment(
@@ -1815,9 +2521,7 @@ def test_repaired_e09_notice_is_hashed_and_grounded_to_its_concern(
     concern_id = "concern-b2b-urgent"
     obligation_id = f"{concern_id}:obligation-1"
     evidence_id = f"concern:{concern_id}"
-    issue = _pending_action_obligation_issue(
-        questions=["Confirm executive escalation"]
-    )
+    issue = _pending_action_obligation_issue(questions=["Confirm executive escalation"])
     repaired = issue_agent.repair_issue_automation_answer_action_state(
         issue=issue,
         messages=[{"direction": "customer", "body": "Confirm executive escalation."}],
@@ -1845,14 +2549,8 @@ def test_repaired_e09_notice_is_hashed_and_grounded_to_its_concern(
     assert result.answer_sha256 == issue_agent.grounding_text_sha256(repaired)
     assert result.obligation_assessments[0]["resolution"] == "pending_or_unavailable"
     assert result.obligation_assessments[0]["covered"] is True
-    assert all(
-        assessment["evidenceIds"] == [evidence_id]
-        for assessment in result.unit_assessments
-    )
-    assert any(
-        snapshot["id"] == "ticket:scoped"
-        for snapshot in result.context_snapshots
-    )
+    assert all(assessment["evidenceIds"] == [evidence_id] for assessment in result.unit_assessments)
+    assert any(snapshot["id"] == "ticket:scoped" for snapshot in result.context_snapshots)
     assert evidence_id in prompt
 
 
@@ -2001,9 +2699,7 @@ def test_grounding_accepts_only_exact_ticket_tool_evidence_ids(
 def test_grounding_allows_proven_tracking_check_with_unrelated_pending_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    answer = (
-        "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
-    )
+    answer = "I've checked tracking for UPS1Z999AA10123456784, and it is in transit."
     monkeypatch.setattr(config_module, "read_config", lambda: {})
     monkeypatch.setattr(
         llm_module,
@@ -2327,10 +3023,7 @@ def test_grounding_r11_c06_discuss_later_does_not_cover_three_gmbh_obligations(
         monkeypatch,
         issue=issue,
         answer=answer,
-        resolutions=[
-            (obligation_id, "not_covered", ["u001"])
-            for obligation_id, _question in questions
-        ],
+        resolutions=[(obligation_id, "not_covered", ["u001"]) for obligation_id, _question in questions],
     )
 
     assert result.verified is False
@@ -2356,18 +3049,14 @@ def test_grounding_r10_c09_intake_and_assess_later_does_not_cover_rescheduling(
         questions=questions,
     )
     answer = (
-        "Please send your preferred dates and we can assess rescheduling and "
-        "availability during a later consultation."
+        "Please send your preferred dates and we can assess rescheduling and availability during a later consultation."
     )
 
     result, _prompt = _assess_with_grounding_output(
         monkeypatch,
         issue=issue,
         answer=answer,
-        resolutions=[
-            (obligation_id, "not_covered", ["u001"])
-            for obligation_id, _question in questions
-        ],
+        resolutions=[(obligation_id, "not_covered", ["u001"]) for obligation_id, _question in questions],
     )
 
     assert result.verified is False
@@ -2411,17 +3100,13 @@ def test_grounding_explicit_pending_state_with_next_step_addresses_obligation(
         "The conflict check has not run; it is pending human review. "
         "Next, our conflicts team will review the submitted names."
     )
-    answer_unit_ids = [
-        unit["id"] for unit in issue_agent._grounding_answer_units(answer)
-    ]
+    answer_unit_ids = [unit["id"] for unit in issue_agent._grounding_answer_units(answer)]
 
     result, _prompt = _assess_with_grounding_output(
         monkeypatch,
         issue=issue,
         answer=answer,
-        resolutions=[
-            ("conflict:run", "pending_or_unavailable", answer_unit_ids)
-        ],
+        resolutions=[("conflict:run", "pending_or_unavailable", answer_unit_ids)],
     )
 
     assert result.verified is True
@@ -2522,6 +3207,92 @@ def test_grounding_fulfilled_action_requires_exact_success_evidence_from_same_co
     else:
         assert result.reason_code == "incomplete_answer"
         assert result.uncovered_obligations == ("Run the conflict check.",)
+
+
+@pytest.mark.parametrize(
+    ("resolution", "evidence_id"),
+    [
+        ("fulfilled_action", "action:execution-conflict"),
+        ("answered", "action:execution-conflict"),
+        ("answered", "concern:mixed-escalation"),
+        ("answered", "ticket"),
+    ],
+)
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Escalate the deadline request.",
+        "Can you escalate the deadline request?",
+        "Could you escalate the deadline request?",
+        "I want you to escalate the deadline request.",
+        "Has the deadline request been escalated?",
+        "Was the deadline request escalated?",
+    ],
+)
+def test_grounding_addressed_action_rejects_different_action_from_same_concern(
+    monkeypatch: pytest.MonkeyPatch,
+    resolution: str,
+    evidence_id: str,
+    question: str,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="mixed-escalation",
+        questions=[
+            (
+                "deadline:escalate",
+                question,
+            )
+        ],
+        action_executions=[
+            {
+                "id": "execution-conflict",
+                "type": "runbook_webhook",
+                "status": "success",
+                "completedAt": "2026-07-18T10:00:00Z",
+                "metadata": {
+                    "source": "runbook",
+                    "concernId": "mixed-escalation",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "escalate_conflict_request",
+                        "label": "Escalate conflict request",
+                    },
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "status": "escalated",
+                                "reference": "ESC-CONFLICT-1",
+                            },
+                        },
+                    },
+                },
+            }
+        ],
+    )
+    answer = "The deadline request ESC-CONFLICT-1 has been escalated."
+
+    result, prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "deadline:escalate",
+                resolution,
+                ["u001"],
+            )
+        ],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert '"action:execution-conflict"' in prompt
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (question,)
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
 
 
 def _two_concern_shared_tool_grounding_issue() -> dict[str, Any]:
@@ -2631,9 +3402,7 @@ def test_grounding_filters_explicit_foreign_obligation_evidence_from_mixed_unit(
     assert result.verified is expected_verified
     if expected_verified:
         assert result.obligation_assessments[0]["resolution"] == "answered"
-        assert result.obligation_assessments[0]["evidenceIds"] == [
-            "tool:first-concern:shared-status"
-        ]
+        assert result.obligation_assessments[0]["evidenceIds"] == ["tool:first-concern:shared-status"]
     else:
         assert result.reason_code == "incomplete_answer"
         assert result.obligation_assessments[0]["resolution"] == "not_covered"
@@ -2815,9 +3584,9 @@ def test_grounding_context_hashes_global_and_scoped_ticket_evidence_separately()
             messages=[],
         )
     }
-    issue["aiRuns"][0]["intentResult"]["concerns"][1]["outcome"][
-        "toolEvidence"
-    ][0]["responseFacts"]["status"] = "paused"
+    issue["aiRuns"][0]["intentResult"]["concerns"][1]["outcome"]["toolEvidence"][0]["responseFacts"]["status"] = (
+        "paused"
+    )
     changed = {
         snapshot["id"]: snapshot["contextSha256"]
         for snapshot in issue_agent.grounding_context_snapshots(
@@ -3157,8 +3926,18 @@ def test_grounding_reassesses_supported_multi_concern_status_and_safe_deferral(
     )
 
 
-def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Thanks for your message. We will look into it and get back to you.",
+        "Thank you for your enquiry.",
+        "Thank you for contacting us.",
+        "Thanks for your inquiries.",
+    ],
+)
+def test_grounding_skips_reassessment_for_acknowledgement_only_no_answer(
     monkeypatch: pytest.MonkeyPatch,
+    answer: str,
 ) -> None:
     issue = _issue_with_grounding_obligations(
         concern_id="shipment",
@@ -3167,7 +3946,6 @@ def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
             ("shipment:eta", "When will it arrive?"),
         ],
     )
-    answer = "Thanks for your message. We will look into it and get back to you."
     units = issue_agent._grounding_answer_units(answer)
     output = AutomationGroundingOutput(
         verdict="not_grounded",
@@ -3196,10 +3974,10 @@ def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
         monkeypatch,
         issue=issue,
         answer=answer,
-        outputs=[output, output],
+        outputs=[output],
     )
 
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert result.verified is False
     assert result.status == "failed"
     assert result.reason_code == "incomplete_answer"
@@ -3207,6 +3985,249 @@ def test_grounding_reassessment_keeps_adversarial_no_answer_uncovered(
         "What is the current shipment status?",
         "When will it arrive?",
     )
+
+
+def test_grounding_live_l06_restatement_fails_once_without_semantic_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    questions = [
+        ("gmbh:steps", "Outline the preliminary formation steps."),
+        ("gmbh:documents", "Outline the typical formation documents."),
+        ("gmbh:capital", "Outline the capital requirement."),
+        ("gmbh:consultation", "Outline the consultation process."),
+    ]
+    issue = _issue_with_grounding_obligations(
+        concern_id="gmbh-formation",
+        questions=questions,
+    )
+    answer = (
+        "Thank you for your enquiry regarding the formation of a Swiss GmbH in "
+        "Zurich. You are seeking information on the preliminary steps, typical "
+        "documents, capital requirements, and the consultation process. Initial "
+        "consultations are typically 30 minutes and can be conducted by video or "
+        "in person in Zurich."
+    )
+    units = issue_agent._grounding_answer_units(answer)
+    restatement_unit_id = units[1]["id"]
+    consultation_unit_id = units[2]["id"]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=["ticket"],
+            )
+            for unit in units
+        ],
+        obligation_assessments=[
+            *[
+                AutomationGroundingObligationAssessment(
+                    obligation_id=obligation_id,
+                    resolution="not_covered",
+                    answer_unit_ids=[restatement_unit_id],
+                    evidence_ids=["ticket"],
+                )
+                for obligation_id, _question in questions[:3]
+            ],
+            AutomationGroundingObligationAssessment(
+                obligation_id="gmbh:consultation",
+                resolution="answered",
+                answer_unit_ids=[consultation_unit_id],
+                evidence_ids=["ticket"],
+            ),
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output],
+    )
+
+    assert len(prompts) == 1
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == tuple(question for _obligation_id, question in questions[:3])
+
+
+@pytest.mark.parametrize(
+    ("unit", "question"),
+    [
+        (
+            "You are asking about the capital requirement: the minimum share capital is CHF 20,000.",
+            "What is the capital requirement?",
+        ),
+        (
+            "We understand you need the formation steps; first reserve a name with the registry.",
+            "What formation steps are required?",
+        ),
+        (
+            "We can review the documents, including the articles of association and public deed.",
+            "Which documents should I provide?",
+        ),
+        (
+            "Thank you for your enquiry; the minimum share capital is CHF 20,000.",
+            "What is the minimum share capital?",
+        ),
+        (
+            "We understand you may submit the documents electronically.",
+            "May I submit the documents electronically?",
+        ),
+        (
+            "You are asking for the deadline, which falls on Friday.",
+            "When is the deadline?",
+        ),
+        (
+            "Our team can review your submission within two business days.",
+            "How long does submission review take?",
+        ),
+        (
+            "We understand you need the articles of association and a public deed.",
+            "Which formation documents do I need?",
+        ),
+        (
+            "We understand you can submit the application by email.",
+            "Can I submit the application by email?",
+        ),
+        (
+            "We understand you will receive a refund.",
+            "Will I receive a refund?",
+        ),
+        (
+            "We understand you qualify for the standard plan.",
+            "Do I qualify for the standard plan?",
+        ),
+        (
+            "Our team can review all submissions.",
+            "Can your team review all submissions?",
+        ),
+        (
+            "We can assess all applications.",
+            "Can you assess all applications?",
+        ),
+        (
+            "We will address the complaint.",
+            "Will you address the complaint?",
+        ),
+        (
+            "You are asking for the applicable law, Swiss law.",
+            "What is the applicable law?",
+        ),
+        (
+            "You are asking for the applicable law, Swiss law.",
+            "Is the applicable law Swiss or German?",
+        ),
+        (
+            "You are asking for the jurisdiction — Switzerland.",
+            "Is the jurisdiction Switzerland or Germany?",
+        ),
+        (
+            "You are asking for the channel – email.",
+            "Is the channel email or post?",
+        ),
+        (
+            "You are asking for the plan (standard).",
+            "Is the plan standard or premium?",
+        ),
+        (
+            "You are asking for the status, cancelled.",
+            "Is the status cancelled or pending?",
+        ),
+        (
+            "You are asking for the applicable law - Swiss law.",
+            "Is the applicable law Swiss or German?",
+        ),
+        (
+            "You are asking for the channel / email.",
+            "Is the channel email or post?",
+        ),
+        (
+            "You are asking for the plan = standard.",
+            "Is the plan standard or premium?",
+        ),
+    ],
+)
+def test_grounding_mixed_acknowledgement_unit_remains_retry_eligible(
+    unit: str,
+    question: str,
+) -> None:
+    assert (
+        issue_agent._grounding_unit_only_acknowledges_or_defers(
+            unit,
+            linked_obligation_questions=(question,),
+            all_obligation_questions=(question,),
+        )
+        is False
+    )
+
+
+def test_grounding_restatement_requires_only_customer_obligation_tokens() -> None:
+    questions = (
+        "Outline the preliminary formation steps.",
+        "Outline the typical formation documents.",
+        "Outline the capital requirement.",
+        "Outline the consultation process.",
+    )
+
+    assert (
+        issue_agent._grounding_unit_only_acknowledges_or_defers(
+            "You are seeking information on the preliminary steps, typical documents, "
+            "capital requirements, and the consultation process.",
+            linked_obligation_questions=questions[:3],
+            all_obligation_questions=questions,
+        )
+        is True
+    )
+
+
+def test_grounding_does_not_reassess_unknown_obligation_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obligation_id = "shipment:status"
+    issue = _issue_with_grounding_obligations(
+        concern_id="shipment",
+        questions=[(obligation_id, "What is the current shipment status?")],
+    )
+    answer = "The parcel is delayed."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=["ticket"],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=["invented-evidence"],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output],
+    )
+
+    assert len(prompts) == 1
+    assert result.verified is False
+    assert result.status == "error"
+    assert result.reason_code == "grounding_check_failed"
+    assert "unknown evidence IDs: invented-evidence" in result.error
 
 
 def test_grounding_resolves_knowledge_backed_negative_refund_guarantee(
@@ -3220,8 +4241,7 @@ def test_grounding_resolves_knowledge_backed_negative_refund_guarantee(
         questions=[(obligation_id, "Guarantee the refund by Friday.")],
     )
     answer = (
-        "Regarding the refund, its timing is controlled by the merchant and cannot "
-        "be guaranteed by ZenFulfillment."
+        "Regarding the refund, its timing is controlled by the merchant and cannot be guaranteed by ZenFulfillment."
     )
     unit = issue_agent._grounding_answer_units(answer)[0]
     output = AutomationGroundingOutput(
@@ -3298,13 +4318,16 @@ def test_negative_guarantee_resolution_requires_matching_subject_and_refusal(
 ) -> None:
     unit = issue_agent._grounding_answer_units(answer)[0]
 
-    assert issue_agent._knowledge_backed_negative_guarantee_answers_obligation(
-        question="Guarantee the refund by Friday.",
-        answer_unit_ids=(unit["id"],),
-        expected_units={unit["id"]: unit},
-        supported_unit_evidence_ids={unit["id"]: frozenset({"return-policy"})},
-        citation_ids=frozenset({"return-policy"}),
-    ) is False
+    assert (
+        issue_agent._knowledge_backed_negative_guarantee_answers_obligation(
+            question="Guarantee the refund by Friday.",
+            answer_unit_ids=(unit["id"],),
+            expected_units={unit["id"]: unit},
+            supported_unit_evidence_ids={unit["id"]: frozenset({"return-policy"})},
+            citation_ids=frozenset({"return-policy"}),
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -3427,11 +4450,7 @@ def test_grounding_does_not_retry_semantic_or_unknown_evidence_failure(
                 unit_id=unit["id"],
                 unit_sha256=unit["sha256"],
                 supported=failure_kind != "unsupported",
-                evidence_ids=(
-                    []
-                    if failure_kind == "unsupported"
-                    else ["invented-evidence"]
-                ),
+                evidence_ids=([] if failure_kind == "unsupported" else ["invented-evidence"]),
             )
         ],
     )
@@ -3571,10 +4590,7 @@ def test_grounding_gate_uses_supported_unit_evidence_instead_of_redundant_echoes
                     unit_assessments=[
                         AutomationGroundingUnitAssessment(
                             unit_id="u001",
-                            unit_sha256=(
-                                model_unit_sha256
-                                or issue_agent.grounding_text_sha256(answer)
-                            ),
+                            unit_sha256=(model_unit_sha256 or issue_agent.grounding_text_sha256(answer)),
                             supported=True,
                             evidence_ids=["shipping-policy"],
                         )

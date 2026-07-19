@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,14 +73,11 @@ logger = logging.getLogger(__name__)
 _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
 _ROUTER_GRAPH_RECURSION_LIMIT = 6
 _MALFORMED_ROUTER_REVIEW_REASON = (
-    "Intent classification returned malformed structured output; "
-    "human review is required."
+    "Intent classification returned malformed structured output; human review is required."
 )
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-_PROCESSING_SECURITY_BOUNDARY = (
-    _PROMPTS_DIR / "processing_security_boundary.md"
-).read_text(encoding="utf-8").strip()
+_PROCESSING_SECURITY_BOUNDARY = (_PROMPTS_DIR / "processing_security_boundary.md").read_text(encoding="utf-8").strip()
 
 _FULFILLMENT_CONTEXT_PATTERN = re.compile(
     r"\b(?:delivery|item|order|package|parcel|product|shipment)\w*\b",
@@ -238,11 +236,7 @@ def _classification_user_prompt(
     email: Email,
     parsed_attachments: dict[str, str] | None = None,
 ) -> str:
-    prompt = (
-        f"Subject: {email.subject}\n"
-        f"From: {email.from_address}\n\n"
-        f"{email.body}"
-    )
+    prompt = f"Subject: {email.subject}\nFrom: {email.from_address}\n\n{email.body}"
     attachment_context = _format_attachment_context(parsed_attachments)
     if attachment_context:
         prompt += f"\n\n## Attachments\n{attachment_context}"
@@ -282,10 +276,7 @@ def _apply_safety_intent_precedence(
     configured intent scores above the selected intent.
     """
     ranked = sorted(
-        (
-            (_safety_intent_score(intent_name), intent_name)
-            for intent_name in known_intents
-        ),
+        ((_safety_intent_score(intent_name), intent_name) for intent_name in known_intents),
         key=lambda item: (-item[0], item[1]),
     )
     if not ranked or ranked[0][0] <= 0:
@@ -306,13 +297,15 @@ def _apply_safety_intent_precedence(
                 current_intent or "unmatched",
                 preferred_intent,
             )
-            route = route.model_copy(update={
-                "intent_name": preferred_intent,
-                "reason": (
-                    "Deterministic safety precedence: the concern contains "
-                    "fulfillment, hazardous-goods, and damage evidence."
-                ),
-            })
+            route = route.model_copy(
+                update={
+                    "intent_name": preferred_intent,
+                    "reason": (
+                        "Deterministic safety precedence: the concern contains "
+                        "fulfillment, hazardous-goods, and damage evidence."
+                    ),
+                }
+            )
         corrected.append(route)
     return corrected
 
@@ -373,8 +366,7 @@ def _message_has_malformed_tool_output(message: Any) -> bool:
     if not isinstance(response_metadata, dict):
         return False
     return any(
-        _is_malformed_function_call_reason(response_metadata.get(key))
-        for key in ("finish_reason", "finishReason")
+        _is_malformed_function_call_reason(response_metadata.get(key)) for key in ("finish_reason", "finishReason")
     )
 
 
@@ -391,8 +383,20 @@ def _route_concerns_call_is_invalid(messages: list[Any]) -> bool:
         if not isinstance(raw_concern, dict):
             return True
         try:
-            ConcernRoute.model_validate(raw_concern)
+            concern = ConcernRoute.model_validate(raw_concern)
         except Exception:
+            return True
+        fields = (
+            concern.summary,
+            concern.source_text,
+            *concern.answer_obligations,
+        )
+        if not any(
+            "".join(
+                character for character in str(field or "") if unicodedata.category(character) not in {"Cc", "Cf"}
+            ).strip()
+            for field in fields
+        ):
             return True
     return False
 
@@ -484,9 +488,7 @@ def _run_intent_router_agent(
                 if not malformed_output:
                     break
                 if attempt + 1 < _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS:
-                    logger.warning(
-                        "Intent router returned malformed structured output; retrying once"
-                    )
+                    logger.warning("Intent router returned malformed structured output; retrying once")
                     continue
                 logger.error("Intent router returned malformed structured output twice")
                 return [], _MALFORMED_ROUTER_REVIEW_REASON
@@ -510,14 +512,16 @@ def _run_intent_router_agent(
             if intent_name and not canonical_name:
                 logger.warning("Intent router selected unknown intent '%s'", intent_name)
                 reason = f"Router selected unknown intent: {intent_name}"
-            normalized.append(ConcernRoute(
-                summary=concern.summary.strip(),
-                source_text=concern.source_text.strip(),
-                answer_obligations=_dedupe_strings(concern.answer_obligations)[:10],
-                intent_name=canonical_name,
-                confidence=concern.confidence,
-                reason=reason or ("" if canonical_name else "No configured intent matches this concern."),
-            ))
+            normalized.append(
+                ConcernRoute(
+                    summary=concern.summary.strip(),
+                    source_text=concern.source_text.strip(),
+                    answer_obligations=_dedupe_strings(concern.answer_obligations)[:10],
+                    intent_name=canonical_name,
+                    confidence=concern.confidence,
+                    reason=reason or ("" if canonical_name else "No configured intent matches this concern."),
+                )
+            )
         return normalized, None
 
     if routed == []:
@@ -529,26 +533,32 @@ def _run_intent_router_agent(
         canonical_names = {name.casefold(): name for name in known_intents}
         canonical_name = canonical_names.get(legacy_intent.casefold())
         if canonical_name:
-            return [ConcernRoute(
+            return [
+                ConcernRoute(
+                    summary=email.subject,
+                    source_text=email.body,
+                    intent_name=canonical_name,
+                    confidence=1.0,
+                )
+            ], None
+        return [
+            ConcernRoute(
                 summary=email.subject,
                 source_text=email.body,
-                intent_name=canonical_name,
-                confidence=1.0,
-            )], None
-        return [ConcernRoute(
-            summary=email.subject,
-            source_text=email.body,
-            confidence=0.0,
-            reason=f"Router selected unknown intent: {legacy_intent}",
-        )], None
+                confidence=0.0,
+                reason=f"Router selected unknown intent: {legacy_intent}",
+            )
+        ], None
 
     legacy_no_match = _find_no_match_reason(messages)
     if legacy_no_match is not None:
-        return [ConcernRoute(
-            summary=email.subject,
-            source_text=email.body,
-            reason=legacy_no_match or "No configured intent matches this email.",
-        )], None
+        return [
+            ConcernRoute(
+                summary=email.subject,
+                source_text=email.body,
+                reason=legacy_no_match or "No configured intent matches this email.",
+            )
+        ], None
 
     logger.info("Intent router returned no tool call")
     return [], "No concerns were routed."
@@ -762,14 +772,11 @@ def _obligation_restates_part_of_question(obligation: str, question: str) -> boo
     """Avoid adding a routed subset beside an explicit compound question."""
     obligation_tokens = _obligation_tokens(obligation)
     question_tokens = _obligation_tokens(question)
-    if (
-        re.match(r"^\s*(?:please\s+)?confirm\b", obligation, re.IGNORECASE)
-        and re.search(r"\band\s+(?:then\s+)?confirm\b", question, re.IGNORECASE)
+    if re.match(r"^\s*(?:please\s+)?confirm\b", obligation, re.IGNORECASE) and re.search(
+        r"\band\s+(?:then\s+)?confirm\b", question, re.IGNORECASE
     ):
         return False
-    if {"term", "condition"}.issubset(question_tokens) and obligation_tokens.intersection(
-        {"term", "condition"}
-    ):
+    if {"term", "condition"}.issubset(question_tokens) and obligation_tokens.intersection({"term", "condition"}):
         return True
     return bool(obligation_tokens and obligation_tokens.issubset(question_tokens))
 
@@ -779,23 +786,201 @@ _EXPLICIT_COMPOUND_QUESTION_PATTERN = re.compile(
     r"(?P<first>[^?]+?)\s+and\s+(?P<second>[^?]+?)\?\s*$",
     re.IGNORECASE,
 )
-_SHARED_COMPOUND_QUESTION_MODIFIERS = frozenset({
-    "applicable",
-    "available",
-    "current",
-    "estimated",
-    "exact",
-    "initial",
-    "standard",
-})
-_COMPOUND_BILLING_OBJECT_TOKENS = frozenset({
-    "charge",
-    "cost",
-    "deposit",
-    "fee",
-    "price",
-    "retainer",
-})
+_SHARED_COMPOUND_QUESTION_MODIFIERS = frozenset({"standard"})
+_COMPOUND_BILLING_OBJECT_TOKENS = frozenset(
+    {
+        "charge",
+        "cost",
+        "deposit",
+        "fee",
+        "price",
+        "retainer",
+    }
+)
+_SAFE_COMPOUND_SECOND_BILLING_MODIFIERS = frozenset(
+    {
+        "advance",
+        "annual",
+        "current",
+        "estimated",
+        "exact",
+        "future",
+        "initial",
+        "monthly",
+        "quoted",
+        "renewal",
+        "service",
+        "setup",
+        "standard",
+        "upfront",
+    }
+)
+_SAFE_COMPOUND_FIRST_BILLING_MODIFIER_SEQUENCES = frozenset(
+    {
+        (),
+        ("advance",),
+        ("annual",),
+        ("consultation",),
+        ("current",),
+        ("estimated",),
+        ("exact",),
+        ("future",),
+        ("initial",),
+        ("initial", "consultation"),
+        ("monthly",),
+        ("quoted",),
+        ("renewal",),
+        ("service",),
+        ("setup",),
+        ("standard",),
+        ("standard", "annual"),
+        ("standard", "consultation"),
+        ("standard", "initial", "consultation"),
+        ("standard", "service"),
+        ("standard", "setup"),
+        ("current", "setup"),
+        ("upfront",),
+    }
+)
+_UNSAFE_COMPOUND_BILLING_PHRASE_TOKENS = frozenset(
+    {
+        "a",
+        "all",
+        "an",
+        "another",
+        "any",
+        "between",
+        "both",
+        "certain",
+        "compared",
+        "comparison",
+        "conditions",
+        "different",
+        "difference",
+        "differences",
+        "double",
+        "each",
+        "either",
+        "enough",
+        "every",
+        "few",
+        "fewer",
+        "greater",
+        "half",
+        "her",
+        "his",
+        "higher",
+        "if",
+        "its",
+        "least",
+        "less",
+        "little",
+        "lower",
+        "many",
+        "more",
+        "most",
+        "much",
+        "multiple",
+        "my",
+        "neither",
+        "no",
+        "none",
+        "numerous",
+        "of",
+        "one",
+        "or",
+        "other",
+        "our",
+        "per",
+        "requirements",
+        "same",
+        "several",
+        "single",
+        "some",
+        "such",
+        "than",
+        "that",
+        "these",
+        "terms",
+        "the",
+        "their",
+        "this",
+        "those",
+        "versus",
+        "vs",
+        "various",
+        "whatever",
+        "whether",
+        "whichever",
+        "which",
+        "whose",
+        "your",
+        "zero",
+    }
+)
+
+
+def _compound_billing_object_head(value: str) -> str:
+    """Return an explicit singular billing noun at the end of one question side."""
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    if not words or words[-1] not in _COMPOUND_BILLING_OBJECT_TOKENS:
+        return ""
+    return words[-1]
+
+
+def _is_simple_compound_billing_phrase(value: str) -> bool:
+    """Accept only noun phrases that can safely stand alone after ``What is``."""
+    normalized = " ".join(value.casefold().split())
+    if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+){0,5}", normalized) is None:
+        return False
+    words = normalized.split()
+    return not (
+        any(word.isdigit() for word in words) or set(words).intersection(_UNSAFE_COMPOUND_BILLING_PHRASE_TOKENS)
+    )
+
+
+def _is_safe_compound_second_billing_phrase(value: str) -> bool:
+    """Allow only a billing noun or one known stand-alone billing adjective plus noun."""
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    if not words or words[-1] not in _COMPOUND_BILLING_OBJECT_TOKENS:
+        return False
+    return len(words) == 1 or (len(words) == 2 and words[0] in _SAFE_COMPOUND_SECOND_BILLING_MODIFIERS)
+
+
+def _is_safe_compound_first_billing_phrase(value: str) -> bool:
+    """Accept only known billing modifiers followed by one terminal billing noun."""
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    if not words or words[-1] not in _COMPOUND_BILLING_OBJECT_TOKENS:
+        return False
+    return tuple(words[:-1]) in _SAFE_COMPOUND_FIRST_BILLING_MODIFIER_SEQUENCES
+
+
+def _routed_question_identifies_compound_side(
+    routed_question: str,
+    *,
+    first_tokens: set[str],
+    second_tokens: set[str],
+) -> bool:
+    """Require side-specific router evidence, excluding a shared billing head."""
+    routed_tokens = _obligation_tokens(routed_question)
+    shared_tokens = (first_tokens & second_tokens) | _SHARED_COMPOUND_QUESTION_MODIFIERS
+    first_specific = first_tokens - shared_tokens
+    second_specific = second_tokens - shared_tokens
+    if not routed_tokens or not first_specific or not second_specific:
+        return False
+
+    has_billing_object = bool(routed_tokens.intersection(_COMPOUND_BILLING_OBJECT_TOKENS))
+    first_coverage = len(first_specific & routed_tokens) / len(first_specific)
+    second_coverage = len(second_specific & routed_tokens) / len(second_specific)
+    return bool(
+        has_billing_object
+        and (
+            first_coverage >= 0.8
+            and not second_specific.intersection(routed_tokens)
+            or second_coverage >= 0.8
+            and not first_specific.intersection(routed_tokens)
+        )
+    )
 
 
 def _split_explicit_compound_question(
@@ -803,7 +988,7 @@ def _split_explicit_compound_question(
     *,
     routed_questions: list[str],
 ) -> list[str]:
-    """Split a noun-pair question only when routing independently identifies one side."""
+    """Split only a proven safe billing shape or independently routed sides."""
     if question.casefold().count(" and ") != 1:
         return [question]
     match = _EXPLICIT_COMPOUND_QUESTION_PATTERN.fullmatch(question)
@@ -811,39 +996,44 @@ def _split_explicit_compound_question(
         return [question]
     first = match.group("first").strip()
     second = match.group("second").strip()
-    first_tokens = _obligation_tokens(first)
-    second_tokens = _obligation_tokens(second)
-    if (
-        not first_tokens.intersection(_COMPOUND_BILLING_OBJECT_TOKENS)
-        or not second_tokens.intersection(_COMPOUND_BILLING_OBJECT_TOKENS)
+    if not (
+        _is_simple_compound_billing_phrase(first)
+        and _is_simple_compound_billing_phrase(second)
+        and _is_safe_compound_first_billing_phrase(first)
+        and _is_safe_compound_second_billing_phrase(second)
     ):
         return [question]
-    independently_routed = False
-    for routed_question in routed_questions:
-        routed_tokens = _obligation_tokens(routed_question)
-        if not routed_tokens:
-            continue
-        first_coverage = len(first_tokens & routed_tokens) / len(first_tokens)
-        second_coverage = len(second_tokens & routed_tokens) / len(second_tokens)
-        if (
-            first_coverage >= 0.8
-            and second_coverage < 0.5
-            or second_coverage >= 0.8
-            and first_coverage < 0.5
-        ):
-            independently_routed = True
-            break
-    if not independently_routed:
+    first_object_head = _compound_billing_object_head(first)
+    second_object_head = _compound_billing_object_head(second)
+    if not first_object_head or not second_object_head:
+        return [question]
+    first_tokens = _obligation_tokens(first)
+    second_tokens = _obligation_tokens(second)
+    first_words = re.findall(r"[a-z0-9]+", first.casefold())
+    second_words = re.findall(r"[a-z0-9]+", second.casefold())
+    deterministic_mc01_split = bool(
+        match.group("article")
+        and first_words == ["standard", "initial", "consultation", "fee"]
+        and first_object_head == "fee"
+        and second_object_head == "retainer"
+        and second_words == ["advance", "retainer"]
+    )
+    independently_routed = bool(match.group("article")) and any(
+        _routed_question_identifies_compound_side(
+            routed_question,
+            first_tokens=first_tokens,
+            second_tokens=second_tokens,
+        )
+        for routed_question in routed_questions
+    )
+    if not (deterministic_mc01_split or independently_routed):
         return [question]
 
     article = "the " if match.group("article") else ""
     first_word = first.split(maxsplit=1)[0].casefold()
     shared_modifier = (
         first_word + " "
-        if (
-            first_word in _SHARED_COMPOUND_QUESTION_MODIFIERS
-            and not second.casefold().startswith(first_word + " ")
-        )
+        if (first_word in _SHARED_COMPOUND_QUESTION_MODIFIERS and not second.casefold().startswith(first_word + " "))
         else ""
     )
     return [
@@ -857,20 +1047,20 @@ def _answer_obligations(
     route: ConcernRoute,
 ) -> list[AnswerObligation]:
     """Bind router-extracted questions to stable runtime IDs."""
-    routed_questions = _dedupe_strings([
-        part
-        for raw in route.answer_obligations
-        for part in _split_answer_obligation(raw)
-    ])
-    explicit_questions = _dedupe_strings([
-        part
-        for match in re.finditer(r"[^.!?\n]*\?", route.source_text)
-        if match.group(0).strip()
-        for part in _split_explicit_compound_question(
-            match.group(0).strip(),
-            routed_questions=routed_questions,
-        )
-    ])
+    routed_questions = _dedupe_strings(
+        [part for raw in route.answer_obligations for part in _split_answer_obligation(raw)]
+    )
+    explicit_questions = _dedupe_strings(
+        [
+            part
+            for match in re.finditer(r"[^.!?\n]*\?", route.source_text)
+            if match.group(0).strip()
+            for part in _split_explicit_compound_question(
+                match.group(0).strip(),
+                routed_questions=routed_questions,
+            )
+        ]
+    )
     questions = list(explicit_questions)
     for routed_question in routed_questions:
         if any(
@@ -908,17 +1098,21 @@ def _tool_evidence(tool_calls: list[dict[str, Any]]) -> list[RunbookToolEvidence
             value = raw_fact.get("value")
             if not path or not isinstance(value, (str, bool, int, float)):
                 continue
-            facts.append(VerifiedFact(
-                path=path,
-                value=value,
-                source=f"tool:{tool_name}",
-            ))
-        evidence.append(RunbookToolEvidence(
-            tool_name=tool_name,
-            method=str(call.get("method") or ""),
-            facts=facts,
-            status=str(call.get("status") or "unknown"),
-        ))
+            facts.append(
+                VerifiedFact(
+                    path=path,
+                    value=value,
+                    source=f"tool:{tool_name}",
+                )
+            )
+        evidence.append(
+            RunbookToolEvidence(
+                tool_name=tool_name,
+                method=str(call.get("method") or ""),
+                facts=facts,
+                status=str(call.get("status") or "unknown"),
+            )
+        )
     return evidence
 
 
@@ -936,23 +1130,27 @@ def _outcome_attachments(
     for item in configured:
         filename = str(item.get("filename") or "").strip()
         if filename:
-            attachments.append(RunbookAttachment(
-                filename=filename,
-                description=str(item.get("description") or "").strip(),
-                source="runbook",
-                mode=str(item.get("mode") or "dynamic"),
-                source_filename=filename,
-                source_intent=intent_name,
-            ))
+            attachments.append(
+                RunbookAttachment(
+                    filename=filename,
+                    description=str(item.get("description") or "").strip(),
+                    source="runbook",
+                    mode=str(item.get("mode") or "dynamic"),
+                    source_filename=filename,
+                    source_intent=intent_name,
+                )
+            )
     for item in generated_attachments:
         filename = str(item.get("filename") or "").strip()
         if filename and item.get("attach_to_response", True):
-            attachments.append(RunbookAttachment(
-                filename=filename,
-                description=f"Generated by {str(item.get('source_tool') or 'runbook tool')}",
-                source="tool",
-                mode="generated",
-            ))
+            attachments.append(
+                RunbookAttachment(
+                    filename=filename,
+                    description=f"Generated by {str(item.get('source_tool') or 'runbook tool')}",
+                    source="tool",
+                    mode="generated",
+                )
+            )
     deduped: dict[str, RunbookAttachment] = {}
     for attachment in attachments:
         deduped.setdefault(attachment.filename, attachment)
@@ -964,12 +1162,14 @@ def _action_outcomes(actions: list[IntentAction]) -> list[RunbookActionOutcome]:
     for action in actions:
         needs_value = action.type in {"dropdown", "calendar", "input"} or _is_open_ticket_button(action)
         status = "pending_input" if needs_value and not str(action.initial_value or "").strip() else "proposed"
-        outcomes.append(RunbookActionOutcome(
-            name=action.name,
-            label=action.label,
-            status=status,
-            initial_value=action.initial_value,
-        ))
+        outcomes.append(
+            RunbookActionOutcome(
+                name=action.name,
+                label=action.label,
+                status=status,
+                initial_value=action.initial_value,
+            )
+        )
     return outcomes
 
 
@@ -1109,16 +1309,18 @@ def _scoped_attachment_filename(
     if not basename:
         basename = "attachment"
     suffix = Path(basename).suffix[:32]
-    stem = basename[:-len(suffix)] if suffix else basename
+    stem = basename[: -len(suffix)] if suffix else basename
     stem = stem or "attachment"
     for nonce in range(100):
-        identity = "\x00".join((
-            concern_id,
-            owner_key,
-            str(attachment_index),
-            original_filename,
-            str(nonce),
-        ))
+        identity = "\x00".join(
+            (
+                concern_id,
+                owner_key,
+                str(attachment_index),
+                original_filename,
+                str(nonce),
+            )
+        )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         marker = f"--mantly-{digest}"
         max_stem_chars = max(1, 240 - len(marker) - len(suffix))
@@ -1142,21 +1344,13 @@ def _scope_attachment_collisions(
         for index, attachment in enumerate(result.outcome.attachments, start=1):
             if attachment.source == "tool" or not attachment.filename:
                 continue
-            references.setdefault(attachment.filename.casefold(), []).append(
-                (result, "runbook", index, attachment)
-            )
+            references.setdefault(attachment.filename.casefold(), []).append((result, "runbook", index, attachment))
         for index, item in enumerate(result.collection.generated_attachments, start=1):
             filename = str(item.get("filename") or "").strip()
             if filename:
-                references.setdefault(filename.casefold(), []).append(
-                    (result, "tool", index, item)
-                )
+                references.setdefault(filename.casefold(), []).append((result, "tool", index, item))
 
-    colliding_names = {
-        filename
-        for filename, items in references.items()
-        if len(items) > 1
-    }
+    colliding_names = {filename for filename, items in references.items() if len(items) > 1}
     if not colliding_names:
         return
 
@@ -1181,9 +1375,7 @@ def _scope_attachment_collisions(
             )
             if isinstance(owner, RunbookAttachment):
                 owner.source_filename = original_filename
-                owner.source_intent = owner.source_intent or str(
-                    result.outcome.intent_name or ""
-                )
+                owner.source_intent = owner.source_intent or str(result.outcome.intent_name or "")
                 owner.filename = scoped_filename
             else:
                 owner["filename"] = scoped_filename
@@ -1193,25 +1385,16 @@ def _scope_attachment_collisions(
     for result in results:
         if id(result) not in changed_results:
             continue
-        configured = [
-            attachment
-            for attachment in result.outcome.attachments
-            if attachment.source != "tool"
-        ]
+        configured = [attachment for attachment in result.outcome.attachments if attachment.source != "tool"]
         generated = [
             RunbookAttachment(
                 filename=str(item.get("filename") or "").strip(),
-                description=(
-                    f"Generated by {str(item.get('source_tool') or 'runbook tool')}"
-                ),
+                description=(f"Generated by {str(item.get('source_tool') or 'runbook tool')}"),
                 source="tool",
                 mode="generated",
             )
             for item in result.collection.generated_attachments
-            if (
-                str(item.get("filename") or "").strip()
-                and item.get("attach_to_response", True)
-            )
+            if (str(item.get("filename") or "").strip() and item.get("attach_to_response", True))
         ]
         result.outcome.attachments = [*configured, *generated]
 
@@ -1356,11 +1539,13 @@ def _concern_id(
 ) -> str:
     """Build stable concern identity from immutable message and routed source."""
     normalized_intent, normalized_source = _concern_route_identity(route)
-    identity = "\x00".join((
-        email.id,
-        normalized_intent,
-        normalized_source,
-    ))
+    identity = "\x00".join(
+        (
+            email.id,
+            normalized_intent,
+            normalized_source,
+        )
+    )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     base = f"concern-{digest}"
     occurrences[base] = occurrences.get(base, 0) + 1
@@ -1379,10 +1564,9 @@ def _intent_result_from_outcomes(outcomes: list[RunbookOutcome], intents_dir: An
             concerns=outcomes,
             error=primary.error,
         )
-    reasons = _dedupe_strings([
-        outcome.requires_human_reason or outcome.error or outcome.summary
-        for outcome in outcomes
-    ])
+    reasons = _dedupe_strings(
+        [outcome.requires_human_reason or outcome.error or outcome.summary for outcome in outcomes]
+    )
     return IntentResult(
         concerns=outcomes,
         error="; ".join(reasons) or "No configured intent matches this email.",
@@ -1393,10 +1577,9 @@ def _review_response_from_outcomes(outcomes: list[RunbookOutcome]) -> AgentRespo
     needs_review = [outcome for outcome in outcomes if outcome.requires_human]
     if not needs_review:
         return None
-    reasons = _dedupe_strings([
-        outcome.requires_human_reason or outcome.error or "Concern requires human review."
-        for outcome in needs_review
-    ])
+    reasons = _dedupe_strings(
+        [outcome.requires_human_reason or outcome.error or "Concern requires human review." for outcome in needs_review]
+    )
     primary = next((outcome for outcome in outcomes if outcome.matched and outcome.intent_name), None)
     return AgentResponse(
         response_text="",
@@ -1476,27 +1659,31 @@ def run_intent_agent(
     routes = _dedupe_concern_routes(routes)
     if not routes:
         reason = router_error or "No configured intent matches this email."
-        routes = [ConcernRoute(
-            summary=email.subject,
-            source_text=email.body,
-            reason=reason,
-        )]
+        routes = [
+            ConcernRoute(
+                summary=email.subject,
+                source_text=email.body,
+                reason=reason,
+            )
+        ]
 
     executions: list[ConcernExecutionResult] = []
     occurrences: dict[str, int] = {}
     for route in routes[:3]:
         concern_id = _concern_id(email, route, occurrences)
-        executions.append(_execute_routed_concern_result(
-            concern_id,
-            route,
-            email,
-            identity_result,
-            intents_dir,
-            config_path,
-            parsed_attachments,
-            tenant_id,
-            project_id,
-        ))
+        executions.append(
+            _execute_routed_concern_result(
+                concern_id,
+                route,
+                email,
+                identity_result,
+                intents_dir,
+                config_path,
+                parsed_attachments,
+                tenant_id,
+                project_id,
+            )
+        )
 
     outcomes = _merge_concern_execution_results(executions)
 

@@ -28,7 +28,12 @@ from automail.models import (
     PromptInjectionResult,
 )
 from automail.pipeline import orchestrator
-from automail.pipeline.intent.agent import _concern_id, _execute_routed_concern, run_intent_agent
+from automail.pipeline.intent.agent import (
+    _concern_id,
+    _execute_routed_concern,
+    _route_concerns_call_is_invalid,
+    run_intent_agent,
+)
 from automail.pipeline.response.composer import _available_attachments
 from automail.pipeline.response.prompt_factory import create_response_user_prompt
 
@@ -51,6 +56,50 @@ def _base_stubs(monkeypatch) -> None:
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_require_review", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_tools", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_attachments", lambda *_args, **_kwargs: [])
+
+
+def test_router_rejects_known_intent_without_any_concern_or_obligation_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._find_router_tool_call",
+        lambda *_args, **_kwargs: {
+            "concerns": [
+                {
+                    "intent_name": "refund",
+                    "summary": "",
+                    "source_text": "",
+                    "answer_obligations": [],
+                    "confidence": 1,
+                }
+            ]
+        },
+    )
+
+    assert _route_concerns_call_is_invalid([object()]) is True
+
+
+@pytest.mark.parametrize("invisible", ["\u200b", "\u200c", "\ufeff", "\u2060", "\x00"])
+def test_router_rejects_control_or_format_only_concern_text(
+    monkeypatch: pytest.MonkeyPatch,
+    invisible: str,
+) -> None:
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._find_router_tool_call",
+        lambda *_args, **_kwargs: {
+            "concerns": [
+                {
+                    "intent_name": "refund",
+                    "summary": invisible,
+                    "source_text": invisible,
+                    "answer_obligations": [invisible],
+                    "confidence": 1,
+                }
+            ]
+        },
+    )
+
+    assert _route_concerns_call_is_invalid([object()]) is True
 
 
 def _record_test_tool(intent_name: str) -> None:
@@ -86,11 +135,13 @@ def _record_named_test_attachment(
             file_content_type_path="contentType",
             file_content_base64_path="contentBase64",
         ),
-        json.dumps({
-            "filename": filename,
-            "contentType": "application/pdf",
-            "contentBase64": content_base64,
-        }),
+        json.dumps(
+            {
+                "filename": filename,
+                "contentType": "application/pdf",
+                "contentBase64": content_base64,
+            }
+        ),
     )
 
 
@@ -114,14 +165,18 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
             confidence=0.94,
         ),
     ]
-    monkeypatch.setattr("automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None))
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None)
+    )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_actions",
-        lambda intent_name, **_kwargs: [{
-            "name": f"prepare-{intent_name}",
-            "label": f"Prepare {intent_name}",
-            "type": "button",
-        }],
+        lambda intent_name, **_kwargs: [
+            {
+                "name": f"prepare-{intent_name}",
+                "label": f"Prepare {intent_name}",
+                "type": "button",
+            }
+        ],
     )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_response_config",
@@ -168,15 +223,11 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         "Explain cancel-contract state.",
         "Cover cancel-contract.",
     ]
-    assert [
-        obligation.question for obligation in result.concerns[0].answer_obligations
-    ] == [
+    assert [obligation.question for obligation in result.concerns[0].answer_obligations] == [
         "Confirm whether contract C-1 can be cancelled.",
         "Explain when cancellation becomes effective.",
     ]
-    assert [
-        obligation.obligation_id for obligation in result.concerns[0].answer_obligations
-    ] == [
+    assert [obligation.obligation_id for obligation in result.concerns[0].answer_obligations] == [
         f"{result.concerns[0].concern_id}:obligation-1",
         f"{result.concerns[0].concern_id}:obligation-2",
     ]
@@ -321,8 +372,7 @@ def test_explicit_questions_fill_router_obligation_omissions(monkeypatch):
     route = ConcernRoute(
         summary="Billing questions",
         source_text=(
-            "What is the consultation fee? Is a retainer required? "
-            "When is the invoice due? Can the retainer be waived?"
+            "What is the consultation fee? Is a retainer required? When is the invoice due? Can the retainer be waived?"
         ),
         answer_obligations=["Explain the consultation fee."],
         intent_name="cancel-contract",
@@ -435,11 +485,7 @@ def test_live_e05_two_concerns_keep_all_six_obligations(monkeypatch):
     ]
 
     assert [len(outcome.answer_obligations) for outcome in outcomes] == [3, 3]
-    assert [
-        obligation.question
-        for outcome in outcomes
-        for obligation in outcome.answer_obligations
-    ] == [
+    assert [obligation.question for outcome in outcomes for obligation in outcome.answer_obligations] == [
         "give current status",
         "give last carrier event",
         "give ETA",
@@ -447,11 +493,7 @@ def test_live_e05_two_concerns_keep_all_six_obligations(monkeypatch):
         "confirm it changed",
         "request a carrier redirect if already shipped",
     ]
-    assert [
-        obligation.obligation_id
-        for outcome in outcomes
-        for obligation in outcome.answer_obligations
-    ] == [
+    assert [obligation.obligation_id for outcome in outcomes for obligation in outcome.answer_obligations] == [
         "e05-concern-1:obligation-1",
         "e05-concern-1:obligation-2",
         "e05-concern-1:obligation-3",
@@ -626,11 +668,45 @@ def test_independently_routed_billing_side_splits_compound_question_without_dupl
     _base_stubs(monkeypatch)
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = "What are the standard setup fee and renewal fee?"
+    route = ConcernRoute(
+        summary="Explain standard fees",
+        source_text=source_text,
+        answer_obligations=["What is the renewal fee?"],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "legal-billing",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [
+        "What is the standard setup fee?",
+        "What is the standard renewal fee?",
+    ]
+    assert [item.obligation_id for item in outcome.answer_obligations] == [
+        "legal-billing:obligation-1",
+        "legal-billing:obligation-2",
+    ]
+
+
+def test_mc01_billing_shape_splits_without_router_variance(monkeypatch):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
     source_text = "what are the standard initial consultation fee and advance retainer?"
     route = ConcernRoute(
         summary="Explain standard fees",
         source_text=source_text,
-        answer_obligations=["What is the standard advance retainer?"],
+        answer_obligations=[source_text],
         intent_name="cancel-contract",
     )
 
@@ -650,10 +726,6 @@ def test_independently_routed_billing_side_splits_compound_question_without_dupl
         "What is the standard initial consultation fee?",
         "What is the standard advance retainer?",
     ]
-    assert [item.obligation_id for item in outcome.answer_obligations] == [
-        "legal-billing:obligation-1",
-        "legal-billing:obligation-2",
-    ]
 
 
 @pytest.mark.parametrize(
@@ -672,8 +744,140 @@ def test_independently_routed_billing_side_splits_compound_question_without_dupl
             "Explain the applicable conditions.",
         ),
         (
-            "What are the standard initial consultation fee and advance retainer?",
-            "Explain the standard initial consultation fee and advance retainer.",
+            "What are the standard setup fee and renewal fee?",
+            "Explain the standard setup fee and renewal fee.",
+        ),
+        (
+            "What are standard initial consultation fee and advance retainer?",
+            "What are standard initial consultation fee and advance retainer?",
+        ),
+        (
+            "What are the consultation fee and the advance retainer?",
+            "What are the consultation fee and the advance retainer?",
+        ),
+        (
+            "What are the consultation fee and terms of retainer?",
+            "What are the consultation fee and terms of retainer?",
+        ),
+        (
+            "What are the consultation fee and any retainer?",
+            "What are the consultation fee and any retainer?",
+        ),
+        (
+            "What are the consultation fee and no retainer?",
+            "What are the consultation fee and no retainer?",
+        ),
+        (
+            "What are the consultation fee and either retainer?",
+            "What are the consultation fee and either retainer?",
+        ),
+        (
+            "What are the consultation fee and your retainer?",
+            "What are the consultation fee and your retainer?",
+        ),
+        (
+            "What are the standard consultation fee and another retainer?",
+            "What are the standard consultation fee and another retainer?",
+        ),
+        (
+            "What are the standard consultation fee and each retainer?",
+            "What are the standard consultation fee and each retainer?",
+        ),
+        (
+            "What are the standard consultation fee and one retainer?",
+            "What are the standard consultation fee and one retainer?",
+        ),
+        (
+            "What are the standard consultation fee and some retainer?",
+            "What are the standard consultation fee and some retainer?",
+        ),
+        (
+            "What are the standard consultation fee and both retainer?",
+            "What are the standard consultation fee and both retainer?",
+        ),
+        (
+            "What are the standard consultation fee and every retainer?",
+            "What are the standard consultation fee and every retainer?",
+        ),
+        (
+            "What are the standard consultation fee and neither retainer?",
+            "What are the standard consultation fee and neither retainer?",
+        ),
+        (
+            "What are the standard consultation fee and several retainer?",
+            "What are the standard consultation fee and several retainer?",
+        ),
+        (
+            "What are the standard consultation fee and half retainer?",
+            "What are the standard consultation fee and half retainer?",
+        ),
+        (
+            "What are the standard consultation fee and multiple retainer?",
+            "What are the standard consultation fee and multiple retainer?",
+        ),
+        (
+            "What are the standard consultation fee and various retainer?",
+            "What are the standard consultation fee and various retainer?",
+        ),
+        (
+            "What are the standard consultation fee and these retainer?",
+            "What are the standard consultation fee and these retainer?",
+        ),
+        (
+            "What are the standard consultation fee and his retainer?",
+            "What are the standard consultation fee and his retainer?",
+        ),
+        (
+            "What are the standard consultation fee and said retainer?",
+            "What are the standard consultation fee and said retainer?",
+        ),
+        (
+            "What are the standard consultation fee and aforementioned retainer?",
+            "What are the standard consultation fee and aforementioned retainer?",
+        ),
+        (
+            "What are the standard consultation fee and latter retainer?",
+            "What are the standard consultation fee and latter retainer?",
+        ),
+        (
+            "What are the standard consultation fee and former retainer?",
+            "What are the standard consultation fee and former retainer?",
+        ),
+        (
+            "What are the standard consultation fee and respective retainer?",
+            "What are the standard consultation fee and respective retainer?",
+        ),
+        (
+            "What are the standard consultation fee and 2 retainer?",
+            "What are the standard consultation fee and 2 retainer?",
+        ),
+        (
+            "What are the initial consultation fee and annual retainer?",
+            "What are the initial consultation fee and annual retainer?",
+        ),
+        (
+            "What are the current setup fee and future retainer?",
+            "What are the current setup fee and future retainer?",
+        ),
+        (
+            "What are the standard consultation fee and annual retainer?",
+            "What are the standard consultation fee and annual retainer?",
+        ),
+        (
+            "What are the standard fee and advance retainer?",
+            "What are the standard fee and advance retainer?",
+        ),
+        (
+            "What are the standard service fee and advance retainer?",
+            "What are the standard service fee and advance retainer?",
+        ),
+        (
+            "What are the standard annual fee and advance retainer?",
+            "What are the standard annual fee and advance retainer?",
+        ),
+        (
+            "What are the standard service fee and quoted price?",
+            "What are the standard service fee and quoted price?",
         ),
     ],
 )
@@ -705,6 +909,73 @@ def test_compound_question_is_not_split_without_independent_routing_evidence(
     )
 
     assert [item.question for item in outcome.answer_obligations] == [question]
+
+
+def test_unsafe_second_billing_phrase_stays_combined_even_when_side_is_routed(
+    monkeypatch,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    source_text = "What are the standard consultation fee and said retainer?"
+    route = ConcernRoute(
+        summary="Keep referential billing phrase intact",
+        source_text=source_text,
+        answer_obligations=["What is the said retainer?"],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "compound-question",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [source_text]
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "What are standard setup fee and renewal fee?",
+        "What are the standard customers pay setup fee and renewal fee?",
+        "What are the standard cancel contract fee and renewal fee?",
+        "What are the standard non refundable fee and renewal fee?",
+    ],
+)
+def test_independent_routing_does_not_split_ungrammatical_billing_question(
+    monkeypatch,
+    source_text: str,
+):
+    _base_stubs(monkeypatch)
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+    route = ConcernRoute(
+        summary="Keep unsafe billing grammar intact",
+        source_text=source_text,
+        answer_obligations=["What is the renewal fee?"],
+        intent_name="cancel-contract",
+    )
+
+    outcome = _execute_routed_concern(
+        "compound-question",
+        route,
+        _email(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [item.question for item in outcome.answer_obligations] == [source_text]
 
 
 def test_duplicate_routes_execute_runbook_only_once(monkeypatch):
@@ -851,9 +1122,7 @@ def test_each_concern_processing_input_keeps_shared_identifier_from_original_mes
     assert response is None
     assert len(result.concerns) == 2
     assert all("ZF-20991" in body for body in processing_bodies)
-    assert processing_bodies[0].startswith(
-        "## Routed concern to process\nTell me the current shipment status and ETA."
-    )
+    assert processing_bodies[0].startswith("## Routed concern to process\nTell me the current shipment status and ETA.")
     assert processing_bodies[1].startswith(
         "## Routed concern to process\nChange the delivery address to 24 New Street."
     )
@@ -875,7 +1144,9 @@ def test_unmatched_concern_preserves_matched_work_and_requires_human(monkeypatch
             reason="No loyalty runbook exists.",
         ),
     ]
-    monkeypatch.setattr("automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None))
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None)
+    )
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
 
@@ -895,7 +1166,9 @@ def test_failed_runbook_does_not_stop_other_concerns(monkeypatch):
         ConcernRoute(summary="Cancel", source_text="Cancel C-1.", intent_name="cancel-contract"),
         ConcernRoute(summary="Buy", source_text="Buy XYZ.", intent_name="buy-product"),
     ]
-    monkeypatch.setattr("automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None))
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent", lambda *_args, **_kwargs: (routes, None)
+    )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_actions",
         lambda intent_name, **_kwargs: [{"name": intent_name, "label": intent_name, "type": "button"}],
@@ -956,6 +1229,7 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
     )
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_actions", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("automail.pipeline.intent.agent.get_intent_response_config", lambda *_args, **_kwargs: {})
+
     def process(*_args, **_kwargs):
         _record_tool_call(
             ToolDefinition(
@@ -967,11 +1241,13 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
             status="success",
             response_text='{"contract": {"status": "active"}}',
         )
-        return IntentReviewOutput.model_validate({
-            "summary": "Lookup complete",
-            "verified_facts": [{"fact": "Invented cancellation date"}],
-            "tool_evidence": [{"tool_name": "fake", "facts": [{"fact": "Invented"}]}],
-        })
+        return IntentReviewOutput.model_validate(
+            {
+                "summary": "Lookup complete",
+                "verified_facts": [{"fact": "Invented cancellation date"}],
+                "tool_evidence": [{"tool_name": "fake", "facts": [{"fact": "Invented"}]}],
+            }
+        )
 
     monkeypatch.setattr("automail.pipeline.intent.agent._run_processing_agent", process)
     route = ConcernRoute(
@@ -1024,11 +1300,13 @@ def test_concern_collectors_isolate_tools_actions_knowledge_and_composer_order(m
     )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_actions",
-        lambda intent_name, **_kwargs: [{
-            "name": f"action-{intent_name}",
-            "label": f"Action {intent_name}",
-            "type": "button",
-        }],
+        lambda intent_name, **_kwargs: [
+            {
+                "name": f"action-{intent_name}",
+                "label": f"Action {intent_name}",
+                "type": "button",
+            }
+        ],
     )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_response_config",
@@ -1092,9 +1370,7 @@ def test_concern_collectors_isolate_tools_actions_knowledge_and_composer_order(m
         "buy-product.pdf",
     ]
     prompt = create_response_user_prompt(_email(), intent_result=result)
-    assert prompt.index("runbook>cancel-contract</runbook>") < prompt.index(
-        "runbook>buy-product</runbook>"
-    )
+    assert prompt.index("runbook>cancel-contract</runbook>") < prompt.index("runbook>buy-product</runbook>")
 
 
 def test_failed_concern_activity_cannot_leak_into_next_concern(monkeypatch):
@@ -1177,11 +1453,13 @@ def test_configured_filename_collision_aliases_every_owner_and_loads_exact_sourc
     )
     monkeypatch.setattr(
         "automail.pipeline.intent.agent.get_intent_response_attachments",
-        lambda intent_name, **_kwargs: [{
-            "filename": "terms.pdf",
-            "description": f"Terms for {intent_name}",
-            "mode": "dynamic",
-        }],
+        lambda intent_name, **_kwargs: [
+            {
+                "filename": "terms.pdf",
+                "description": f"Terms for {intent_name}",
+                "mode": "dynamic",
+            }
+        ],
     )
 
     result, _response = run_intent_agent(_email())
@@ -1296,8 +1574,7 @@ def test_configured_and_generated_same_name_both_receive_selectable_aliases(
         "automail.api.attachments._list_all",
         lambda _collection, filter_str="", **_kwargs: (
             [{"id": "static-label", "file": "stored-label.pdf"}]
-            if "filename='label.pdf'" in filter_str
-            and "intent='cancel-contract'" in filter_str
+            if "filename='label.pdf'" in filter_str and "intent='cancel-contract'" in filter_str
             else []
         ),
     )
@@ -1389,10 +1666,7 @@ def test_cross_concern_generated_filename_collision_reaches_loader_with_both_pay
         for attachment in concern.attachments
         if attachment.source == "tool"
     ]
-    generated_filenames = [
-        attachment.filename
-        for attachment in pipeline_result.agent_response.generated_attachments
-    ]
+    generated_filenames = [attachment.filename for attachment in pipeline_result.agent_response.generated_attachments]
     assert len(outcome_filenames) == 2
     assert len(set(outcome_filenames)) == 2
     assert all(filename != "label.pdf" for filename in outcome_filenames)
@@ -1407,8 +1681,7 @@ def test_cross_concern_generated_filename_collision_reaches_loader_with_both_pay
 
     repeated_result = orchestrator.run_pipeline(_email(), compose_response=False)
     assert [
-        attachment.filename
-        for attachment in repeated_result.agent_response.generated_attachments
+        attachment.filename for attachment in repeated_result.agent_response.generated_attachments
     ] == generated_filenames
 
 

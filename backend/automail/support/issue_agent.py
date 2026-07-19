@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field, computed_field
 from automail.support.knowledge_workspace import KnowledgeWorkspace
 from automail.support.pending_action_claims import (
     PENDING_ACTION_CLAIM_REASON_CODE,
+    action_obligation_parts,
+    action_record_matches_expected_text,
     check_pending_action_claims,
+    has_meaningful_action_success_proof,
+    has_success_backed_action_claim,
+    remaining_action_obligation_text,
     repair_pending_action_claims,
 )
 from automail.support.reply_signoff import clean_reply_signoff
@@ -51,30 +56,32 @@ _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix
 GROUNDING_AGENT_DEADLINE_SECONDS = 40
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_MODEL_CALL_LIMIT = 2
-GROUNDING_GATE_VERSION = "automation-grounding-v6"
+GROUNDING_GATE_VERSION = "automation-grounding-v7"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
 _AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
-_GROUNDING_TICKET_SCOPED_KEYS = frozenset({
-    "concerns",
-    "toolEvidence",
-    "runbookActions",
-})
+_GROUNDING_TICKET_SCOPED_KEYS = frozenset(
+    {
+        "concerns",
+        "toolEvidence",
+        "runbookActions",
+    }
+)
 LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
 BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
-_ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset({
-    "answered",
-    "fulfilled_action",
-    "pending_or_unavailable",
-})
+_ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset(
+    {
+        "answered",
+        "fulfilled_action",
+        "pending_or_unavailable",
+    }
+)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_SAFETY_PROMPT = lithium_battery_safety_system_prompt()
 _SYSTEM_PROMPT = (
-    (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
-    + "\n\n"
-    + _SYSTEM_SAFETY_PROMPT
+    (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip() + "\n\n" + _SYSTEM_SAFETY_PROMPT
 )
 _USER_TEMPLATE = (_PROMPTS_DIR / "issue_agent_user_prompt.md").read_text(encoding="utf-8").strip()
 _AUTOMATION_SYSTEM_PROMPT = (
@@ -326,10 +333,7 @@ def _grounding_retryable_protocol_errors(
         errors.append("Evaluator returned no answer-unit assessments")
     if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:
         errors.append("Evaluator returned too many answer-unit assessments")
-    unit_ids = [
-        _string_from(assessment.unit_id)
-        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
-    ]
+    unit_ids = [_string_from(assessment.unit_id) for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]]
     if any(not unit_id for unit_id in unit_ids) or len(unit_ids) != len(set(unit_ids)):
         errors.append("Evaluator returned a missing or duplicate answer-unit ID")
     if set(unit_ids) != expected_unit_ids:
@@ -337,29 +341,16 @@ def _grounding_retryable_protocol_errors(
 
     if len(structured.obligation_assessments) > 100:
         errors.append("Evaluator returned too many obligation assessments")
-    obligation_ids = [
-        _string_from(assessment.obligation_id)
-        for assessment in structured.obligation_assessments[:100]
-    ]
-    if (
-        any(not obligation_id for obligation_id in obligation_ids)
-        or len(obligation_ids) != len(set(obligation_ids))
-    ):
+    obligation_ids = [_string_from(assessment.obligation_id) for assessment in structured.obligation_assessments[:100]]
+    if any(not obligation_id for obligation_id in obligation_ids) or len(obligation_ids) != len(set(obligation_ids)):
         errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
     if set(obligation_ids) != expected_obligation_ids:
         errors.append("Evaluator did not assess every answer obligation exactly once")
     for assessment in structured.obligation_assessments[:100]:
-        answer_unit_ids = {
-            unit_id
-            for value in assessment.answer_unit_ids
-            if (unit_id := _string_from(value))
-        }
+        answer_unit_ids = {unit_id for value in assessment.answer_unit_ids if (unit_id := _string_from(value))}
         if not answer_unit_ids.issubset(expected_unit_ids):
             errors.append("Answer obligation uses unknown answer-unit IDs")
-        if (
-            assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
-            and not answer_unit_ids
-        ):
+        if assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
             errors.append("Addressed obligation has no answer-unit IDs")
     return tuple(dict.fromkeys(errors))
 
@@ -370,6 +361,8 @@ def _grounding_needs_obligation_reassessment(
     expected_unit_ids: frozenset[str],
     expected_obligation_ids: frozenset[str],
     allowed_evidence_ids: frozenset[str],
+    expected_units: dict[str, dict[str, Any]] | None = None,
+    expected_obligations: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Detect a narrow semantic result worth one independent second pass.
 
@@ -393,11 +386,187 @@ def _grounding_needs_obligation_reassessment(
         evidence_ids = {evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value))}
         if not assessment.supported or not evidence_ids or not evidence_ids.issubset(allowed_evidence_ids):
             return False
-    return any(
-        assessment.resolution == "not_covered"
-        and any(_string_from(value) in expected_unit_ids for value in assessment.answer_unit_ids)
-        for assessment in structured.obligation_assessments
+    obligation_questions_by_unit: dict[str, list[str]] = {}
+    for assessment in structured.obligation_assessments:
+        evidence_ids = {evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value))}
+        if not evidence_ids.issubset(allowed_evidence_ids):
+            return False
+        obligation_id = _string_from(assessment.obligation_id)
+        question = _string_from((expected_obligations or {}).get(obligation_id, {}).get("question"))
+        if not question:
+            continue
+        for value in assessment.answer_unit_ids:
+            unit_id = _string_from(value)
+            if unit_id in expected_unit_ids:
+                obligation_questions_by_unit.setdefault(unit_id, []).append(question)
+    all_obligation_questions = tuple(
+        question
+        for obligation in (expected_obligations or {}).values()
+        if (question := _string_from(obligation.get("question")))
     )
+    for assessment in structured.obligation_assessments:
+        if assessment.resolution != "not_covered":
+            continue
+        linked_unit_ids = tuple(
+            unit_id for value in assessment.answer_unit_ids if (unit_id := _string_from(value)) in expected_unit_ids
+        )
+        if not linked_unit_ids:
+            continue
+        if expected_units and all(
+            _grounding_unit_only_acknowledges_or_defers(
+                _string_from(expected_units.get(unit_id, {}).get("text")),
+                linked_obligation_questions=tuple(obligation_questions_by_unit.get(unit_id, ())),
+                all_obligation_questions=all_obligation_questions,
+            )
+            for unit_id in linked_unit_ids
+        ):
+            continue
+        return True
+    return False
+
+
+_GROUNDING_ACKNOWLEDGEMENT_PATTERNS = (
+    re.compile(
+        r"^\s*you\s+(?:are|were)\s+(?:seeking|asking|requesting)\b"
+        r"(?P<body>[^.!?\n]*)[.!?]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:thank\s+you|thanks)\b"
+        r"(?=[^.!?\n]{0,180}\b(?:messages?|enquir(?:y|ies)|"
+        r"inquir(?:y|ies)|requests?|contacting)\b)"
+        r"(?P<body>[^.!?\n]{0,240})[.!?]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_GROUNDING_UNMISTAKABLE_DEFERRAL_PATTERN = re.compile(
+    r"^\s*(?:we|our\s+team)\s+(?:will|would)\s+look\s+into\s+"
+    r"(?:it|this|the\s+(?:matter|issue|request|enquiry|inquiry))"
+    r"(?:\s+and\s+get\s+back\s+to\s+you)?[.!]?\s*$",
+    re.IGNORECASE,
+)
+_GROUNDING_SUBSTANTIVE_DETAIL_PATTERN = re.compile(
+    r"[:;]|(?:CHF|EUR|USD|GBP|\$|€|£)\s*\d|\b\d+(?:[.,]\d+)?\b|"
+    r"\b(?:for\s+example|including|such\s+as|namely|first|second|third|next|then|"
+    r"minimum|maximum|must|may|might|needs?|requires?|consists?|amounts?\s+to|"
+    r"within|electronically|online|falls?|due|monday|tuesday|wednesday|thursday|"
+    r"friday|saturday|sunday|articles?\s+of\s+association|public\s+deed|is|are)\b",
+    re.IGNORECASE,
+)
+_GROUNDING_RESTATEMENT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_GROUNDING_RESTATEMENT_META_TOKENS = frozenset(
+    {
+        "a",
+        "about",
+        "an",
+        "and",
+        "are",
+        "asking",
+        "back",
+        "contacting",
+        "enquiry",
+        "for",
+        "from",
+        "get",
+        "give",
+        "has",
+        "have",
+        "how",
+        "information",
+        "into",
+        "inquiry",
+        "it",
+        "look",
+        "message",
+        "of",
+        "on",
+        "outline",
+        "please",
+        "regarding",
+        "request",
+        "requested",
+        "seeking",
+        "tell",
+        "that",
+        "the",
+        "to",
+        "us",
+        "what",
+        "when",
+        "which",
+        "will",
+        "you",
+        "your",
+    }
+)
+
+
+def _grounding_restatement_tokens(text: str) -> frozenset[str]:
+    aliases = {
+        "consultations": "consultation",
+        "documents": "document",
+        "enquiries": "enquiry",
+        "inquiries": "inquiry",
+        "messages": "message",
+        "requests": "request",
+        "requirements": "requirement",
+        "steps": "step",
+    }
+    return frozenset(
+        normalized
+        for token in _GROUNDING_RESTATEMENT_TOKEN_PATTERN.findall(text.casefold())
+        if (normalized := aliases.get(token, token)) not in _GROUNDING_RESTATEMENT_META_TOKENS
+    )
+
+
+def _grounding_has_appositive_punctuation(text: str) -> bool:
+    """Treat answer-like punctuation as substantive, except a genuine long list."""
+    if re.search(r"[()–—=]|\s[-/]\s", text):
+        return True
+    if "," not in text:
+        return False
+    segments = [segment.strip() for segment in text.split(",")]
+    is_long_conjoined_list = (
+        len(segments) >= 3 and all(segments) and re.match(r"^(?:and|or)\b", segments[-1], re.IGNORECASE) is not None
+    )
+    return not is_long_conjoined_list
+
+
+def _grounding_unit_only_acknowledges_or_defers(
+    text: str,
+    *,
+    linked_obligation_questions: tuple[str, ...] = (),
+    all_obligation_questions: tuple[str, ...] = (),
+) -> bool:
+    """Identify request restatements that cannot justify a semantic retry."""
+    if not text:
+        return False
+    if _GROUNDING_UNMISTAKABLE_DEFERRAL_PATTERN.fullmatch(text):
+        return True
+    for pattern in _GROUNDING_ACKNOWLEDGEMENT_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match is None:
+            continue
+        body = match.groupdict().get("body") or ""
+        if _grounding_has_appositive_punctuation(body):
+            return False
+        if _GROUNDING_SUBSTANTIVE_DETAIL_PATTERN.search(body) is not None:
+            return False
+        body_tokens = _grounding_restatement_tokens(body)
+        if not body_tokens:
+            return True
+        linked_tokens = _grounding_restatement_tokens(" ".join(linked_obligation_questions))
+        if not linked_tokens or not body_tokens.intersection(linked_tokens):
+            return False
+        if body_tokens.issubset(linked_tokens):
+            return True
+        # A single restatement unit can repeat several customer questions even
+        # when the evaluator links it to only a subset of them. Permit those
+        # extra words only when they also come verbatim from another immutable
+        # obligation; newly asserted details still force an independent pass.
+        all_obligation_tokens = _grounding_restatement_tokens(" ".join(all_obligation_questions))
+        return body_tokens.issubset(all_obligation_tokens)
+    return False
 
 
 _GUARANTEE_REQUEST_PATTERN = re.compile(
@@ -474,14 +643,12 @@ def _knowledge_backed_negative_guarantee_answers_obligation(
         for pattern in negative_patterns:
             for negative_match in re.finditer(pattern, unit_text, re.IGNORECASE):
                 if negated_attribution_pattern.search(
-                    unit_text[max(0, negative_match.start() - 160):negative_match.start()]
+                    unit_text[max(0, negative_match.start() - 160) : negative_match.start()]
                 ):
                     continue
-                if guarantee_reversal_pattern.search(unit_text[negative_match.end():]):
+                if guarantee_reversal_pattern.search(unit_text[negative_match.end() :]):
                     continue
-                if negated_conclusion_pattern.fullmatch(
-                    unit_text[negative_match.end():].strip()
-                ):
+                if negated_conclusion_pattern.fullmatch(unit_text[negative_match.end() :].strip()):
                     continue
                 return True
     return False
@@ -525,14 +692,10 @@ def _attachment_text_context(message: dict[str, Any], *, limit: int = 4_000) -> 
     remaining = limit
     for index, raw_attachment in enumerate(raw_attachments[:10], start=1):
         attachment = _record_from(raw_attachment)
-        extracted_text = _string_from(
-            attachment.get("extractedText") or attachment.get("extracted_text")
-        )
+        extracted_text = _string_from(attachment.get("extractedText") or attachment.get("extracted_text"))
         if not extracted_text or remaining <= 0:
             continue
-        filename = _string_from(
-            attachment.get("filename") or attachment.get("name")
-        ) or f"attachment-{index}"
+        filename = _string_from(attachment.get("filename") or attachment.get("name")) or f"attachment-{index}"
         header = f"### {filename[:240]}\n"
         available = max(0, remaining - len(header))
         if available <= 0:
@@ -653,6 +816,10 @@ _LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
         "reçue": 2,
         "cours": 2,
         "sera": 1,
+        "veuillez": 4,
+        "rembourser": 4,
+        "escaladez": 4,
+        "remboursez": 4,
     },
     "de": {
         "hallo": 4,
@@ -687,6 +854,9 @@ _LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
         "anfrage": 3,
         "erhalten": 2,
         "prüfen": 3,
+        "erstatten": 4,
+        "rückerstatten": 4,
+        "zurückerstatten": 4,
     },
     "es": {
         "hola": 4,
@@ -720,6 +890,8 @@ _LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
         "hemos": 2,
         "recibido": 2,
         "será": 1,
+        "escale": 4,
+        "reembolse": 4,
     },
     "it": {
         "ciao": 4,
@@ -756,6 +928,7 @@ _LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
         "ricevuto": 2,
         "ricevuta": 2,
         "sarà": 1,
+        "rimborsi": 4,
     },
 }
 _LANGUAGE_PHRASE_WEIGHTS: dict[str, dict[str, int]] = {
@@ -783,10 +956,7 @@ _PENDING_ACTION_REPAIR_NOTICES = {
         "Jede angefragte Aktion, die eine menschliche Prüfung erfordert, ist "
         "ausstehend und weder als begonnen noch als abgeschlossen bestätigt."
     ),
-    "en": (
-        "Any requested action that requires human review is pending and is not "
-        "confirmed as started or completed."
-    ),
+    "en": ("Any requested action that requires human review is pending and is not confirmed as started or completed."),
     "es": (
         "Toda acción solicitada que requiera revisión humana está pendiente y no "
         "se confirma como iniciada ni completada."
@@ -802,6 +972,11 @@ _PENDING_ACTION_REPAIR_NOTICES = {
 }
 _ACTION_STATE_OBLIGATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "de": (
+        re.compile(
+            r"^\s*(?:bitte\s+)?(?:eskalieren|stornieren|kündigen|erstatten|rückerstatten|zurückerstatten|öffnen)"
+            r"(?:\s+sie)?\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
         re.compile(
             r"^\s*(?:bitte\s+)?(?:bestätigen|garantieren|versichern)"
             r"(?:\s+sie)?\s+(?P<subject>.+?)\s*[.?!]*$",
@@ -820,8 +995,27 @@ _ACTION_STATE_OBLIGATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
             r"(?P<subject>.+?)\s*[.?!]*$",
             re.IGNORECASE,
         ),
+        re.compile(
+            r"^\s*(?:please\s+)?(?P<action>record|log|escalate|cancel|terminate|"
+            r"rescind|refund|issue|notify|open|submit|investigate|update|change|replace|"
+            r"reship|dispatch)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:please\s+)?identify\s+and\s+"
+            r"(?P<action>escalate)\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
     ),
     "es": (
+        re.compile(
+            r"^\s*(?:por\s+favor[,]?\s+)?"
+            r"(?:escale|escalar|cancele|cancelar|anule|anular|"
+            r"reembolse|reembolsar|abra|abrir)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
         re.compile(
             r"^\s*(?:por\s+favor[,]?\s+)?"
             r"(?:confirme|confirmar|garantice|garantizar|asegure|asegurar)\s+"
@@ -832,12 +1026,26 @@ _ACTION_STATE_OBLIGATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "fr": (
         re.compile(
             r"^\s*(?:veuillez\s+)?"
+            r"(?:escaladez|escalader|annulez|annuler|résiliez|résilier|"
+            r"remboursez|rembourser|ouvrez|ouvrir)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:veuillez\s+)?"
             r"(?:confirmer|confirmez|garantir|garantissez|assurer|assurez)\s+"
             r"(?:que\s+)?(?P<subject>.+?)\s*[.?!]*$",
             re.IGNORECASE,
         ),
     ),
     "it": (
+        re.compile(
+            r"^\s*(?:per\s+favore[,]?\s+)?"
+            r"(?:escalate|escalare|annulli|annullare|cancelli|cancellare|"
+            r"rimborsi|rimborsare|apra|aprire)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
         re.compile(
             r"^\s*(?:per\s+favore[,]?\s+)?"
             r"(?:confermare|confermi|garantire|garantisca|assicurare|assicuri)\s+"
@@ -851,10 +1059,7 @@ _ACTION_STATE_PENDING_NOTICES = {
         "Für {subject} liegt keine Bestätigung vor. Ein damit verbundener nächster "
         "Schritt für Ihre Anfrage wartet weiterhin auf menschliche Prüfung."
     ),
-    "en": (
-        "{subject} is not confirmed. A related next step for your request remains "
-        "pending human review."
-    ),
+    "en": ("{subject} is not confirmed. A related next step for your request remains pending human review."),
     "es": (
         "No hay confirmación para {subject}. Un siguiente paso relacionado con su "
         "solicitud sigue pendiente de revisión humana."
@@ -868,52 +1073,54 @@ _ACTION_STATE_PENDING_NOTICES = {
         "richiesta resta in attesa di revisione umana."
     ),
 }
-_ACTION_STATE_SUBJECT_STOP_WORDS = frozenset({
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "be",
-    "been",
-    "can",
-    "could",
-    "das",
-    "dass",
-    "de",
-    "der",
-    "die",
-    "el",
-    "en",
-    "et",
-    "for",
-    "für",
-    "have",
-    "has",
-    "i",
-    "il",
-    "in",
-    "is",
-    "it",
-    "la",
-    "le",
-    "les",
-    "lo",
-    "of",
-    "or",
-    "our",
-    "que",
-    "that",
-    "the",
-    "to",
-    "und",
-    "we",
-    "whether",
-    "will",
-    "would",
-    "you",
-    "your",
-})
+_ACTION_STATE_SUBJECT_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "be",
+        "been",
+        "can",
+        "could",
+        "das",
+        "dass",
+        "de",
+        "der",
+        "die",
+        "el",
+        "en",
+        "et",
+        "for",
+        "für",
+        "have",
+        "has",
+        "i",
+        "il",
+        "in",
+        "is",
+        "it",
+        "la",
+        "le",
+        "les",
+        "lo",
+        "of",
+        "or",
+        "our",
+        "que",
+        "that",
+        "the",
+        "to",
+        "und",
+        "we",
+        "whether",
+        "will",
+        "would",
+        "you",
+        "your",
+    }
+)
 _ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN = re.compile(
     r"^(?:i|me|you|he|him|she|her|it|we|us|they|them|this|that|these|those|"
     r"there|whether|if|who|what|which)\b",
@@ -938,19 +1145,12 @@ def _detected_supported_language(*values: str) -> str:
     normalized_text = " ".join(words)
     scores: dict[str, int] = {}
     for language, word_weights in _LANGUAGE_WORD_WEIGHTS.items():
-        score = sum(
-            weight * min(word_counts.get(word, 0), 2)
-            for word, weight in word_weights.items()
+        score = sum(weight * min(word_counts.get(word, 0), 2) for word, weight in word_weights.items())
+        score += sum(
+            weight for phrase, weight in _LANGUAGE_PHRASE_WEIGHTS.get(language, {}).items() if phrase in normalized_text
         )
         score += sum(
-            weight
-            for phrase, weight in _LANGUAGE_PHRASE_WEIGHTS.get(language, {}).items()
-            if phrase in normalized_text
-        )
-        score += sum(
-            weight
-            for character, weight in _LANGUAGE_CHARACTER_WEIGHTS.get(language, {}).items()
-            if character in clean
+            weight for character, weight in _LANGUAGE_CHARACTER_WEIGHTS.get(language, {}).items() if character in clean
         )
         scores[language] = score
     return max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
@@ -1233,17 +1433,10 @@ def _validated_concern_coverage(
         for concern in _ticket_context(issue).get("concerns", [])
         if isinstance(concern, dict) and _string_from(concern.get("id"))
     ]
-    covered_ids = tuple(
-        _string_from(item)
-        for item in covered_concern_ids[:20]
-        if _string_from(item)
-    )
+    covered_ids = tuple(_string_from(item) for item in covered_concern_ids[:20] if _string_from(item))
     reasons: list[str] = []
     requires_human = bool(model_requires_human)
-    if expected_ids and (
-        len(covered_ids) != len(expected_ids)
-        or set(covered_ids) != set(expected_ids)
-    ):
+    if expected_ids and (len(covered_ids) != len(expected_ids) or set(covered_ids) != set(expected_ids)):
         requires_human = True
         reasons.append("Reply composer did not confirm exact coverage of every concern.")
     if model_requires_human:
@@ -1284,16 +1477,9 @@ def _validated_obligation_coverage(
 ) -> tuple[tuple[str, ...], bool, str]:
     expected_ids = [item["id"] for item in _answer_obligations_from_issue(issue)]
     covered_ids = tuple(
-        dict.fromkeys(
-            _string_from(item)
-            for item in covered_obligation_ids[:100]
-            if _string_from(item)
-        )
+        dict.fromkeys(_string_from(item) for item in covered_obligation_ids[:100] if _string_from(item))
     )
-    if expected_ids and (
-        len(covered_ids) != len(expected_ids)
-        or set(covered_ids) != set(expected_ids)
-    ):
+    if expected_ids and (len(covered_ids) != len(expected_ids) or set(covered_ids) != set(expected_ids)):
         return (
             covered_ids,
             True,
@@ -1316,8 +1502,8 @@ def _validated_draft_coverage(
         model_requires_human=model_requires_human,
         model_reason=model_reason,
     )
-    obligation_ids, obligation_requires_human, obligation_reason = (
-        _validated_obligation_coverage(issue, covered_obligation_ids)
+    obligation_ids, obligation_requires_human, obligation_reason = _validated_obligation_coverage(
+        issue, covered_obligation_ids
     )
     reasons = [reason for reason in (concern_reason, obligation_reason) if reason]
     return (
@@ -1373,11 +1559,7 @@ def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) 
         values = value
     else:
         return []
-    return [
-        clean[:item_limit]
-        for item in values[:limit]
-        if (clean := _string_from(item))
-    ]
+    return [clean[:item_limit] for item in values[:limit] if (clean := _string_from(item))]
 
 
 def _tool_evidence_id(name: str, *, concern_id: str = "") -> str:
@@ -1433,10 +1615,7 @@ def _is_runbook_ai_run(
         return True
     if isinstance(intent_result.get("concerns"), list):
         return True
-    return any(
-        key in intent_result
-        for key in ("matched", "intentName", "intent_name")
-    )
+    return any(key in intent_result for key in ("matched", "intentName", "intent_name"))
 
 
 def _automatic_runbook_concern_context(
@@ -1455,9 +1634,7 @@ def _automatic_runbook_concern_context(
             continue
         metadata = _record_from(run.get("metadata"))
         source_message_id = _string_from(
-            metadata.get("emailId")
-            or metadata.get("messageId")
-            or metadata.get("sourceMessageId")
+            metadata.get("emailId") or metadata.get("messageId") or metadata.get("sourceMessageId")
         )
         intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
         if not _is_runbook_ai_run(run, intent_result):
@@ -1487,10 +1664,7 @@ def _automatic_runbook_concern_context(
                 "id": _string_from(raw.get("concernId") or raw.get("concern_id") or raw.get("id"))
                 or f"concern-{index + 1}",
                 "text": _string_from(
-                    raw.get("text")
-                    or raw.get("sourceText")
-                    or raw.get("source_text")
-                    or raw.get("summary")
+                    raw.get("text") or raw.get("sourceText") or raw.get("source_text") or raw.get("summary")
                 )[:1_000],
                 "matched": matched,
                 "runbook": intent_name[:240],
@@ -1533,21 +1707,21 @@ def _automatic_runbook_concern_context(
                         or obligation.get("text")
                         or (raw_obligation if isinstance(raw_obligation, str) else "")
                     )
-                    obligation_id = _string_from(
-                        obligation.get("obligationId")
-                        or obligation.get("obligation_id")
-                        or obligation.get("id")
-                    ) or f"{concern['id']}:obligation-{obligation_index}"
+                    obligation_id = (
+                        _string_from(
+                            obligation.get("obligationId") or obligation.get("obligation_id") or obligation.get("id")
+                        )
+                        or f"{concern['id']}:obligation-{obligation_index}"
+                    )
                     if not question:
                         continue
                     obligations.append(
                         {
                             "id": obligation_id[:240],
                             "question": question[:500],
-                            "sourceText": _string_from(
-                                obligation.get("sourceText")
-                                or obligation.get("source_text")
-                            )[:1_000],
+                            "sourceText": _string_from(obligation.get("sourceText") or obligation.get("source_text"))[
+                                :1_000
+                            ],
                         }
                     )
             if obligations:
@@ -1578,11 +1752,7 @@ def _automatic_runbook_concern_context(
             )
             if forbidden:
                 concern["forbiddenClaims"] = forbidden
-            raw_attachments = (
-                outcome.get("attachments")
-                or raw.get("attachments")
-                or []
-            )
+            raw_attachments = outcome.get("attachments") or raw.get("attachments") or []
             attachments: list[dict[str, str]] = []
             if isinstance(raw_attachments, list):
                 for raw_attachment in raw_attachments[:20]:
@@ -1638,9 +1808,7 @@ def _automatic_runbook_action_context(
         status = _string_from(execution.get("status")).lower()
         execution_type = _string_from(execution.get("type")).lower()
         execution_source = _string_from(metadata.get("source")).lower()
-        is_runbook_action = (
-            execution_type == "runbook_webhook" or execution_source == "runbook"
-        )
+        is_runbook_action = execution_type == "runbook_webhook" or execution_source == "runbook"
         # Channel triage is a real pending mutation even though it is not a
         # runbook webhook. Expose only the approval-gated pending form.
         is_pending_agent_triage = (
@@ -1650,31 +1818,17 @@ def _automatic_runbook_action_context(
         )
         if not is_runbook_action and not is_pending_agent_triage:
             continue
-        automation_context = _record_from(
-            metadata.get("automationContext") or metadata.get("automation_context")
-        )
+        automation_context = _record_from(metadata.get("automationContext") or metadata.get("automation_context"))
         # Channel-created actions keep their message scope in automationContext.
         execution_source_message_ids = {
             value
             for value in (
-                _string_from(
-                    metadata.get("sourceMessageId")
-                    or metadata.get("source_message_id")
-                ),
+                _string_from(metadata.get("sourceMessageId") or metadata.get("source_message_id")),
                 _string_from(metadata.get("emailId") or metadata.get("email_id")),
                 _string_from(metadata.get("messageId") or metadata.get("message_id")),
-                _string_from(
-                    automation_context.get("sourceMessageId")
-                    or automation_context.get("source_message_id")
-                ),
-                _string_from(
-                    automation_context.get("emailId")
-                    or automation_context.get("email_id")
-                ),
-                _string_from(
-                    automation_context.get("messageId")
-                    or automation_context.get("message_id")
-                ),
+                _string_from(automation_context.get("sourceMessageId") or automation_context.get("source_message_id")),
+                _string_from(automation_context.get("emailId") or automation_context.get("email_id")),
+                _string_from(automation_context.get("messageId") or automation_context.get("message_id")),
             )
             if value
         }
@@ -1711,11 +1865,9 @@ def _automatic_runbook_action_context(
         if status in {"failed", "skipped"}:
             application = _record_from(result.get("application"))
             approval = _record_from(result.get("approval"))
-            error = _string_from(
-                execution.get("error")
-                or application.get("error")
-                or approval.get("note")
-            )[:_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS]
+            error = _string_from(execution.get("error") or application.get("error") or approval.get("note"))[
+                :_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS
+            ]
             action_context = {
                 "name": name,
                 "label": label,
@@ -1739,6 +1891,14 @@ def _automatic_runbook_action_context(
         response = webhook_result.get("response")
         proof: dict[str, Any] = {}
         if isinstance(response, dict):
+            # Validate the complete response before minimizing it. Otherwise a
+            # negative sibling such as ``error`` or ``failed`` could be dropped
+            # while its reference number was incorrectly retained as success.
+            if not has_meaningful_action_success_proof(
+                response,
+                action={"name": name, "label": label},
+            ):
+                continue
             for key in (
                 "action",
                 "status",
@@ -1749,13 +1909,29 @@ def _automatic_runbook_action_context(
                 "confirmationNumber",
             ):
                 value = response.get(key)
-                if isinstance(value, (str, int, float, bool)):
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if cleaned and len(cleaned) <= 240:
+                        proof[key] = cleaned
+                elif isinstance(value, bool):
                     proof[key] = value
+                elif isinstance(value, int):
+                    proof[key] = value
+        if not has_meaningful_action_success_proof(
+            proof,
+            action={"name": name, "label": label},
+        ):
+            continue
         action_context = {
             "name": name,
             "label": label,
             "status": "success",
             "completedAt": _string_from(execution.get("completedAt")),
+            # Preserve the minimal durable execution proof needed by the
+            # deterministic action-state guard. The full webhook payload stays
+            # out of customer-facing context.
+            "applied": True,
+            "webhookResult": {"status": "ok"},
             "proof": proof,
         }
         if concern_id:
@@ -1782,11 +1958,7 @@ def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
 
 def _global_grounding_ticket_evidence(ticket: dict[str, Any]) -> dict[str, Any]:
     """Keep concern-scoped runbook facts outside the global ``ticket`` evidence ID."""
-    return {
-        key: value
-        for key, value in ticket.items()
-        if key not in _GROUNDING_TICKET_SCOPED_KEYS
-    }
+    return {key: value for key, value in ticket.items() if key not in _GROUNDING_TICKET_SCOPED_KEYS}
 
 
 def _concern_grounding_evidence_id(concern_id: str) -> str:
@@ -1804,11 +1976,7 @@ def _scoped_grounding_ticket_evidence(
     if isinstance(raw_concerns, list):
         for raw_concern in raw_concerns:
             concern = _record_from(raw_concern)
-            concern_id = _string_from(
-                concern.get("id")
-                or concern.get("concernId")
-                or concern.get("concern_id")
-            )
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
             if not concern_id:
                 continue
             scoped_actions = [
@@ -1816,10 +1984,7 @@ def _scoped_grounding_ticket_evidence(
                 for raw_action in actions
                 if (
                     (action := _record_from(raw_action))
-                    and _string_from(
-                        action.get("concernId") or action.get("concern_id")
-                    )
-                    == concern_id
+                    and _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
                 )
             ]
             evidence = {
@@ -1877,8 +2042,7 @@ def _automatic_conversation_context(
             message
             for message in conversation.get("messages", [])
             if isinstance(message, dict)
-            and _string_from(message.get("direction")).lower()
-            in {"customer", "email", "visitor", "user"}
+            and _string_from(message.get("direction")).lower() in {"customer", "email", "visitor", "user"}
         ],
     }
 
@@ -1906,9 +2070,7 @@ def grounding_text_sha256(value: str) -> str:
     return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
 
 
-_BUSINESS_IDENTIFIER_RE = re.compile(
-    r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{6,62}[A-Za-z0-9](?![A-Za-z0-9@])"
-)
+_BUSINESS_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{6,62}[A-Za-z0-9](?![A-Za-z0-9@])")
 _BUSINESS_IDENTIFIER_DURATION_WORDS = {
     "day",
     "days",
@@ -1982,11 +2144,7 @@ def _unsupported_business_identifiers(
     allowed_identifiers: tuple[str, ...],
 ) -> tuple[str, ...]:
     allowed = {identifier.casefold() for identifier in allowed_identifiers}
-    return tuple(
-        identifier
-        for identifier in _business_identifiers(answer)
-        if identifier.casefold() not in allowed
-    )
+    return tuple(identifier for identifier in _business_identifiers(answer) if identifier.casefold() not in allowed)
 
 
 def _automatic_tool_evidence_records_with_scope(
@@ -1996,36 +2154,23 @@ def _automatic_tool_evidence_records_with_scope(
     records: list[tuple[str, dict[str, Any]]] = []
     raw_ticket_evidence = ticket.get("toolEvidence")
     if isinstance(raw_ticket_evidence, list):
-        records.extend(
-            ("", record)
-            for raw_record in raw_ticket_evidence
-            if (record := _record_from(raw_record))
-        )
+        records.extend(("", record) for raw_record in raw_ticket_evidence if (record := _record_from(raw_record)))
     concerns = ticket.get("concerns")
     if isinstance(concerns, list):
         for raw_concern in concerns:
             concern = _record_from(raw_concern)
-            concern_id = _string_from(
-                concern.get("id")
-                or concern.get("concernId")
-                or concern.get("concern_id")
-            )
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
             raw_concern_evidence = concern.get("toolEvidence")
             if concern_id and isinstance(raw_concern_evidence, list):
                 records.extend(
-                    (concern_id, record)
-                    for raw_record in raw_concern_evidence
-                    if (record := _record_from(raw_record))
+                    (concern_id, record) for raw_record in raw_concern_evidence if (record := _record_from(raw_record))
                 )
     return tuple(records)
 
 
 def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Flatten the exact ticket and per-concern tool evidence visible to agents."""
-    return tuple(
-        record
-        for _concern_id, record in _automatic_tool_evidence_records_with_scope(ticket)
-    )
+    return tuple(record for _concern_id, record in _automatic_tool_evidence_records_with_scope(ticket))
 
 
 def _action_state_obligation_subject(
@@ -2039,12 +2184,52 @@ def _action_state_obligation_subject(
         if match is None:
             continue
         raw_subject = match.group("subject").strip()
-        if (
-            _ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(raw_subject)
-            or _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(raw_subject)
-        ):
+        action = _string_from(match.groupdict().get("action")).casefold()
+        pronoun_subject = bool(_ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(raw_subject))
+        if _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(raw_subject):
             return ""
+        if pronoun_subject:
+            if action != "escalate":
+                return ""
+            return "escalation"
         subject = raw_subject.strip(" \t\r\n.,;:!?\"'“”‘’")
+        if language == "es" and subject.casefold().startswith("al "):
+            subject = "el " + subject[3:]
+        if language == "de" and subject.casefold().startswith("dem "):
+            subject = "den " + subject[4:]
+        if action in {"record", "log"}:
+            subject = f"recording {subject}"
+        elif action == "escalate":
+            subject = f"escalating {subject}"
+        elif action in {"cancel", "terminate", "rescind"}:
+            subject = f"cancelling {subject}"
+        elif action in {
+            "dispatch",
+            "investigate",
+            "issue",
+            "notify",
+            "open",
+            "refund",
+            "replace",
+            "reship",
+            "submit",
+            "update",
+            "change",
+        }:
+            gerund = {
+                "change": "changing",
+                "dispatch": "dispatching",
+                "investigate": "investigating",
+                "issue": "issuing",
+                "notify": "notifying",
+                "open": "opening",
+                "refund": "refunding",
+                "replace": "replacing",
+                "reship": "reshipping",
+                "submit": "submitting",
+                "update": "updating",
+            }[action]
+            subject = f"{gerund} {subject}"
         if _action_state_subject_tokens(subject):
             return subject[:240]
     return ""
@@ -2092,12 +2277,15 @@ def _answer_uses_pending_confirmation_gerund(answer: str, subject: str) -> bool:
             re.IGNORECASE,
         )
         if pending_match is not None:
-            remainder = tail[pending_match.end():]
-            if re.search(
-                r"\b(?:complete|completed|done|successful|confirmed)\b",
-                remainder,
-                re.IGNORECASE,
-            ) is None:
+            remainder = tail[pending_match.end() :]
+            if (
+                re.search(
+                    r"\b(?:complete|completed|done|successful|confirmed)\b",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                is None
+            ):
                 return True
         pending_match = re.match(
             r"^(?:\s*,\s*(?:confirming|guaranteeing)\s+[^,;.!?\n]+)+"
@@ -2108,14 +2296,74 @@ def _answer_uses_pending_confirmation_gerund(answer: str, subject: str) -> bool:
             re.IGNORECASE,
         )
         if pending_match is not None:
-            remainder = tail[pending_match.end():]
-            if re.search(
-                r"\b(?:complete|completed|done|successful|confirmed)\b",
-                remainder,
-                re.IGNORECASE,
-            ) is None:
+            remainder = tail[pending_match.end() :]
+            if (
+                re.search(
+                    r"\b(?:complete|completed|done|successful|confirmed)\b",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                is None
+            ):
                 return True
     return False
+
+
+def _answer_mentions_subject_without_positive_action_claim(
+    answer: str,
+    subject_tokens: frozenset[str],
+) -> bool:
+    """Count only a safe same-topic explanation, not another concern's action."""
+    if not subject_tokens:
+        return False
+    synthetic_guard = (
+        {
+            "name": "human_review",
+            "label": "Human review",
+            "status": "pending_approval",
+        },
+    )
+    for match in re.finditer(r"[^.!?\n]+(?:[.!?]+|(?=\n)|$)", answer):
+        unit = match.group(0).strip()
+        if not unit or not subject_tokens.issubset(_action_state_subject_tokens(unit)):
+            continue
+        if not check_pending_action_claims(
+            answer=unit,
+            runbook_actions=synthetic_guard,
+        ).blocked:
+            return True
+    return False
+
+
+_HUMAN_REVIEW_CONCERN_STATUSES = frozenset(
+    {
+        "human_review",
+        "needs_human",
+        "pending_human_review",
+        "requires_human",
+    }
+)
+
+
+def _concern_requires_human_review(concern: dict[str, Any]) -> bool:
+    """Use only an explicitly matched concern's durable review state."""
+    return concern.get("matched") is True and (
+        concern.get("requiresHuman") is True
+        or _string_from(concern.get("status")).lower().replace("-", "_") in _HUMAN_REVIEW_CONCERN_STATUSES
+    )
+
+
+def _is_durable_successful_runbook_action(action: dict[str, Any]) -> bool:
+    """Require the complete, minimized proof emitted for an applied mutation."""
+    proof = action.get("proof")
+    webhook_result = _record_from(action.get("webhookResult"))
+    return bool(
+        _string_from(action.get("status")).lower() == "success"
+        and action.get("applied") is True
+        and _string_from(webhook_result.get("status")).lower() == "ok"
+        and _string_from(action.get("evidenceId")).startswith("action:")
+        and has_meaningful_action_success_proof(proof, action=action)
+    )
 
 
 def _pending_action_obligation_notices(
@@ -2132,38 +2380,76 @@ def _pending_action_obligation_notices(
         for raw_action in actions
         if (
             (action := _record_from(raw_action))
-            and _string_from(action.get("status")).lower().replace("-", "_")
-            == "pending_approval"
+            and _string_from(action.get("status")).lower().replace("-", "_") == "pending_approval"
         )
     ]
-    if not pending_actions:
-        return ()
-
     pending_concern_ids = {
         concern_id
         for action in pending_actions
-        if (
-            concern_id := _string_from(
-                action.get("concernId") or action.get("concern_id")
-            )
-        )
+        if (concern_id := _string_from(action.get("concernId") or action.get("concern_id")))
     }
-    if not pending_concern_ids:
-        return ()
-
-    answer_tokens = _action_state_subject_tokens(answer)
     notices: list[str] = []
     seen_subjects: set[frozenset[str]] = set()
     raw_concerns = ticket.get("concerns")
     concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    human_review_concern_ids = {
+        concern_id
+        for raw_concern in concerns
+        if (
+            (concern := _record_from(raw_concern))
+            and _concern_requires_human_review(concern)
+            and (concern_id := _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id")))
+        )
+    }
+    review_concern_ids = pending_concern_ids | human_review_concern_ids
+    if not review_concern_ids:
+        return ()
+
+    def append_notice_for_question(
+        question: str,
+        concern_actions: list[dict[str, Any]],
+    ) -> None:
+        remaining_question = remaining_action_obligation_text(
+            runbook_actions=concern_actions,
+            expected_action_text=question,
+        )
+        if not remaining_question:
+            return
+        subject = _action_state_obligation_subject(
+            remaining_question,
+            language=language,
+        )
+        if has_success_backed_action_claim(
+            answer=answer,
+            runbook_actions=concern_actions,
+            expected_action_text=remaining_question,
+        ):
+            return
+        subject_tokens = _action_state_subject_tokens(subject)
+        rendered_subject = subject[:1].upper() + subject[1:] if language == "en" else subject
+        notice = _ACTION_STATE_PENDING_NOTICES[language].format(
+            subject=rendered_subject,
+        )
+        if (
+            not subject_tokens
+            or subject_tokens in seen_subjects
+            or notice.casefold() in answer.casefold()
+            or (
+                _answer_mentions_subject_without_positive_action_claim(
+                    answer,
+                    subject_tokens,
+                )
+                and not (language == "en" and _answer_uses_pending_confirmation_gerund(answer, subject))
+            )
+        ):
+            return
+        seen_subjects.add(subject_tokens)
+        notices.append(notice)
+
     for raw_concern in concerns:
         concern = _record_from(raw_concern)
-        concern_id = _string_from(
-            concern.get("id")
-            or concern.get("concernId")
-            or concern.get("concern_id")
-        )
-        if concern_id not in pending_concern_ids:
+        concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+        if concern.get("matched") is not True or concern_id not in review_concern_ids:
             continue
         raw_obligations = concern.get("answerObligations")
         if not isinstance(raw_obligations, list):
@@ -2175,35 +2461,13 @@ def _pending_action_obligation_notices(
                 or obligation.get("text")
                 or (raw_obligation if isinstance(raw_obligation, str) else "")
             )
-            subject = _action_state_obligation_subject(
-                question,
-                language=language,
-            )
-            subject_tokens = _action_state_subject_tokens(subject)
-            rendered_subject = (
-                subject[:1].upper() + subject[1:]
-                if language == "en"
-                else subject
-            )
-            notice = _ACTION_STATE_PENDING_NOTICES[language].format(
-                subject=rendered_subject,
-            )
-            if (
-                not subject_tokens
-                or subject_tokens in seen_subjects
-                or notice.casefold() in answer.casefold()
-                or (
-                    not subject_tokens.isdisjoint(answer_tokens)
-                    and not (
-                        language == "en"
-                        and _answer_uses_pending_confirmation_gerund(answer, subject)
-                    )
-                )
-            ):
-                continue
-            seen_subjects.add(subject_tokens)
-            notices.append(notice)
-            answer_tokens = answer_tokens.union(subject_tokens)
+            concern_actions = [
+                action
+                for action in actions
+                if _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
+            ]
+            for action_question in action_obligation_parts(question):
+                append_notice_for_question(action_question, concern_actions)
     return tuple(notices)
 
 
@@ -2216,9 +2480,32 @@ def repair_issue_automation_answer_action_state(
     """Repair action claims and omitted action-state answers from durable state."""
     ticket = _automatic_ticket_context(issue)
     language = _latest_customer_language(messages)
+    raw_actions = ticket.get("runbookActions")
+    guard_actions = list(raw_actions) if isinstance(raw_actions, list) else []
+    if not any(
+        _string_from(_record_from(action).get("status")).lower().replace("-", "_") == "pending_approval"
+        for action in guard_actions
+    ):
+        raw_concerns = ticket.get("concerns")
+        concerns = raw_concerns if isinstance(raw_concerns, list) else []
+        if any(
+            _concern_requires_human_review(concern)
+            for raw_concern in concerns
+            if (concern := _record_from(raw_concern))
+        ):
+            # The concern state proves that human review is required even when
+            # a generic triage action is not yet present in this issue snapshot.
+            # This synthetic guard input is not surfaced as action evidence.
+            guard_actions.append(
+                {
+                    "name": "human_review",
+                    "label": "Human review",
+                    "status": "pending_approval",
+                }
+            )
     repaired = repair_pending_action_claims(
         answer=answer,
-        runbook_actions=ticket.get("runbookActions", []),
+        runbook_actions=guard_actions,
         tool_evidence=_automatic_tool_evidence_records(ticket),
         repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
     )
@@ -2274,15 +2561,21 @@ def _successful_action_evidence_ids_by_concern(
 ) -> dict[str, frozenset[str]]:
     """Index exact successful tool/action evidence under its originating concern."""
     evidence_by_concern: dict[str, set[str]] = {}
+    for evidence_id, (concern_id, _record) in _successful_action_evidence_records_by_id(ticket).items():
+        evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+    return {concern_id: frozenset(evidence_ids) for concern_id, evidence_ids in evidence_by_concern.items()}
+
+
+def _successful_action_evidence_records_by_id(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    """Index every durable action/tool record by its exact scoped evidence ID."""
+    evidence_records: dict[str, tuple[str, dict[str, Any]]] = {}
     concerns = ticket.get("concerns")
     if isinstance(concerns, list):
         for raw_concern in concerns:
             concern = _record_from(raw_concern)
-            concern_id = _string_from(
-                concern.get("id")
-                or concern.get("concernId")
-                or concern.get("concern_id")
-            )
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
             raw_evidence = concern.get("toolEvidence")
             if not concern_id or not isinstance(raw_evidence, list):
                 continue
@@ -2292,28 +2585,32 @@ def _successful_action_evidence_ids_by_concern(
                     record,
                     concern_id=concern_id,
                 ):
-                    evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+                    evidence_records[evidence_id] = (concern_id, record)
 
     raw_actions = ticket.get("runbookActions")
     if isinstance(raw_actions, list):
         for raw_action in raw_actions:
             action = _record_from(raw_action)
-            concern_id = _string_from(
-                action.get("concernId")
-                or action.get("concern_id")
-            )
+            concern_id = _string_from(action.get("concernId") or action.get("concern_id"))
             evidence_id = _string_from(action.get("evidenceId"))
-            if (
-                concern_id
-                and evidence_id.startswith("action:")
-                and _string_from(action.get("status")).lower() == "success"
-            ):
-                evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+            if concern_id and _is_durable_successful_runbook_action(action):
+                evidence_records[evidence_id] = (concern_id, action)
 
-    return {
-        concern_id: frozenset(evidence_ids)
-        for concern_id, evidence_ids in evidence_by_concern.items()
-    }
+    return evidence_records
+
+
+def _matching_successful_action_evidence_ids(
+    evidence_records: dict[str, tuple[str, dict[str, Any]]],
+    *,
+    concern_id: str,
+    expected_action_text: str,
+) -> frozenset[str]:
+    """Return same-concern evidence whose action and target match one obligation."""
+    return frozenset(
+        evidence_id
+        for evidence_id, (record_concern_id, record) in evidence_records.items()
+        if record_concern_id == concern_id and action_record_matches_expected_text(record, expected_action_text)
+    )
 
 
 def _scoped_grounding_evidence_concerns(
@@ -2327,11 +2624,7 @@ def _scoped_grounding_evidence_concerns(
     if isinstance(raw_concerns, list):
         for raw_concern in raw_concerns:
             concern = _record_from(raw_concern)
-            concern_id = _string_from(
-                concern.get("id")
-                or concern.get("concernId")
-                or concern.get("concern_id")
-            )
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
             if concern_id:
                 scoped.setdefault(
                     _concern_grounding_evidence_id(concern_id),
@@ -2346,10 +2639,7 @@ def _scoped_grounding_evidence_concerns(
     for concern_id, evidence_ids in evidence_by_concern.items():
         for evidence_id in evidence_ids:
             scoped.setdefault(evidence_id, set()).add(concern_id)
-    return {
-        evidence_id: frozenset(concern_ids)
-        for evidence_id, concern_ids in scoped.items()
-    }
+    return {evidence_id: frozenset(concern_ids) for evidence_id, concern_ids in scoped.items()}
 
 
 def grounding_context_snapshots(
@@ -2601,15 +2891,9 @@ def draft_issue_agent_answer(
         )
         if not answer:
             raise ValueError("Issue agent returned an empty answer")
-        missing_safety = (
-            missing_lithium_battery_safety_guidance(answer)
-            if safety_assessment.active
-            else ()
-        )
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
         if missing_safety:
-            raise ValueError(
-                SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety)
-            )
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
         citation_ids = workspace.validated_citation_ids(
             structured.citation_ids,
             structured.citation_paths,
@@ -2813,9 +3097,7 @@ def draft_issue_automation_answer(
                 first_answer = _string_from(getattr(structured, "answer", ""))
                 correction_reasons: list[str] = []
                 if first_answer and _detected_supported_language(first_answer) != reply_language:
-                    correction_reasons.append(
-                        f"Rewrite the entire answer in {reply_language_name}."
-                    )
+                    correction_reasons.append(f"Rewrite the entire answer in {reply_language_name}.")
                 pending_action_check = check_pending_action_claims(
                     answer=first_answer,
                     runbook_actions=ticket_context.get("runbookActions", []),
@@ -2848,9 +3130,7 @@ def draft_issue_automation_answer(
                 if missing_safety:
                     correction_reasons.append(
                         "Add every required immediate damaged-lithium-battery safety instruction. "
-                        "Missing policy elements: "
-                        + ", ".join(missing_safety)
-                        + "."
+                        "Missing policy elements: " + ", ".join(missing_safety) + "."
                     )
                 if correction_reasons:
                     correction_prompt = (
@@ -2893,19 +3173,11 @@ def draft_issue_automation_answer(
         )
         if not answer:
             raise ValueError("Issue automation returned an empty answer")
-        missing_safety = (
-            missing_lithium_battery_safety_guidance(answer)
-            if safety_assessment.active
-            else ()
-        )
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
         if missing_safety:
-            raise ValueError(
-                SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety)
-            )
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
         if _detected_supported_language(answer) != reply_language:
-            raise ValueError(
-                f"Automatic answer language mismatch: expected {reply_language_name}"
-            )
+            raise ValueError(f"Automatic answer language mismatch: expected {reply_language_name}")
         available_ids = {_string_from(article.get("id")) for article in articles if _string_from(article.get("id"))}
         citation_ids = tuple(
             dict.fromkeys(
@@ -3116,9 +3388,8 @@ def assess_issue_automation_grounding(
     ticket_evidence = _automatic_ticket_context(issue)
     global_ticket_evidence = _global_grounding_ticket_evidence(ticket_evidence)
     scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket_evidence)
-    successful_action_evidence_by_concern = (
-        _successful_action_evidence_ids_by_concern(ticket_evidence)
-    )
+    successful_action_evidence_records = _successful_action_evidence_records_by_id(ticket_evidence)
+    successful_action_evidence_by_concern = _successful_action_evidence_ids_by_concern(ticket_evidence)
     scoped_grounding_evidence_concerns = _scoped_grounding_evidence_concerns(
         ticket_evidence,
         successful_evidence_by_concern=successful_action_evidence_by_concern,
@@ -3141,11 +3412,7 @@ def assess_issue_automation_grounding(
                 f"latest customer language {_LANGUAGE_NAMES[expected_language]}"
             ),
         )
-    missing_safety = (
-        missing_lithium_battery_safety_guidance(answer)
-        if safety_assessment.active
-        else ()
-    )
+    missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
     if missing_safety:
         return AutomationGroundingAssessment(
             verified=False,
@@ -3157,14 +3424,9 @@ def assess_issue_automation_grounding(
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
             answer_obligations=answer_obligations,
-            uncovered_obligations=(
-                safety_assessment.answer_obligation()["question"],
-            ),
+            uncovered_obligations=(safety_assessment.answer_obligation()["question"],),
             unsupported_claims=missing_safety,
-            error=(
-                "Missing mandatory damaged-lithium-battery safety guidance: "
-                + ", ".join(missing_safety)
-            )[:1_000],
+            error=("Missing mandatory damaged-lithium-battery safety guidance: " + ", ".join(missing_safety))[:1_000],
         )
     pending_action_check = check_pending_action_claims(
         answer=answer,
@@ -3207,8 +3469,7 @@ def assess_issue_automation_grounding(
             answer_obligations=answer_obligations,
             unsupported_claims=unsupported_identifiers,
             error=(
-                "Candidate answer contains unsupported business identifiers: "
-                + ", ".join(unsupported_identifiers[:20])
+                "Candidate answer contains unsupported business identifiers: " + ", ".join(unsupported_identifiers[:20])
             )[:1_000],
         )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
@@ -3288,9 +3549,7 @@ def assess_issue_automation_grounding(
         for evidence_ids in successful_action_evidence_by_concern.values():
             allowed_evidence_ids.extend(evidence_ids)
         allowed_evidence_ids.extend(
-            evidence_id
-            for evidence_id in scoped_grounding_evidence_concerns
-            if evidence_id.startswith("concern:")
+            evidence_id for evidence_id in scoped_grounding_evidence_concerns if evidence_id.startswith("concern:")
         )
         if message_evidence:
             allowed_evidence_ids.append("messages")
@@ -3336,15 +3595,21 @@ def assess_issue_automation_grounding(
         }
 
         expected_unit_ids_for_retry = frozenset(
-            _string_from(unit.get("id"))
-            for unit in answer_units
-            if _string_from(unit.get("id"))
+            _string_from(unit.get("id")) for unit in answer_units if _string_from(unit.get("id"))
         )
+        expected_units_for_retry = {
+            _string_from(unit.get("id")): unit for unit in answer_units if _string_from(unit.get("id"))
+        }
         expected_obligation_ids_for_retry = frozenset(
             _string_from(obligation.get("id"))
             for obligation in answer_obligations
             if _string_from(obligation.get("id"))
         )
+        expected_obligations_for_retry = {
+            _string_from(obligation.get("id")): obligation
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        }
 
         def invoke_once(active_prompt: str) -> dict[str, Any]:
             with llm_stage("issue_automation_grounding"):
@@ -3377,6 +3642,8 @@ def assess_issue_automation_grounding(
                     expected_unit_ids=expected_unit_ids_for_retry,
                     expected_obligation_ids=expected_obligation_ids_for_retry,
                     allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                    expected_units=expected_units_for_retry,
+                    expected_obligations=expected_obligations_for_retry,
                 ):
                     logger.warning(
                         "Grounding evaluator linked supported units to an uncovered obligation; "
@@ -3459,9 +3726,7 @@ def assess_issue_automation_grounding(
             protocol_errors.append("Evaluator did not assess every answer unit exactly once")
         supported_unit_evidence_ids = {
             _string_from(item.get("unitId")): frozenset(
-                _string_from(evidence_id)
-                for evidence_id in item.get("evidenceIds", [])
-                if _string_from(evidence_id)
+                _string_from(evidence_id) for evidence_id in item.get("evidenceIds", []) if _string_from(evidence_id)
             )
             for item in clean_unit_assessments
             if (
@@ -3488,38 +3753,25 @@ def assess_issue_automation_grounding(
             obligation = expected_obligations.get(obligation_id)
             answer_unit_ids = tuple(
                 dict.fromkeys(
-                    unit_id
-                    for unit_id in (
-                        _string_from(value) for value in assessment.answer_unit_ids
-                    )
-                    if unit_id
+                    unit_id for unit_id in (_string_from(value) for value in assessment.answer_unit_ids) if unit_id
                 )
             )
             if not obligation_id or obligation_id in seen_obligation_ids:
-                protocol_errors.append(
-                    "Evaluator returned a missing or duplicate answer-obligation ID"
-                )
+                protocol_errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
                 continue
             seen_obligation_ids.add(obligation_id)
             if obligation is None:
-                protocol_errors.append(
-                    f"Evaluator returned unknown answer-obligation ID: {obligation_id}"
-                )
+                protocol_errors.append(f"Evaluator returned unknown answer-obligation ID: {obligation_id}")
                 continue
-            unknown_unit_ids = [
-                unit_id for unit_id in answer_unit_ids if unit_id not in expected_units
-            ]
+            unknown_unit_ids = [unit_id for unit_id in answer_unit_ids if unit_id not in expected_units]
             if unknown_unit_ids:
                 protocol_errors.append(
-                    "Answer obligation uses unknown answer-unit IDs: "
-                    + ", ".join(unknown_unit_ids[:5])
+                    "Answer obligation uses unknown answer-unit IDs: " + ", ".join(unknown_unit_ids[:5])
                 )
             requested_resolution = _string_from(assessment.resolution)
             resolution = requested_resolution
             linked_units_are_supported = bool(
-                answer_unit_ids
-                and not unknown_unit_ids
-                and set(answer_unit_ids).issubset(supported_units)
+                answer_unit_ids and not unknown_unit_ids and set(answer_unit_ids).issubset(supported_units)
             )
             obligation_concern_id = _string_from(obligation.get("concernId"))
             linked_evidence_ids = {
@@ -3531,23 +3783,16 @@ def assess_issue_automation_grounding(
                 dict.fromkeys(evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value)))
             )
             unknown_obligation_evidence_ids = [
-                evidence_id
-                for evidence_id in requested_obligation_evidence_ids
-                if evidence_id not in allowed_ids
+                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id not in allowed_ids
             ]
             if unknown_obligation_evidence_ids:
                 protocol_errors.append(
-                    "Answer obligation uses unknown evidence IDs: "
-                    + ", ".join(unknown_obligation_evidence_ids[:5])
+                    "Answer obligation uses unknown evidence IDs: " + ", ".join(unknown_obligation_evidence_ids[:5])
                 )
             requested_linked_evidence_ids = {
-                evidence_id
-                for evidence_id in requested_obligation_evidence_ids
-                if evidence_id in linked_evidence_ids
+                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id in linked_evidence_ids
             }
-            obligation_evidence_ids = set(
-                requested_linked_evidence_ids or linked_evidence_ids
-            )
+            obligation_evidence_ids = set(requested_linked_evidence_ids or linked_evidence_ids)
             usable_obligation_evidence_ids = {
                 evidence_id
                 for evidence_id in obligation_evidence_ids
@@ -3563,17 +3808,9 @@ def assess_issue_automation_grounding(
             obligation_has_usable_evidence = bool(usable_obligation_evidence_ids) and not (
                 unknown_obligation_evidence_ids
             )
-            if (
-                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
-                and not answer_unit_ids
-            ):
-                protocol_errors.append(
-                    f"Addressed obligation has no answer-unit IDs: {obligation_id}"
-                )
-            if (
-                requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
-                and not linked_units_are_supported
-            ):
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
+                protocol_errors.append(f"Addressed obligation has no answer-unit IDs: {obligation_id}")
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not linked_units_are_supported:
                 resolution = "not_covered"
             if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
                 resolution = "not_covered"
@@ -3591,20 +3828,43 @@ def assess_issue_automation_grounding(
             ):
                 resolution = "pending_or_unavailable"
                 deterministically_resolved_obligation_ids.add(obligation_id)
-            if requested_resolution == "fulfilled_action" and linked_units_are_supported:
-                exact_action_evidence_ids = successful_action_evidence_by_concern.get(
+            obligation_question = _string_from(obligation.get("question"))
+            linked_answer_asserts_action_state = any(
+                check_pending_action_claims(
+                    answer=_string_from(expected_units.get(unit_id, {}).get("text")),
+                    runbook_actions=(
+                        {
+                            "name": obligation_question or "pending_action",
+                            "label": obligation_question or "Pending action",
+                            "status": "pending_approval",
+                        },
+                    ),
+                ).blocked
+                for unit_id in answer_unit_ids
+            )
+            must_bind_action_evidence = requested_resolution == "fulfilled_action" or (
+                requested_resolution == "answered" and linked_answer_asserts_action_state
+            )
+            if must_bind_action_evidence and linked_units_are_supported:
+                same_concern_action_evidence_ids = successful_action_evidence_by_concern.get(
                     obligation_concern_id,
                     frozenset(),
                 )
+                matching_action_evidence_ids = _matching_successful_action_evidence_ids(
+                    successful_action_evidence_records,
+                    concern_id=obligation_concern_id,
+                    expected_action_text=_string_from(obligation.get("question")),
+                )
+                cited_same_concern_action_evidence_ids = obligation_evidence_ids.intersection(
+                    same_concern_action_evidence_ids
+                )
                 if (
-                    not exact_action_evidence_ids
-                    or (
-                        requested_obligation_evidence_ids
-                        and not obligation_evidence_ids.intersection(exact_action_evidence_ids)
-                    )
+                    not matching_action_evidence_ids
+                    or not cited_same_concern_action_evidence_ids
+                    or not cited_same_concern_action_evidence_ids.issubset(matching_action_evidence_ids)
                     or any(
                         not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
-                            exact_action_evidence_ids
+                            matching_action_evidence_ids
                         )
                         for unit_id in answer_unit_ids
                     )
@@ -3612,9 +3872,7 @@ def assess_issue_automation_grounding(
                     resolution = "not_covered"
             covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
             if not covered:
-                uncovered_obligations.append(
-                    _string_from(obligation.get("question"))[:500]
-                )
+                uncovered_obligations.append(_string_from(obligation.get("question"))[:500])
             clean_assessment = {
                 "obligationId": obligation_id,
                 "resolution": resolution,
@@ -3630,16 +3888,11 @@ def assess_issue_automation_grounding(
                 clean_assessment["evidenceIds"] = [
                     evidence_id
                     for evidence_id in clean_evidence_candidates
-                    if (
-                        evidence_id in obligation_evidence_ids
-                        and evidence_id in usable_obligation_evidence_ids
-                    )
+                    if (evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids)
                 ]
             clean_obligation_assessments.append(clean_assessment)
         if seen_obligation_ids != set(expected_obligations):
-            protocol_errors.append(
-                "Evaluator did not assess every answer obligation exactly once"
-            )
+            protocol_errors.append("Evaluator did not assess every answer obligation exactly once")
             uncovered_obligations.extend(
                 _string_from(obligation.get("question"))[:500]
                 for obligation_id, obligation in expected_obligations.items()
@@ -3650,9 +3903,7 @@ def assess_issue_automation_grounding(
         )
         used_citation_id_set = set(used_citation_ids)
         used_evidence_snapshots = tuple(
-            snapshot
-            for snapshot in snapshots
-            if _string_from(snapshot.get("id")) in used_citation_id_set
+            snapshot for snapshot in snapshots if _string_from(snapshot.get("id")) in used_citation_id_set
         )
 
         contradictions = tuple(
@@ -3693,10 +3944,7 @@ def assess_issue_automation_grounding(
             and not clean_uncovered_obligations
         )
         if (
-            (
-                structured.verdict != "grounded"
-                and not deterministic_guarantee_override
-            )
+            (structured.verdict != "grounded" and not deterministic_guarantee_override)
             or clean_unsupported
             or contradictions
             or clean_uncovered_obligations
@@ -3704,11 +3952,7 @@ def assess_issue_automation_grounding(
             return AutomationGroundingAssessment(
                 verified=False,
                 status="failed",
-                reason_code=(
-                    "incomplete_answer"
-                    if clean_uncovered_obligations
-                    else "ungrounded_answer"
-                ),
+                reason_code=("incomplete_answer" if clean_uncovered_obligations else "ungrounded_answer"),
                 checked_at=checked_at,
                 citation_ids=citation_ids,
                 evidence_snapshots=snapshots,

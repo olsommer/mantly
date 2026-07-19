@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from automail.api.admin import actions as admin_actions
@@ -369,9 +371,7 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
             "article2",
         ]
         assert reply_calls[0]["metadata"]["knowledgeArticleIds"] == ["article1"]
-        assert [
-            citation["id"] for citation in reply_calls[0]["metadata"]["citations"]
-        ] == ["article1"]
+        assert [citation["id"] for citation in reply_calls[0]["metadata"]["citations"]] == ["article1"]
     else:
         assert result["draftBlockedReason"] == "ungrounded_answer"
         assert result["reply"] is None
@@ -585,9 +585,7 @@ def test_grounding_preflight_blocks_live_pending_agent_triage_claims(monkeypatch
                 "metadata": {
                     "source": "agent_triage",
                     "approvalRequired": True,
-                    "automationContext": {
-                        "sourceMessageId": "channel:email-main:older-message"
-                    },
+                    "automationContext": {"sourceMessageId": "channel:email-main:older-message"},
                 },
                 "result": {
                     "proposedAction": {
@@ -650,10 +648,7 @@ def test_grounding_preflight_blocks_live_pending_agent_triage_claims(monkeypatch
             "We have noted the critical deadline of 20 July 2026 and have escalated "
             "your request for immediate human triage due to its urgency."
         ),
-        (
-            "While we cannot promise a same-day consultation, we are prioritizing "
-            "your matter."
-        ),
+        ("While we cannot promise a same-day consultation, we are prioritizing your matter."),
     )
     assert result.pending_actions == ("Agent triage",)
 
@@ -751,8 +746,7 @@ def test_grounding_preflight_blocks_wrong_reply_language_without_llm(monkeypatch
             }
         ],
         answer=(
-            "Hallo Lena, Ihre Bestellung ist unterwegs. Die voraussichtliche "
-            "Zustellung erfolgt am nächsten Werktag."
+            "Hallo Lena, Ihre Bestellung ist unterwegs. Die voraussichtliche Zustellung erfolgt am nächsten Werktag."
         ),
         articles=[],
         tenant_id="tenant1",
@@ -906,38 +900,12 @@ def test_channel_autopilot_marks_grounding_block_as_withheld(monkeypatch):
 
 def test_automation_customer_reply_requires_persisted_reply_id():
     without_reply = {
-        "items": [
-            {
-                "result": {
-                    "actions": [
-                        {"type": "prepare_agent_reply", "status": "prepared", "replyId": ""}
-                    ]
-                }
-            }
-        ]
+        "items": [{"result": {"actions": [{"type": "prepare_agent_reply", "status": "prepared", "replyId": ""}]}}]
     }
     with_reply = {
-        "items": [
-            {
-                "result": {
-                    "actions": [
-                        {"type": "prepare_agent_reply", "status": "prepared", "replyId": "reply1"}
-                    ]
-                }
-            }
-        ]
+        "items": [{"result": {"actions": [{"type": "prepare_agent_reply", "status": "prepared", "replyId": "reply1"}]}}]
     }
-    with_queued_reply = {
-        "items": [
-            {
-                "result": {
-                    "actions": [
-                        {"type": "queue_reply", "replyId": "reply2"}
-                    ]
-                }
-            }
-        ]
-    }
+    with_queued_reply = {"items": [{"result": {"actions": [{"type": "queue_reply", "replyId": "reply2"}]}}]}
 
     assert issues._automation_created_customer_reply(without_reply) is False
     assert issues._automation_created_customer_reply(with_reply) is True
@@ -946,85 +914,202 @@ def test_automation_customer_reply_requires_persisted_reply_id():
 
 def test_automatic_action_context_distinguishes_pending_from_proven_success():
     issue = {
-            "id": "issue1",
-            "subject": "Delivery exception",
-            "status": "ongoing",
-            "aiSummary": "A ticket was already opened.",
-            "actionExecutions": [
-                {
-                    "type": "agent_triage",
-                    "status": "success",
-                    "metadata": {"source": "agent_triage"},
+        "id": "issue1",
+        "subject": "Delivery exception",
+        "status": "ongoing",
+        "aiSummary": "A ticket was already opened.",
+        "actionExecutions": [
+            {
+                "type": "agent_triage",
+                "status": "success",
+                "metadata": {"source": "agent_triage"},
+            },
+            {
+                "type": "runbook_webhook",
+                "actionKey": "open_ticket",
+                "label": "Open ticket",
+                "status": "pending",
+                "metadata": {"source": "runbook", "approvalRequired": True},
+                "result": {
+                    "proposedAction": {
+                        "name": "open_ticket",
+                        "label": "Open fulfillment ticket",
+                    }
                 },
-                {
-                    "type": "runbook_webhook",
-                    "actionKey": "open_ticket",
-                    "label": "Open ticket",
-                    "status": "pending",
-                    "metadata": {"source": "runbook", "approvalRequired": True},
-                    "result": {
-                        "proposedAction": {
-                            "name": "open_ticket",
-                            "label": "Open fulfillment ticket",
-                        }
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "failed",
+                "completedAt": "2026-07-16T10:08:00Z",
+                "error": "webhook unavailable: " + ("x" * 600),
+                "metadata": {"source": "runbook", "approvalRequired": True},
+                "result": {"proposedAction": {"name": "failed_ticket"}},
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "skipped",
+                "completedAt": "2026-07-16T10:09:00Z",
+                "metadata": {"source": "runbook", "approvalRequired": True},
+                "result": {
+                    "proposedAction": {"name": "rejected_ticket", "label": "Rejected ticket"},
+                    "approval": {"note": "Rejected by operator"},
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "completedAt": "2026-07-16T10:10:00Z",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {
+                        "name": "confirm_ticket",
+                        "label": "Confirm ticket",
                     },
-                },
-                {
-                    "type": "runbook_webhook",
-                    "status": "failed",
-                    "completedAt": "2026-07-16T10:08:00Z",
-                    "error": "webhook unavailable: " + ("x" * 600),
-                    "metadata": {"source": "runbook", "approvalRequired": True},
-                    "result": {"proposedAction": {"name": "failed_ticket"}},
-                },
-                {
-                    "type": "runbook_webhook",
-                    "status": "skipped",
-                    "completedAt": "2026-07-16T10:09:00Z",
-                    "metadata": {"source": "runbook", "approvalRequired": True},
-                    "result": {
-                        "proposedAction": {"name": "rejected_ticket", "label": "Rejected ticket"},
-                        "approval": {"note": "Rejected by operator"},
-                    },
-                },
-                {
-                    "type": "runbook_webhook",
-                    "status": "success",
-                    "completedAt": "2026-07-16T10:10:00Z",
-                    "metadata": {"source": "runbook"},
-                    "result": {
-                        "proposedAction": {
-                            "name": "confirm_ticket",
-                            "label": "Confirm ticket",
-                        },
-                        "application": {
-                            "applied": True,
-                            "webhookResult": {
-                                "status": "ok",
-                                "response": {
-                                    "ticketReference": "ZF-42",
-                                    "status": "opened",
-                                    "secret": "must-not-reach-the-agent",
-                                    "nested": {"raw": "must-not-reach-the-agent"},
-                                },
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "ticketReference": "ZF-42",
+                                "status": "opened",
+                                "secret": "must-not-reach-the-agent",
+                                "nested": {"raw": "must-not-reach-the-agent"},
                             },
                         },
                     },
                 },
-                {
-                    "type": "runbook_webhook",
-                    "status": "success",
-                    "metadata": {"source": "runbook"},
-                    "result": {
-                        "proposedAction": {"name": "false_success"},
-                        "application": {
-                            "applied": False,
-                            "webhookResult": {"status": "ok", "response": {"id": "bad"}},
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "semantic_failure"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "status": "failed",
+                                "reference": "BAD-STATUS-1",
+                            },
                         },
                     },
                 },
-            ],
-        }
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "error_with_reference"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "error": "could not cancel",
+                                "reference": "ERR-1",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "failed_with_id"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {"failed": True, "id": "ERR1"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "failure_with_confirmation"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "failure": "warehouse rejected",
+                                "confirmationNumber": "ERR-2",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "not_found_status"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {"status": "not_found"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "missing_status"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {"status": "missing"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "negative_confirmation"},
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "ok": False,
+                                "reference": "BAD-OK-1",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {"name": "false_success"},
+                    "application": {
+                        "applied": False,
+                        "webhookResult": {"status": "ok", "response": {"id": "bad"}},
+                    },
+                },
+            },
+        ],
+    }
     context = issue_agent._automatic_ticket_context(issue)
     knowledge_context = issue_agent._ticket_context(issue)
 
@@ -1055,11 +1140,114 @@ def test_automatic_action_context_distinguishes_pending_from_proven_success():
             "label": "Confirm ticket",
             "status": "success",
             "completedAt": "2026-07-16T10:10:00Z",
+            "applied": True,
+            "webhookResult": {"status": "ok"},
             "proof": {"status": "opened", "ticketReference": "ZF-42"},
         },
     ]
     assert context["runbookActions"] == expected_actions
     assert knowledge_context["runbookActions"] == expected_actions
+
+
+def test_automatic_action_context_bounds_every_copied_proof_value():
+    issue = {
+        "id": "issue-proof-bounds",
+        "actionExecutions": [
+            {
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {"source": "runbook"},
+                "result": {
+                    "proposedAction": {
+                        "name": "confirm_ticket",
+                        "label": "Confirm ticket",
+                    },
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": {
+                                "status": "complete",
+                                "reference": "X" * 100_000,
+                            },
+                        },
+                    },
+                },
+            }
+        ],
+    }
+
+    context = issue_agent._automatic_ticket_context(issue)
+
+    assert context["runbookActions"] == [
+        {
+            "name": "confirm_ticket",
+            "label": "Confirm ticket",
+            "status": "success",
+            "completedAt": "",
+            "applied": True,
+            "webhookResult": {"status": "ok"},
+            "proof": {"status": "complete"},
+        }
+    ]
+    assert len(json.dumps(context)) < 1_000
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"status": "success", "result": "failed", "reference": "X-1"},
+        {"status": "complete", "message": "action failed", "reference": "X-1"},
+        {"status": "complete", "outcome": "pending approval", "reference": "X-1"},
+        {
+            "status": "complete",
+            "details": {"status": "failed"},
+            "reference": "X-1",
+        },
+        {"status": "complete", "data": "refund failed", "reference": "X-1"},
+        {"message": "we didn't issue the refund", "reference": "X-1"},
+        {"message": "we haven't issued the refund", "reference": "X-1"},
+        {"message": "no refund was issued", "reference": "X-1"},
+        {"message": "refund without being issued", "reference": "X-1"},
+        {"status": "queued", "reference": "X-1"},
+        {"success": "false", "reference": "X-1"},
+        {"status": 500, "reference": "X-1"},
+    ],
+)
+def test_automatic_action_context_rejects_ambiguous_or_negative_webhook_proof(
+    response: dict[str, object],
+) -> None:
+    issue = {
+        "id": "issue-invalid-proof",
+        "actionExecutions": [
+            {
+                "id": "execution-invalid-proof",
+                "type": "runbook_webhook",
+                "status": "success",
+                "metadata": {
+                    "source": "runbook",
+                    "concernId": "concern-refund",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "issue_refund",
+                        "label": "Issue refund",
+                    },
+                    "application": {
+                        "applied": True,
+                        "webhookResult": {
+                            "status": "ok",
+                            "response": response,
+                        },
+                    },
+                },
+            }
+        ],
+    }
+
+    context = issue_agent._automatic_ticket_context(issue)
+
+    assert context.get("runbookActions", []) == []
 
 
 def test_automatic_evidence_excludes_generated_messages_and_related_agent_replies():

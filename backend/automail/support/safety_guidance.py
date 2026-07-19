@@ -10,19 +10,15 @@ from pathlib import Path
 from typing import Any
 
 LITHIUM_BATTERY_SAFETY_POLICY_ID = "system:safety:damaged-lithium-battery:v1"
-LITHIUM_BATTERY_SAFETY_OBLIGATION_ID = (
-    "system:safety:damaged-lithium-battery:v1:immediate-guidance"
-)
-LITHIUM_BATTERY_SAFETY_REASON = (
-    "A damaged or leaking lithium battery report requires human safety review."
-)
+LITHIUM_BATTERY_SAFETY_OBLIGATION_ID = "system:safety:damaged-lithium-battery:v1:immediate-guidance"
+LITHIUM_BATTERY_SAFETY_REASON = "A damaged or leaking lithium battery report requires human safety review."
 SAFETY_GUIDANCE_MISSING_REASON_CODE = "safety_guidance_missing"
 SAFETY_HUMAN_APPROVAL_REQUIRED_REASON_CODE = "safety_human_approval_required"
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _LITHIUM_BATTERY_SAFETY_POLICY = (
-    _PROMPTS_DIR / "damaged_lithium_battery_safety_policy.md"
-).read_text(encoding="utf-8").strip()
+    (_PROMPTS_DIR / "damaged_lithium_battery_safety_policy.md").read_text(encoding="utf-8").strip()
+)
 
 
 @dataclass(frozen=True)
@@ -47,9 +43,7 @@ class SafetyGuidanceAssessment:
             return {}
         return {
             "id": self.policy_id,
-            "contextSha256": hashlib.sha256(
-                self.policy_text.encode("utf-8")
-            ).hexdigest(),
+            "contextSha256": hashlib.sha256(self.policy_text.encode("utf-8")).hexdigest(),
         }
 
     def prompt_context(self) -> dict[str, Any]:
@@ -97,8 +91,19 @@ _BATTERY_RE = re.compile(
 )
 _HAZARD_RE = re.compile(
     r"\b(?:leak(?:s|ed|ing)?|damag(?:e|ed)|punctur(?:e|ed)|ruptur(?:e|ed)|"
-    r"swell(?:s|ing|ollen)?|bulg(?:e|ed|ing)|smok(?:e|es|ed|ing)|fire|burn(?:s|ed|ing)?|"
-    r"overheat(?:s|ed|ing)?|hot|hiss(?:es|ed|ing)?|fumes?|chemical[ -]?(?:smell|odor)|"
+    r"crack(?:s|ed|ing)?|deform(?:s|ed|ing)?|spark(?:s|ed|ing)?|"
+    r"vent(?:s|ed|ing)(?:[ -]+gas)?|vent[ -]+gas|melt(?:s|ed|ing)?|"
+    r"expand(?:s|ed|ing)?|"
+    r"puff(?:s|ed|ing)?[ -]+up|bloat(?:s|ed|ing)?|"
+    r"swell(?:s|ing|ollen)?|bulg(?:e|ed|ing)|"
+    r"smok(?:e|es|ed|ing)|fire|burn(?:s|ed|ing)?|overheat(?:s|ed|ing)?|hot|"
+    r"(?:extremely|too)[ -]+warm(?:[ -]+to[ -]+touch)?|"
+    r"hiss(?:es|ed|ing)?|fumes?|popping[ -]+noises?|"
+    r"sizzl(?:e|es|ed|ing)|scorch(?:es|ed|ing)?|split(?:ting)?[ -]+open|"
+    r"chemical(?:s)?[ -]?(?:smell|odou?r)|"
+    r"(?:smell|odor|odour)(?:s|ed|ing)?(?:[ -]+strongly)?[ -]+"
+    r"(?:(?:like|of)[ -]+)?chemicals?|"
+    r"(?:strange[ -]+)?sweet[ -]+(?:smell|odou?r)|"
     r"auslauf(?:en|end|t)?|undicht|beschadigt|aufgeblaht|rauch(?:t|end)?|feuer|"
     r"uberhitz(?:t|ung)?|heiss|fuite|fuit|endommagee?s?|gonflee?s?|fumee|feu|chaude?s?|"
     r"fuga|derrame|danada?s?|hinchada?s?|humo|fuego|caliente|"
@@ -115,7 +120,8 @@ _CONTAINER_RE = re.compile(
 )
 _NEGATED_HAZARD_BEFORE_RE = re.compile(
     r"(?:\bno[ -]+longer|\bnot(?![ -]+only\b)|n't|\bwithout|\bnever|\bno\b|\bresolved|"
-    r"\bstopped|\bnicht(?:[ -]+mehr)?|\bohne|\bkein(?:e|en)?|"
+    r"\bstopped|\bceased|\bneither|\bnor|\bfree[ -]+(?:from|of)|"
+    r"\brather[ -]+than|\bnicht(?:[ -]+mehr)?|\bohne|\bkein(?:e|en)?|"
     r"\bne\b|\bplus[ -]+de|\bsans|\bya[ -]+no|\bsin|\bnon(?:[ -]+piu)?|\bsenza)"
     r"[^.!?;\n]{0,28}$"
 )
@@ -144,9 +150,7 @@ _BATTERY_HAZARD_PREDICATE_PREFIX = (
     r"esta|estaba|parece|se[ -]+volvio|tiene(?:[ -]+una?)?|"
     r"e|era|sembra|diventa|ha[ -]+iniziato[ -]+a)"
 )
-_LOCATION_CONTAINER_ONLY_RE = re.compile(
-    rf"^\s*{_LOCATION_CONTAINER_FRAGMENT}\s*$"
-)
+_LOCATION_CONTAINER_ONLY_RE = re.compile(rf"^\s*{_LOCATION_CONTAINER_FRAGMENT}\s*$")
 _LOCATION_CONTAINER_PREDICATE_RE = re.compile(
     rf"^\s*{_LOCATION_CONTAINER_FRAGMENT}\s+{_BATTERY_HAZARD_PREDICATE_PREFIX}\s*$"
 )
@@ -170,11 +174,19 @@ _SIMPLE_RELATIVE_PREDICATE_RE = re.compile(
     r")\s*$"
 )
 _DIRECT_PREDICATE_HAZARD_RE = re.compile(
-    r"^(?:leak(?:s|ed|ing)?|swell(?:s|ing|ollen)?|smok(?:e|es|ed|ing)|"
-    r"burn(?:s|ed|ing)?|overheat(?:s|ed|ing)?|hiss(?:es|ed|ing)?|"
+    r"^(?:leak(?:s|ed|ing)?|crack(?:s|ed|ing)?|deform(?:s|ed|ing)?|"
+    r"spark(?:s|ed|ing)?|vent(?:s|ed|ing)(?:[ -]+gas)?|vent[ -]+gas|"
+    r"melt(?:s|ed|ing)?|"
+    r"expand(?:s|ed|ing)?|puff(?:s|ed|ing)?[ -]+up|bloat(?:s|ed|ing)?|"
+    r"swell(?:s|ing|ollen)?|"
+    r"smok(?:e|es|ed|ing)|burn(?:s|ed|ing)?|overheat(?:s|ed|ing)?|"
+    r"hiss(?:es|ed|ing)?|(?:extremely|too)[ -]+warm(?:[ -]+to[ -]+touch)?|"
+    r"popping[ -]+noises?|sizzl(?:e|es|ed|ing)|scorch(?:es|ed|ing)?|"
+    r"split(?:ting)?[ -]+open|"
     r"auslauf(?:en|end|t)?|fuit|gonflee?s?|fumee|"
     r"fuga|hinchada?s?|humo|perdita|gonfia|fumo)$"
 )
+_ELLIPTICAL_HAZARD_PREFIX_RE = re.compile(r"^\s*(?:(?:still|now|currently|instead)[ -]+)?$")
 _EXPLICIT_HAZARD_RESOLUTION_RE = re.compile(
     r"\b(?:hazard|danger|dangerous[ -]+situation)\b[^.!?\n]{0,32}"
     r"\b(?:resolved|cleared|over|safe)\b|"
@@ -184,7 +196,13 @@ _EXPLICIT_HAZARD_RESOLUTION_RE = re.compile(
 )
 _HAZARD_RESOLUTION_MARKER_RE = re.compile(
     r"\b(?:no[ -]+longer|stopped|resolved|not|without|safe|"
+    r"ceased|neither|nor|free[ -]+(?:from|of)|intact|rather[ -]+than|"
     r"nicht[ -]+mehr|kein\w*|plus|sans|ya[ -]+no|sin|non[ -]+piu|senza)\b"
+)
+
+_NONPHYSICAL_EXPANSION_AFTER_RE = re.compile(
+    r"^\s+(?:(?:lithium|li[ -]?ion|battery)[ -]+)?(?:warrant(?:y|ies)|coverage|"
+    r"plans?|programs?|options?|capacity|storage|range|selection|catalog)\b"
 )
 
 _CUSTOMER_DIRECTIONS = {"customer", "visitor", "inbound", "incoming"}
@@ -209,17 +227,14 @@ def _customer_bodies(messages: list[dict[str, Any]] | None) -> list[str]:
 def _hazard_is_negated(clause: str, hazard: re.Match[str]) -> bool:
     before = clause[max(0, hazard.start() - 48) : hazard.start()]
     after = clause[hazard.end() : hazard.end() + 32]
-    return bool(
-        _NEGATED_HAZARD_BEFORE_RE.search(before)
-        or _NEGATED_HAZARD_AFTER_RE.search(after)
-    )
+    if hazard.group(0).startswith("expand") and _NONPHYSICAL_EXPANSION_AFTER_RE.search(after):
+        return True
+    return bool(_NEGATED_HAZARD_BEFORE_RE.search(before) or _NEGATED_HAZARD_AFTER_RE.search(after))
 
 
 def _hazard_targets_battery(clause: str) -> bool:
     batteries = tuple(_BATTERY_RE.finditer(clause))
-    hazards = tuple(
-        match for match in _HAZARD_RE.finditer(clause) if not _hazard_is_negated(clause, match)
-    )
+    hazards = tuple(match for match in _HAZARD_RE.finditer(clause) if not _hazard_is_negated(clause, match))
     for battery in batteries:
         for hazard in hazards:
             left, right = sorted((battery.end(), hazard.start()))
@@ -235,11 +250,7 @@ def _hazard_targets_battery(clause: str) -> bool:
                 continue
             before_hazard = clause[max(0, hazard.start() - 40) : hazard.start()]
             if _CONTAINER_RE.search(before_hazard):
-                hazard_to_battery = (
-                    clause[hazard.end() : battery.start()]
-                    if hazard.end() <= battery.start()
-                    else ""
-                )
+                hazard_to_battery = clause[hazard.end() : battery.start()] if hazard.end() <= battery.start() else ""
                 if not _DIRECT_HAZARD_BATTERY_GAP_RE.fullmatch(hazard_to_battery):
                     continue
             return True
@@ -276,15 +287,14 @@ def _has_related_battery_hazard(text: str) -> bool:
     for clause in clauses:
         if _hazard_targets_battery(clause):
             return True
-        hazards = tuple(
-            match
-            for match in _HAZARD_RE.finditer(clause)
-            if not _hazard_is_negated(clause, match)
-        )
+        hazards = tuple(match for match in _HAZARD_RE.finditer(clause) if not _hazard_is_negated(clause, match))
         if (
             previous_had_battery
             and hazards
-            and re.match(r"^(?:it|this[ -]+item|this[ -]+unit|this[ -]+device)\b", clause)
+            and (
+                re.match(r"^(?:it|this[ -]+item|this[ -]+unit|this[ -]+device)\b", clause)
+                or any(_ELLIPTICAL_HAZARD_PREFIX_RE.fullmatch(clause[: hazard.start()]) for hazard in hazards)
+            )
             and not _CONTAINER_RE.search(clause)
         ):
             return True
@@ -328,20 +338,25 @@ def assess_lithium_battery_safety(
 
 
 _NEGATIVE_DIRECTIVE_RE = re.compile(
-    r"\b(?:stop|do[ -]?not|don't|cannot|can't|avoid|must[ -]?not|never|nicht|"
-    r"kein(?:e|en)?|vermeiden|ne|evitez|no|non)\b|\bn['’]"
+    r"\b(?:stop|do[ -]?not|don't|cannot|can't|avoid|refrain|skip|without|"
+    r"must[ -]?not|never|nicht|kein(?:e|en)?|vermeiden|ne|evitez|no|non)\b|\bn['’]"
 )
 _HANDLING_RE = re.compile(
-    r"\b(?:handl\w*|touch\w*|move\w*|anfass\w*|beruhr\w*|beweg\w*|"
+    r"\b(?:handl\w*|touch\w*|mov(?:e|es|ed|ing)\b(?![ -]+away)|"
+    r"hold\w*|relocat\w*|lift\w*|"
+    r"pick(?:ing|ed|s)?[ -]+(?:it|the[ -]+(?:item|battery|device|unit))[ -]+up|"
+    r"anfass\w*|beruhr\w*|beweg\w*|"
     r"manipul\w*|manipol\w*|touch\w*|deplac\w*|tocar\w*|mover\w*|"
     r"toccar\w*|spostar\w*)\b"
 )
 _USE_RE = re.compile(
-    r"\b(?:use|using|benutz\w*|verwend\w*|utilis\w*|usar\w*|utilizz\w*)\b"
+    r"\b(?:use|using|"
+    r"(?:power|turn|switch)(?:s|ed|ing)?[ -]+"
+    r"(?:it|the[ -]+(?:item|battery|device|unit))[ -]+on|"
+    r"power(?:s|ed|ing)?[ -]+on[ -]+the[ -]+(?:item|battery|device|unit)|"
+    r"benutz\w*|verwend\w*|utilis\w*|usar\w*|utilizz\w*)\b"
 )
-_CHARGE_RE = re.compile(
-    r"\b(?:charg(?:e|es|ed|ing)|auflad\w*|laden|recharg\w*|carg\w*|ricaric\w*)\b"
-)
+_CHARGE_RE = re.compile(r"\b(?:charg(?:e|es|ed|ing)|auflad\w*|laden|recharg\w*|carg\w*|ricaric\w*)\b")
 _CHARGE_ACTIVITY_RE = re.compile(
     r"\b(?:charg(?:e|es|ed|ing)|plug\w*|auflad\w*|laden|recharg\w*|carg\w*|"
     r"ricaric\w*)\b"
@@ -357,7 +372,7 @@ _SAFE_CONDITION_RE = re.compile(
     r"\bse[^.!?\n]{0,60}\b(?:sicur|sicurezza)\w*\b"
 )
 _HEAT_OR_FLAMMABLE_RE = re.compile(
-    r"\b(?:heat|flammable|combustible|warme|hitze|brennbar|chaleur|inflammable|"
+    r"\b(?:heat|warm|flammable|combustible|warme|hitze|brennbar|chaleur|inflammable|"
     r"calor|inflamable|calore|infiammabil|heater|radiator|heizkorper|radiateur|"
     r"calentador|termosifone|open[ -]+flame|offene[ -]+flamme|flamme[ -]+nue|"
     r"llama[ -]+abierta|fiamma[ -]+libera)\w*\b"
@@ -387,12 +402,24 @@ _HAZARDOUS_INSTRUCTIONS_RE = re.compile(
     r"return|gefahrgut|versand|marchandises[ -]+dangereuses|securite|expedition|"
     r"mercancias[ -]+peligrosas|seguridad|envio|merci[ -]+pericolose|sicurezza|spedizione)\w*\b"
 )
+_HUMAN_PROVIDER_RE = re.compile(r"\b(?:human|person|mensch\w*|person\w*|humain\w*|persona\w*|uman\w*)\b")
+_NEGATED_HUMAN_PROVIDER_RE = re.compile(
+    r"\b(?:non[ -]+human|no[ -]+human|not[ -]+(?:a[ -]+)?human|"
+    r"without[ -]+(?:a[ -]+)?human)\b"
+)
+_CONFIRMED_RE = re.compile(r"\b(?:confirm\w*|verified|bestatigt\w*|verifiziert\w*|confermat\w*)\b")
+_NEGATED_CONFIRMATION_RE = re.compile(
+    r"\b(?:unconfirmed|not[ -]+(?:yet[ -]+)?confirm\w*|"
+    r"yet[ -]+to[ -]+be[ -]+confirm\w*|nicht[ -]+bestatigt\w*|"
+    r"non[ -]+confirm\w*|no[ -]+confirm\w*|non[ -]+confermat\w*)\b"
+)
 _SMOKE_FIRE_HEAT_RE = re.compile(
     r"\b(?:smok\w*|fire|burn\w*|heat|hot|rauch\w*|feuer|heiss|hitze|fumee|feu|"
     r"incendie|chaleur|chaud\w*|humo|fuego|calor|caliente|fumo|fuoco|calore|cald\w*)\b"
 )
 _MOVE_AWAY_RE = re.compile(
-    r"\b(?:move|step|stay|get|keep)[ -]+away\b|\bleave[ -]+the[ -]+area\b|"
+    r"\b(?:mov(?:e|es|ed|ing)|step|stay|get|keep)[ -]+away\b|"
+    r"\bleave[ -]+the[ -]+area\b|"
     r"\b(?:entfern\w*|abstand|weggehen|eloign\w*|alej\w*|allontan\w*)\b"
 )
 _EMERGENCY_AUTHORITY_RE = re.compile(
@@ -405,9 +432,7 @@ _EMERGENCY_NUMBER_CONTEXT_RE = re.compile(
     r"chiam\w*|emergency[ -]+number|notrufnummer|numero[ -]+d'urgence|"
     r"numero[ -]+de[ -]+emergencia|numero[ -]+di[ -]+emergenza)\b"
 )
-_EMERGENCY_DIGIT_SEQUENCE_RE = re.compile(
-    r"(?<!\d)\d(?:[ ().-]*\d){1,5}(?!\d)"
-)
+_EMERGENCY_DIGIT_SEQUENCE_RE = re.compile(r"(?<!\d)\d(?:[ ().-]*\d){1,5}(?!\d)")
 _EMERGENCY_SPELLED_NUMBER_RE = re.compile(
     r"\b(?:one[ -]+one[ -]+two|nine[ -]+one[ -]+one|"
     r"eins[ -]+eins[ -]+zwei|un[ -]+un[ -]+deux|"
@@ -418,6 +443,23 @@ _GUIDANCE_CLAUSE_BOUNDARY_RE = re.compile(
     r"mais|cependant|pero|aunque|ma|tuttavia)\s+)"
 )
 _POST_VERB_NEGATION_RE = re.compile(r"^.{0,32}\b(?:pas|plus|jamais|nicht)\b")
+_POST_VERB_NEGATIVE_PREDICATE_RE = re.compile(
+    r"^.{0,64}\b(?:is|are|was|were|seems?|remains?)\s+"
+    r"(?:not|never)\s+(?:recommended|allowed|advisable|required|necessary|safe)\b"
+)
+_PROHIBITION_WEAKENER_RE = re.compile(
+    r"\b(?:unless|except|ausser|sauf|excepto|salvo|tranne)\b|"
+    r"\b(?:a[ -]+menos[ -]+que|a[ -]+meno[ -]+che|es[ -]+sei[ -]+denn)\b"
+)
+_NEGATED_PROHIBITION_PREFIX_RE = re.compile(
+    r"\b(?:do[ -]?not|don't|must[ -]+not|cannot|can't|never)[ -]+"
+    r"(?:stop|cease|avoid|refrain|skip|fail)\b|"
+    r"\bnot[ -]+(?:forbidden|prohibited|barred|disallowed)\b|"
+    r"\bno[ -]+(?:ban|prohibition|restriction)\b|"
+    r"\bhor\w*[^.!?;\n]{0,24}\bnicht[^.!?;\n]{0,24}\bauf\b|"
+    r"\bne[ -]+cess\w*[^.!?;\n]{0,24}\bpas[ -]+de\b|"
+    r"\bno[ -]+dej\w*[ -]+de\b|\bnon[ -]+smett\w*[ -]+di\b"
+)
 _POSITIVE_PERMISSION_RE = re.compile(
     r"\b(?:can|may|must|should|safe[ -]+to|okay[ -]+to|ok[ -]+to|continue|keep|resume|"
     r"go[ -]+ahead|feel[ -]+free[ -]+to|allow\w*|permit\w*|recommend\w*|"
@@ -429,7 +471,7 @@ _POSITIVE_PERMISSION_RE = re.compile(
 )
 _IMPERATIVE_LEAD_RE = re.compile(
     r"^(?:please|now|immediately|bitte|jetzt|sofort|veuillez|maintenant|"
-    r"por[ -]+favor|ahora|per[ -]+favore|ora)?[ ,:-]*$"
+    r"por[ -]+favor|ahora|per[ -]+favore|ora|lo|la|le)?[ ,:-]*$"
 )
 _POSITIVE_SCOPE_BREAK_RE = re.compile(
     r"\b(?:and|then|yet|und|et|puis|y|e)[ ,]+(?:you[ -]+|vous[ -]+|"
@@ -443,13 +485,22 @@ _UNSAFE_CONDITION_RE = re.compile(
     r"no[ -]+segur\w*|non[ -]+sicur\w*)\b"
 )
 _PLACEMENT_RE = re.compile(
-    r"\b(?:put|place|store|set|position|leg\w*|stell\w*|platzier\w*|"
-    r"plac\w*|mett\w*|pong\w*|coloqu\w*|colloc\w*)\b"
+    r"\b(?:put|place|store|set|position|keep|leave|leg\w*|stell\w*|platzier\w*|"
+    r"halt\w*|plac\w*|gard\w*|mett\w*|pong\w*|coloqu\w*|manteng\w*|"
+    r"colloc\w*|teng\w*)\b"
 )
 _UNSAFE_PROXIMITY_RE = re.compile(
-    r"\b(?:beside|next[ -]+to|close[ -]+to|near|against|by|neben|nahe|bei|pres|"
-    r"a[ -]+cote|junto|cerca|vicino|accanto)\b"
+    r"\b(?:beside|next[ -]+to|close[ -]+to|adjacent[ -]+to|alongside|near|against|by|"
+    r"neben|nahe|bei|pres|a[ -]+cote|junto|cerca|vicino|accanto)\b"
 )
+_UNSAFE_WARM_PLACEMENT_RE = re.compile(
+    r"\b(?:somewhere|anywhere)[ -]+(?:warm|hot|heated)\b|"
+    r"\b(?:in|into|at|to)[ -]+(?:a[ -]+)?(?:warm|hot|heated)\b|"
+    r"\bkeep[ -]+(?:it[ -]+)?(?:warm|hot)\b"
+)
+_STAY_RE = re.compile(r"\b(?:stay|remain|wait)\w*\b")
+_ITEM_REFERENCE_RE = re.compile(r"\b(?:it|item|battery|device|unit)\b")
+_APPROACH_RE = re.compile(r"\b(?:approach\w*|(?:go|come|step|walk|mov(?:e|ing))[ -]+closer(?:[ -]+to)?)\b")
 _UNSAFE_HEAT_SOURCE_PLACEMENT_RE = re.compile(
     r"\b(?:"
     r"(?:in|inside|into|on|onto)(?:[ -]+top[ -]+of)?[ -]+"
@@ -474,17 +525,22 @@ _UNSAFE_HEAT_SOURCE_PLACEMENT_RE = re.compile(
 
 
 def _guidance_clauses(text: str) -> tuple[str, ...]:
-    return tuple(
-        clause.strip()
-        for clause in _GUIDANCE_CLAUSE_BOUNDARY_RE.split(text)
-        if clause.strip()
-    )
+    return tuple(clause.strip() for clause in _GUIDANCE_CLAUSE_BOUNDARY_RE.split(text) if clause.strip())
 
 
 def _verb_is_prohibited_in_clause(clause: str, verb_re: re.Pattern[str]) -> bool:
+    if _PROHIBITION_WEAKENER_RE.search(clause):
+        return False
+    return _verb_has_negative_directive_in_clause(clause, verb_re)
+
+
+def _verb_has_negative_directive_in_clause(
+    clause: str,
+    verb_re: re.Pattern[str],
+) -> bool:
     for verb in verb_re.finditer(clause):
         before = clause[max(0, verb.start() - 100) : verb.start()]
-        after = clause[verb.end() : verb.end() + 36]
+        after = clause[verb.end() : verb.end() + 72]
         negative_matches = tuple(_NEGATIVE_DIRECTIVE_RE.finditer(before))
         for negative in reversed(negative_matches):
             scope = before[negative.end() :]
@@ -499,13 +555,32 @@ def _verb_is_prohibited_in_clause(clause: str, verb_re: re.Pattern[str]) -> bool
                 return True
         if re.search(r"\bnicht\b", after):
             return True
+        if _POST_VERB_NEGATIVE_PREDICATE_RE.search(after):
+            return True
     return False
 
 
 def _activity_is_prohibited(text: str, verb_re: re.Pattern[str]) -> bool:
+    return any(_verb_is_prohibited_in_clause(clause, verb_re) for clause in _guidance_clauses(text))
+
+
+def _has_weakened_prohibition(text: str, verb_re: re.Pattern[str]) -> bool:
+    clauses = _guidance_clauses(text)
+    for index, clause in enumerate(clauses):
+        if not _PROHIBITION_WEAKENER_RE.search(clause):
+            continue
+        if _verb_has_negative_directive_in_clause(clause, verb_re):
+            return True
+        if index > 0 and _verb_has_negative_directive_in_clause(clauses[index - 1], verb_re):
+            return True
+    return False
+
+
+def _has_negated_prohibition(text: str, verb_re: re.Pattern[str]) -> bool:
     return any(
-        _verb_is_prohibited_in_clause(clause, verb_re)
+        _NEGATED_PROHIBITION_PREFIX_RE.search(clause[: verb.start()])
         for clause in _guidance_clauses(text)
+        for verb in verb_re.finditer(clause)
     )
 
 
@@ -523,8 +598,7 @@ def _has_positive_guidance(text: str, verb_re: re.Pattern[str]) -> bool:
 
 def _has_unsafe_positive_isolation(text: str) -> bool:
     return any(
-        _UNSAFE_CONDITION_RE.search(clause)
-        and _has_positive_guidance(clause, _ISOLATE_RE)
+        _UNSAFE_CONDITION_RE.search(clause) and _has_positive_guidance(clause, _ISOLATE_RE)
         for clause in _guidance_clauses(text)
     )
 
@@ -532,24 +606,88 @@ def _has_unsafe_positive_isolation(text: str) -> bool:
 def _has_unsafe_positive_placement(text: str) -> bool:
     return any(
         (
-            (
-                _UNSAFE_PROXIMITY_RE.search(clause)
-                and _HEAT_OR_FLAMMABLE_RE.search(clause)
-            )
+            (_UNSAFE_PROXIMITY_RE.search(clause) and _HEAT_OR_FLAMMABLE_RE.search(clause))
             or _UNSAFE_HEAT_SOURCE_PLACEMENT_RE.search(clause)
+            or _UNSAFE_WARM_PLACEMENT_RE.search(clause)
         )
-        and _has_positive_guidance(clause, _PLACEMENT_RE)
+        and (_has_positive_guidance(clause, _PLACEMENT_RE) or _has_positive_guidance(clause, _ISOLATE_RE))
         for clause in _guidance_clauses(text)
+    )
+
+
+def _has_unsafe_stay_near_item(text: str) -> bool:
+    return any(
+        _UNSAFE_PROXIMITY_RE.search(clause)
+        and _ITEM_REFERENCE_RE.search(clause)
+        and _has_positive_guidance(clause, _STAY_RE)
+        for clause in _guidance_clauses(text)
+    )
+
+
+def _has_unsafe_approach_item(text: str) -> bool:
+    return any(
+        _ITEM_REFERENCE_RE.search(clause) and _has_positive_guidance(clause, _APPROACH_RE)
+        for clause in _guidance_clauses(text)
+    )
+
+
+def _has_safe_isolation_guidance(text: str) -> bool:
+    clauses = _guidance_clauses(text)
+    if any(
+        _ISOLATE_RE.search(clause) and _verb_has_negative_directive_in_clause(clause, _ISOLATE_RE) for clause in clauses
+    ):
+        return False
+    return any(
+        _ISOLATE_RE.search(clause) and _SAFE_CONDITION_RE.search(clause) and _HEAT_OR_FLAMMABLE_RE.search(clause)
+        for clause in clauses
+    )
+
+
+_EMERGENCY_CONTACT_RE = re.compile(
+    r"\b(?:contact\w*|call\w*|notify\w*|alert\w*|phone\w*|"
+    r"kontaktier\w*|anruf\w*|benachrichtig\w*|appel\w*|preven\w*|"
+    r"llam\w*|avis\w*|contatt\w*|chiam\w*|avvis\w*)\b"
+)
+
+
+def _has_confirmed_human_hazardous_instructions(text: str) -> bool:
+    return any(
+        _HAZARDOUS_INSTRUCTIONS_RE.search(clause)
+        and _HUMAN_PROVIDER_RE.search(clause)
+        and not _NEGATED_HUMAN_PROVIDER_RE.search(clause)
+        and _CONFIRMED_RE.search(clause)
+        and not _NEGATED_CONFIRMATION_RE.search(clause)
+        for clause in _guidance_clauses(text)
+    )
+
+
+def _has_emergency_direction(text: str) -> bool:
+    clauses = _guidance_clauses(text)
+    if any(
+        _MOVE_AWAY_RE.search(clause) and _verb_has_negative_directive_in_clause(clause, _MOVE_AWAY_RE)
+        for clause in clauses
+    ):
+        return False
+    if any(
+        _EMERGENCY_AUTHORITY_RE.search(clause)
+        and _EMERGENCY_CONTACT_RE.search(clause)
+        and _verb_has_negative_directive_in_clause(clause, _EMERGENCY_CONTACT_RE)
+        for clause in clauses
+    ):
+        return False
+    return any(
+        _SMOKE_FIRE_HEAT_RE.search(clause)
+        and _MOVE_AWAY_RE.search(clause)
+        and _EMERGENCY_CONTACT_RE.search(clause)
+        and _EMERGENCY_AUTHORITY_RE.search(clause)
+        for clause in clauses
     )
 
 
 def _has_jurisdiction_specific_emergency_number(text: str) -> bool:
     return any(
         _EMERGENCY_NUMBER_CONTEXT_RE.search(clause)
-        and (
-            _EMERGENCY_DIGIT_SEQUENCE_RE.search(clause)
-            or _EMERGENCY_SPELLED_NUMBER_RE.search(clause)
-        )
+        and (_EMERGENCY_DIGIT_SEQUENCE_RE.search(clause) or _EMERGENCY_SPELLED_NUMBER_RE.search(clause))
         for clause in _guidance_clauses(text)
     )
 
@@ -583,35 +721,39 @@ def missing_lithium_battery_safety_guidance(answer: str) -> tuple[str, ...]:
         and _activity_is_prohibited(text, _CHARGE_RE)
     ):
         missing.append("stop_handling_using_charging")
-    if not (
-        _ISOLATE_RE.search(text)
-        and _SAFE_CONDITION_RE.search(text)
-        and _HEAT_OR_FLAMMABLE_RE.search(text)
-    ):
+    if not _has_safe_isolation_guidance(text):
         missing.append("safe_isolation_away_from_heat_and_flammables")
     if not (
         _activity_is_prohibited(text, _SHIP_RE)
         and _activity_is_prohibited(text, _RETURN_RE)
-        and _HAZARDOUS_INSTRUCTIONS_RE.search(text)
+        and _has_confirmed_human_hazardous_instructions(text)
     ):
         missing.append("no_shipping_or_return_before_hazardous_goods_instructions")
-    if not (
-        _SMOKE_FIRE_HEAT_RE.search(text)
-        and _MOVE_AWAY_RE.search(text)
-        and _EMERGENCY_AUTHORITY_RE.search(text)
-    ):
+    if not _has_emergency_direction(text):
         missing.append("smoke_fire_heat_emergency_direction")
     if _has_jurisdiction_specific_emergency_number(text):
         missing.append("jurisdiction_specific_emergency_number")
-    if _has_unsafe_positive_isolation(text) or _has_unsafe_positive_placement(text):
+    if (
+        _has_unsafe_positive_isolation(text)
+        or _has_unsafe_positive_placement(text)
+        or _has_unsafe_stay_near_item(text)
+        or _has_unsafe_approach_item(text)
+        or _activity_is_prohibited(text, _ISOLATE_RE)
+        or _has_weakened_prohibition(text, _ISOLATE_RE)
+        or _has_negated_prohibition(text, _ISOLATE_RE)
+    ):
         missing.append("contradictory_unsafe_isolation_or_placement_guidance")
     if any(
         _has_positive_guidance(text, verb_re)
+        or _has_weakened_prohibition(text, verb_re)
+        or _has_negated_prohibition(text, verb_re)
         for verb_re in (_HANDLING_RE, _USE_RE, _CHARGE_ACTIVITY_RE)
     ):
         missing.append("contradictory_handling_using_or_charging_guidance")
     if any(
         _has_positive_guidance(text, verb_re)
+        or _has_weakened_prohibition(text, verb_re)
+        or _has_negated_prohibition(text, verb_re)
         for verb_re in (_SHIP_RE, _RETURN_RE)
     ):
         missing.append("contradictory_shipping_or_return_guidance")

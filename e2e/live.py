@@ -257,7 +257,9 @@ def build_intent_content(persona: E2EPersona, runbook_key: str, api_base: str) -
             "enabled": False,
             "response_rules": [
                 "Never claim a selected action completed before exact success evidence exists.",
+                *runbook.response_rules,
             ],
+            "required_guidance": runbook.required_guidance,
         },
     }
     examples: list[str] = []
@@ -1221,6 +1223,31 @@ def _citation_ids(reply: dict[str, Any]) -> set[str]:
     return found
 
 
+def _knowledge_any_of_audit(
+    expected_fixture_ids: list[str],
+    article_ids: dict[str, str],
+    actual_article_ids: set[str],
+) -> tuple[bool, dict[str, Any]]:
+    missing_mappings = sorted(
+        fixture_id for fixture_id in expected_fixture_ids if fixture_id not in article_ids
+    )
+    expected_article_ids = {
+        article_ids[fixture_id]
+        for fixture_id in expected_fixture_ids
+        if fixture_id in article_ids
+    }
+    matched_article_ids = expected_article_ids & actual_article_ids
+    passed = not expected_fixture_ids or (
+        not missing_mappings and bool(matched_article_ids)
+    )
+    return passed, {
+        "expectedAnyOf": sorted(expected_article_ids),
+        "actual": sorted(actual_article_ids),
+        "matched": sorted(matched_article_ids),
+        "missingMappings": missing_mappings,
+    }
+
+
 def _action_name(action: dict[str, Any]) -> str:
     metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
     proposal = metadata.get("proposedAction") if isinstance(metadata.get("proposedAction"), dict) else {}
@@ -1471,6 +1498,16 @@ def _assert_case(
         "expected_knowledge_cited",
         expected_article_ids <= actual_article_ids,
         {"expected": sorted(expected_article_ids), "actual": sorted(actual_article_ids)},
+    )
+    any_knowledge_passed, any_knowledge_evidence = _knowledge_any_of_audit(
+        case.expected.knowledge_any_of,
+        article_ids,
+        actual_article_ids,
+    )
+    recorder.check(
+        "expected_knowledge_any_of_cited",
+        any_knowledge_passed,
+        any_knowledge_evidence,
     )
 
     stages = _progress_stages(issue)

@@ -373,6 +373,7 @@ def test_direct_runbook_outcome_keeps_review_reason_and_requirements():
             "forbiddenClaims": ["The contract is already cancelled."],
         }
     ]
+    assert issue_agent._answer_obligations_from_issue(issue) == ()
 
 
 def test_reply_attachments_are_allowlisted_and_always_files_are_forced():

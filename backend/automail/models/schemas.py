@@ -55,10 +55,11 @@ class IntentResponseConfig(CamelCaseModel):
     enabled: bool = False
     auto: bool = True
     response_rules: list[str] = Field(default_factory=list)
+    required_guidance: list[str] = Field(default_factory=list)
     attachments: list[ResponseAttachment] = Field(default_factory=list)
     use_feedback_learnings: bool = True
 
-    @field_validator("response_rules", mode="before")
+    @field_validator("response_rules", "required_guidance", mode="before")
     @classmethod
     def _coerce_response_rules(cls, v: Any) -> list[str]:
         if v is None:
@@ -171,6 +172,7 @@ class RunbookOutcome(CamelCaseModel):
     tool_evidence: list[RunbookToolEvidence] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
     reply_requirements: list[str] = Field(default_factory=list)
+    required_guidance: list[str] = Field(default_factory=list)
     forbidden_claims: list[str] = Field(default_factory=list)
     attachments: list[RunbookAttachment] = Field(default_factory=list)
     requires_human: bool = False

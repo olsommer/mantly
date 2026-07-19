@@ -360,7 +360,7 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
     )
 
     assert result is not None
-    assert len(grounding_calls) == 1
+    assert len(grounding_calls) == (1 if verified else 2)
     assert grounding_calls[0]["answer"] == "Shipment ZF-42 is in transit."
     if verified:
         assert result["draftBlockedReason"] == ""
@@ -377,6 +377,12 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert result["reply"] is None
         assert result["run"]["id"] == "run1"
         assert reply_calls == []
+        assert result["groundingGate"]["coverageRepair"]["attempted"] is True
+        assert result["groundingGate"]["coverageRepair"]["verified"] is False
+        assert (
+            result["groundingGate"]["coverageRepair"]["resultReasonCode"]
+            == "ungrounded_answer"
+        )
 
 
 def test_channel_autopilot_repairs_pure_incomplete_answer_once(monkeypatch):
@@ -465,6 +471,192 @@ def test_channel_autopilot_repairs_pure_incomplete_answer_once(monkeypatch):
         "verified": True,
         "resultReasonCode": "",
     }
+
+
+def test_channel_autopilot_repairs_s02_factual_corruption_once(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    draft_calls: list[dict] = []
+    original_answer = "The affected service is authentication in the EU region 40 00Z."
+    repaired_answer = (
+        "Authentication is affected in the EU region. "
+        "The incident began at 2026-07-19T07:40:00Z."
+    )
+    unsupported = (original_answer,)
+    contradictions = (
+        "The answer merges region EU with started_at 2026-07-19T07:40:00Z.",
+    )
+
+    def fake_draft(**kwargs):
+        draft_calls.append(kwargs)
+        answer = original_answer if len(draft_calls) == 1 else repaired_answer
+        return IssueAgentDraft(
+            answer=answer,
+            confidence="high",
+            generation_mode="llm",
+        )
+
+    def fake_grounding(**kwargs):
+        grounding_calls.append(kwargs)
+        if len(grounding_calls) == 1:
+            return AutomationGroundingAssessment(
+                verified=False,
+                status="failed",
+                reason_code="ungrounded_answer",
+                checked_at="2026-07-19T10:05:00Z",
+                answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+                unsupported_claims=unsupported,
+                contradictions=contradictions,
+                provider="test",
+                model="grounding-model",
+            )
+        return AutomationGroundingAssessment(
+            verified=True,
+            status="passed",
+            reason_code="",
+            checked_at="2026-07-19T10:05:01Z",
+            answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+            provider="test",
+            model="grounding-model",
+        )
+
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_draft)
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", fake_grounding)
+    grounding_calls.clear()
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(draft_calls) == 2
+    assert draft_calls[1]["coverage_repair_answer"] == original_answer
+    assert draft_calls[1]["coverage_repair_obligations"] == ()
+    assert draft_calls[1]["grounding_repair_unsupported_claims"] == unsupported
+    assert draft_calls[1]["grounding_repair_contradictions"] == contradictions
+    assert [call["answer"] for call in grounding_calls] == [
+        original_answer,
+        repaired_answer,
+    ]
+    assert result["draftBlockedReason"] == ""
+    assert result["reply"]["id"] == "reply1"
+    assert reply_calls[0]["body"] == repaired_answer
+    assert reply_calls[0]["metadata"]["groundingGate"]["coverageRepair"] == {
+        "attempted": True,
+        "triggerReasonCode": "ungrounded_answer",
+        "uncoveredObligations": [],
+        "unsupportedClaims": list(unsupported),
+        "contradictions": list(contradictions),
+        "originalAnswerSha256": issue_agent.grounding_text_sha256(original_answer),
+        "generationMode": "llm",
+        "generationError": "",
+        "repairedAnswerSha256": issue_agent.grounding_text_sha256(repaired_answer),
+        "verified": True,
+        "resultReasonCode": "",
+    }
+
+
+def test_channel_factual_repair_is_rechecked_and_fails_closed_on_missing_safety(
+    monkeypatch,
+):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    battery_issue = {
+        "id": "issue1",
+        "subject": "Leaking lithium battery and incident status",
+        "messages": [
+            {
+                "id": "message1",
+                "direction": "customer",
+                "body": (
+                    "The parcel contains a leaking lithium battery pack and is getting hot. "
+                    "Which service and region are affected, and when did the incident start?"
+                ),
+            }
+        ],
+    }
+    original_answer = (
+        "Stop handling, using, and charging the item immediately. Isolate it only if this "
+        "can be done safely, and keep it away from heat and flammable materials only if safe. "
+        "Do not ship or return it until confirmed hazardous-goods instructions arrive after "
+        "human review. If smoke, fire, or unusual heat is present or develops, move away and "
+        "contact local emergency services or the local fire authority. The affected service "
+        "is authentication in the EU region 40 00Z."
+    )
+    unsafe_repair = (
+        "Authentication is affected in the EU region. "
+        "The incident began at 2026-07-19T07:40:00Z."
+    )
+    draft_calls: list[dict] = []
+
+    def fake_draft(**kwargs):
+        draft_calls.append(kwargs)
+        return IssueAgentDraft(
+            answer=original_answer if len(draft_calls) == 1 else unsafe_repair,
+            confidence="high",
+            generation_mode="llm",
+        )
+
+    original_grounding = issue_agent.assess_issue_automation_grounding
+
+    def fake_grounding(**kwargs):
+        grounding_calls.append(kwargs)
+        if len(grounding_calls) == 1:
+            return AutomationGroundingAssessment(
+                verified=False,
+                status="failed",
+                reason_code="incomplete_answer",
+                checked_at="2026-07-19T10:05:00Z",
+                answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+                uncovered_obligations=("Give immediate damaged-battery safety guidance.",),
+                unsupported_claims=(
+                    "The affected service is authentication in the EU region 40 00Z.",
+                ),
+                contradictions=(
+                    "The answer merges region EU with started_at 2026-07-19T07:40:00Z.",
+                ),
+                provider="test",
+                model="grounding-model",
+            )
+        return original_grounding(**kwargs)
+
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: battery_issue)
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_draft)
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", fake_grounding)
+    grounding_calls.clear()
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(draft_calls) == 2
+    assert len(grounding_calls) == 2
+    assert result["draftBlockedReason"] == "safety_guidance_missing"
+    assert result["reply"] is None
+    assert reply_calls == []
+    repair_metadata = result["groundingGate"]["coverageRepair"]
+    assert repair_metadata["attempted"] is True
+    assert repair_metadata["verified"] is False
+    assert repair_metadata["resultReasonCode"] == "safety_guidance_missing"
 
 
 def test_channel_grounding_repairs_against_pending_actions_created_during_composition(monkeypatch):

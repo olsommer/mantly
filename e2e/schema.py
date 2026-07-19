@@ -95,6 +95,8 @@ class RunbookExpectation(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9-]+$")
     purpose: str = Field(min_length=1)
     proposed_actions: list[str] = Field(default_factory=list)
+    response_rules: list[str] = Field(default_factory=list)
+    required_guidance: list[str] = Field(default_factory=list)
 
 
 class ConcernExpectation(StrictModel):
@@ -133,6 +135,7 @@ class CaseExpectation(StrictModel):
     must_cover: list[str] = Field(min_length=1)
     must_not_claim: list[str] = Field(min_length=1)
     knowledge_ids: list[str] = Field(default_factory=list)
+    knowledge_any_of: list[str] = Field(default_factory=list, min_length=1)
     tool_fixture_ids: list[str] = Field(default_factory=list)
     pending_actions: list[str] = Field(default_factory=list)
     idempotency: ReplayExpectation
@@ -232,11 +235,19 @@ class E2EPersona(StrictModel):
                 concern.runbook_key for concern in case.concerns
             } - runbook_key_set
             unknown_knowledge = set(case.expected.knowledge_ids) - knowledge_id_set
+            unknown_knowledge_any_of = (
+                set(case.expected.knowledge_any_of) - knowledge_id_set
+            )
             unknown_tools = set(case.expected.tool_fixture_ids) - tool_fixture_id_set
             if unknown_runbooks:
                 raise ValueError(f"case {case.id} references unknown runbooks: {unknown_runbooks}")
             if unknown_knowledge:
                 raise ValueError(f"case {case.id} references unknown knowledge: {unknown_knowledge}")
+            if unknown_knowledge_any_of:
+                raise ValueError(
+                    f"case {case.id} references unknown knowledge_any_of: "
+                    f"{unknown_knowledge_any_of}"
+                )
             if unknown_tools:
                 raise ValueError(f"case {case.id} references unknown tools: {unknown_tools}")
             allowed_pending_actions = set().union(

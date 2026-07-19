@@ -21,6 +21,7 @@ from e2e.live import (
     _business_state_fingerprint,
     _fixture_tool_audit,
     _issue_fingerprint,
+    _knowledge_any_of_audit,
     _pending_action_audit,
     _preflight_target_for_run,
     _replay_receipt_audit,
@@ -220,12 +221,33 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         concern.runbook_key for concern in lawyer_cases["L08"].concerns
     }
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
-    assert "fulfillment-battery-safety" in fulfillment_cases["E06"].expected.knowledge_ids
+    assert fulfillment_cases["E06"].expected.knowledge_ids == []
+    assert set(fulfillment_cases["E06"].expected.knowledge_any_of) == {
+        "fulfillment-battery-safety",
+        "fulfillment-returns-refunds",
+    }
     assert fulfillment_cases["E05"].expected.single_combined_reply is True
     assert saas_cases["S03"].expected.minimum_concern_count == 1
     assert sum(
         len(concern.answer_obligations) for concern in saas_cases["S03"].concerns
     ) == 4
+    saas_runbooks = {
+        runbook.key: runbook for runbook in personas["saas-support"].runbooks
+    }
+    assert {
+        concern.runbook_key for concern in saas_cases["S08"].concerns
+    } == {"saas-sso-scim-setup"}
+    assert {
+        concern.runbook_key for concern in saas_cases["S09"].concerns
+    } == {"saas-audit-reporting"}
+    assert any(
+        "verified domains" in rule
+        for rule in saas_runbooks["saas-sso-scim-setup"].required_guidance
+    )
+    assert any(
+        "remove the exposed token" in rule
+        for rule in saas_runbooks["saas-token-exposure"].required_guidance
+    )
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())
 
@@ -236,6 +258,61 @@ def test_pending_actions_must_belong_to_a_matched_runbook() -> None:
 
     with pytest.raises(ValidationError, match="not declared by its runbooks"):
         E2EPersona.model_validate(raw)
+
+
+def test_knowledge_any_of_must_reference_seeded_knowledge() -> None:
+    raw = yaml.safe_load((PERSONA_DIR / "fulfillment.yaml").read_text(encoding="utf-8"))
+    raw["cases"][0]["expected"]["knowledge_any_of"] = ["unknown-article"]
+
+    with pytest.raises(ValidationError, match="unknown knowledge_any_of"):
+        E2EPersona.model_validate(raw)
+
+
+def test_knowledge_any_of_cannot_be_explicitly_empty() -> None:
+    raw = yaml.safe_load((PERSONA_DIR / "fulfillment.yaml").read_text(encoding="utf-8"))
+    raw["cases"][0]["expected"]["knowledge_any_of"] = []
+
+    with pytest.raises(ValidationError, match="List should have at least 1 item"):
+        E2EPersona.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("actual_article_ids", "expected_passed"),
+    [
+        ({"article-battery"}, True),
+        ({"article-returns"}, True),
+        ({"article-unrelated"}, False),
+        (set(), False),
+    ],
+)
+def test_live_runner_knowledge_any_of_accepts_at_least_one_expected_citation(
+    actual_article_ids: set[str],
+    expected_passed: bool,
+) -> None:
+    passed, evidence = _knowledge_any_of_audit(
+        ["fulfillment-battery-safety", "fulfillment-returns-refunds"],
+        {
+            "fulfillment-battery-safety": "article-battery",
+            "fulfillment-returns-refunds": "article-returns",
+        },
+        actual_article_ids,
+    )
+
+    assert passed is expected_passed
+    assert evidence["matched"] == sorted(
+        {"article-battery", "article-returns"} & actual_article_ids
+    )
+
+
+def test_live_runner_knowledge_any_of_rejects_missing_article_mapping() -> None:
+    passed, evidence = _knowledge_any_of_audit(
+        ["fulfillment-battery-safety", "fulfillment-returns-refunds"],
+        {"fulfillment-battery-safety": "article-battery"},
+        {"article-battery"},
+    )
+
+    assert passed is False
+    assert evidence["missingMappings"] == ["fulfillment-returns-refunds"]
 
 
 def test_live_runner_target_and_seeded_runbook_are_safe() -> None:
@@ -353,6 +430,35 @@ def test_live_runner_keeps_case_specific_negatives_out_of_shared_runbooks() -> N
 
     rules = frontmatter["response"]["response_rules"]
     assert not any("Shipment status, location, ETA" in rule for rule in rules)
+
+
+def test_live_runner_seeds_explicit_mandatory_runbook_response_rules() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "saas-support"
+    )
+
+    token_frontmatter = yaml.safe_load(
+        build_intent_content(
+            persona,
+            "saas-token-exposure",
+            "https://api.mantly.io",
+        ).split("---", 2)[1]
+    )
+    sso_frontmatter = yaml.safe_load(
+        build_intent_content(
+            persona,
+            "saas-sso-scim-setup",
+            "https://api.mantly.io",
+        ).split("---", 2)[1]
+    )
+
+    token_guidance = token_frontmatter["response"]["required_guidance"]
+    sso_guidance = sso_frontmatter["response"]["required_guidance"]
+    assert any("remove the exposed token" in rule for rule in token_guidance)
+    assert any("stop using the exposed token" in rule for rule in token_guidance)
+    assert any("Preserve repository and access evidence" in rule for rule in token_guidance)
+    assert any("approved secure channel" in rule for rule in token_guidance)
+    assert any("verified domains" in rule for rule in sso_guidance)
 
 
 def test_live_runner_rejects_extra_or_failed_fixture_tools() -> None:

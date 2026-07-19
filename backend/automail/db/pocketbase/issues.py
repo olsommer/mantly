@@ -12025,10 +12025,13 @@ def _create_issue_agent_answer(
         coverage_repair: dict[str, Any] = {}
         if (
             not grounding_assessment.verified
-            and grounding_assessment.reason_code == "incomplete_answer"
-            and grounding_assessment.uncovered_obligations
-            and not grounding_assessment.unsupported_claims
-            and not grounding_assessment.contradictions
+            and grounding_assessment.status == "failed"
+            and grounding_assessment.reason_code in {"incomplete_answer", "ungrounded_answer"}
+            and (
+                grounding_assessment.uncovered_obligations
+                or grounding_assessment.unsupported_claims
+                or grounding_assessment.contradictions
+            )
             and not grounding_assessment.pending_action_claims
             and draft.generation_mode == "llm"
             and not draft.error
@@ -12040,15 +12043,29 @@ def _create_issue_agent_answer(
                 "uncoveredObligations": list(grounding_assessment.uncovered_obligations),
                 "originalAnswerSha256": grounding_text_sha256(original_answer),
             }
+            if grounding_assessment.unsupported_claims:
+                coverage_repair["unsupportedClaims"] = list(
+                    grounding_assessment.unsupported_claims
+                )
+            if grounding_assessment.contradictions:
+                coverage_repair["contradictions"] = list(
+                    grounding_assessment.contradictions
+                )
             _advance_processing_run(
                 processing_run,
                 stage="composer",
-                label="Completing omitted customer questions",
+                label=(
+                    "Repairing answer against grounding feedback"
+                    if grounding_assessment.unsupported_claims or grounding_assessment.contradictions
+                    else "Completing omitted customer questions"
+                ),
             )
             repair_draft = draft_issue_automation_answer(
                 articles=fallback_articles,
                 coverage_repair_answer=original_answer,
                 coverage_repair_obligations=grounding_assessment.uncovered_obligations,
+                grounding_repair_unsupported_claims=grounding_assessment.unsupported_claims,
+                grounding_repair_contradictions=grounding_assessment.contradictions,
                 **draft_kwargs,
             )
             _require_processing_claim(processing_run)

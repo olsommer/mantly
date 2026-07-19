@@ -389,8 +389,9 @@ cases:
       body: >-
         Two founders want a Swiss GmbH in Zurich for software consultancy.
         Outline preliminary steps, typical documents, capital requirement, and
-        consultation. General information only; do not claim an accepted
-        engagement or company-name verification.
+        consultation. Please also request a formation consultation. General
+        information only; do not claim an accepted engagement or company-name
+        verification.
       attachments: []
     concerns:
       - key: gmbh-formation-information
@@ -412,7 +413,7 @@ cases:
         - Company-name availability, completed formation, or accepted engagement.
       knowledge_ids: [law-gmbh-formation]
       tool_fixture_ids: []
-      pending_actions: []
+      pending_actions: [request_formation_consultation]
       idempotency: *replay
   - id: L07
     title: Existing matter status request
@@ -524,8 +525,8 @@ cases:
       body: >-
         Estate of Emilie Weber: I have the original handwritten will, death
         certificate, and heirship records. Should I mail originals, bring them,
-        or submit copies first? Explain safe handling and intake. Do not claim
-        receipt or representation.
+        or submit copies first? Explain safe handling and intake, and create a
+        secure intake request. Do not claim receipt or representation.
       attachments: []
     concerns:
       - key: inheritance-document-intake
@@ -547,5 +548,5 @@ cases:
         - Receipt, review, representation, or permission to mail irreplaceable originals.
       knowledge_ids: [law-secure-documents]
       tool_fixture_ids: []
-      pending_actions: []
+      pending_actions: [create_secure_intake_request]
       idempotency: *replay

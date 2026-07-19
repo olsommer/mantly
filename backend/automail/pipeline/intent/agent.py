@@ -1344,6 +1344,7 @@ def _build_routed_concern_outcome(
             intent_result.response.response_rules,
             output.reply_requirements,
         ),
+        required_guidance=_dedupe_strings(intent_result.response.required_guidance),
         forbidden_claims=output.forbidden_claims,
         attachments=_outcome_attachments(
             intent_name,

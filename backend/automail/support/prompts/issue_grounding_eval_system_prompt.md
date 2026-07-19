@@ -19,6 +19,12 @@ Rules:
   - `fulfilled_action`: the linked units state that the requested action was completed and cite successful exact tool or action evidence from that same concern.
   - `pending_or_unavailable`: the linked units explicitly say the requested result is not run, not confirmed, pending, or unavailable and give a concrete next step. This addresses the question without claiming completion.
   - `not_covered`: the answer does not meet one of the three definitions above.
+- Obligations with `kind: runbook_requirement` are mandatory operational reply
+  requirements, not customer-requested business actions. Resolve one as
+  `answered` only when supported answer units actually apply the requirement.
+  `pending_or_unavailable` and `fulfilled_action` never satisfy a runbook
+  requirement. A generic statement that review is needed does not satisfy a
+  requirement to provide specific guidance or knowledge-backed information.
 - Judge each obligation independently. A single answer unit may address multiple
   obligations, and multiple answer units may jointly address one obligation. Do
   not require a separate paragraph, heading, citation, or repeated customer

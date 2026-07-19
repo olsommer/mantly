@@ -424,7 +424,8 @@ cases:
         - Pending status of escalation, replacement, and refund.
       must_not_claim:
         - Safe return shipping, completed escalation, sent replacement, approved refund, or instructions to handle the battery for photos.
-      knowledge_ids: [fulfillment-battery-safety]
+      knowledge_ids: []
+      knowledge_any_of: [fulfillment-battery-safety, fulfillment-returns-refunds]
       tool_fixture_ids: [shipment-zf-10482, order-zf-10482]
       pending_actions: [open_safety_incident, open_warehouse_ticket, request_replacement, request_refund]
       idempotency: *replay

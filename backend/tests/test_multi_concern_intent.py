@@ -306,6 +306,7 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
         lambda intent_name, **_kwargs: {
             "enabled": True,
             "response_rules": [f"Explain {intent_name} state."],
+            "required_guidance": [f"Give required guidance for {intent_name}."],
         },
     )
     calls: list[tuple[str, str, str]] = []
@@ -346,6 +347,9 @@ def test_multi_concern_routes_execute_independently_and_keep_primary_fields(monk
     assert result.concerns[0].reply_requirements == [
         "Explain cancel-contract state.",
         "Cover cancel-contract.",
+    ]
+    assert result.concerns[0].required_guidance == [
+        "Give required guidance for cancel-contract."
     ]
     assert [obligation.question for obligation in result.concerns[0].answer_obligations] == [
         "Confirm whether contract C-1 can be cancelled.",

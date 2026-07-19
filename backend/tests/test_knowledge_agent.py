@@ -1723,6 +1723,116 @@ def test_action_state_repair_handles_exact_live_l08_unmatched_conflict() -> None
     ).blocked is False
 
 
+def test_action_state_repair_names_each_live_l08_pending_action_separately() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Report a potential conflict of interest for an existing matter"],
+    )
+    issue["actionExecutions"] = [
+        {
+            "type": "runbook_webhook",
+            "status": "pending",
+            "label": label,
+            "metadata": {
+                "source": "runbook",
+                "approvalRequired": True,
+                "sourceMessageId": "message-b2b-urgent",
+                "concernId": "concern-b2b-urgent",
+                "runbook": "law-potential-conflict",
+            },
+            "result": {
+                "proposedAction": {
+                    "name": name,
+                    "label": label,
+                }
+            },
+        }
+        for name, label in (
+            ("pause_substantive_discussion", "Pause Substantive Discussion"),
+            ("record_potential_conflict", "Record Potential Conflict"),
+            ("open_conflict_review", "Open Conflict Review"),
+        )
+    ]
+    answer = (
+        "We have received your report regarding a potential conflict of interest for "
+        "MAT-2026-221. Escalating it for review are all pending approval. Human review "
+        "is required for these actions."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Stop substantive discussion, record the potential conflict, and "
+                    "escalate it for review."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert "Escalating it for review is pending approval." in repaired
+    assert "Escalating it for review are all pending approval." not in repaired
+    for label in (
+        "Pause Substantive Discussion",
+        "Record Potential Conflict",
+        "Open Conflict Review",
+    ):
+        assert (
+            f"The pending action ({label}) remains under human review and is not "
+            "confirmed as started or completed."
+        ) in repaired
+    assert repaired.count("The pending action (") == 3
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_action_state_repair_does_not_duplicate_separate_multi_action_states() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Cancel the order and issue the refund."],
+    )
+    issue["actionExecutions"] = [
+        {
+            "type": "runbook_webhook",
+            "status": "pending",
+            "label": label,
+            "metadata": {
+                "source": "runbook",
+                "approvalRequired": True,
+                "sourceMessageId": "message-b2b-urgent",
+                "concernId": "concern-b2b-urgent",
+                "runbook": "order-change",
+            },
+            "result": {"proposedAction": {"name": name, "label": label}},
+        }
+        for name, label in (
+            ("cancel_order", "Cancel Order"),
+            ("issue_refund", "Issue Refund"),
+        )
+    ]
+    answer = (
+        "Cancelling the order remains pending human review and is not completed. "
+        "Issuing the refund remains pending human review and is not completed."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Cancel the order and issue the refund.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+
+
 def test_action_state_repair_removes_live_e09_assess_fragment() -> None:
     issue = _pending_action_obligation_issue(
         questions=["Confirm SLA compensation."],
@@ -1845,6 +1955,78 @@ def test_action_state_repair_preserves_positive_topic_answer_byte_for_byte() -> 
     )
 
     assert repaired == answer
+
+
+def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mutations() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm the recorded due date."],
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"] = {
+        "toolEvidence": [
+            {
+                "name": "invoice_lookup",
+                "status": "success",
+                "responseFacts": {
+                    "invoice_id": "QA-LAW-204",
+                    "due_date": "2026-07-25",
+                },
+            }
+        ]
+    }
+    issue["actionExecutions"] = [
+        {
+            "type": "runbook_webhook",
+            "status": "pending",
+            "label": label,
+            "metadata": {
+                "source": "runbook",
+                "approvalRequired": True,
+                "sourceMessageId": "message-b2b-urgent",
+                "concernId": "concern-b2b-urgent",
+                "runbook": "law-billing-review",
+            },
+            "result": {
+                "proposedAction": {
+                    "name": name,
+                    "label": label,
+                }
+            },
+        }
+        for name, label in (
+            ("request_payment_plan_review", "Request payment-plan review"),
+            ("request_waiver_review", "Request waiver review"),
+        )
+    ]
+    answer = "For Invoice QA-LAW-204, our records show a due date of July 25, 2026."
+
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert ticket["concerns"][0]["toolEvidence"] == [
+        {
+            "name": "invoice_lookup",
+            "method": "",
+            "status": "success",
+            "responseFacts": {
+                "invoice_id": "QA-LAW-204",
+                "due_date": "2026-07-25",
+            },
+            "evidenceId": "tool:concern-b2b-urgent:invoice_lookup",
+        }
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm the recorded due date for Invoice QA-LAW-204.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "not confirmed" not in repaired
 
 
 @pytest.mark.parametrize(

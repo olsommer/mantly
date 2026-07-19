@@ -67,6 +67,7 @@ interface ResponseAttachmentMeta {
 interface ResponseConfig {
     enabled: boolean;              // legacy file field; reply generation now belongs to Inbox
     responseRules: string;
+    requiredGuidance: string;
     responseTrigger: 'auto' | 'button'; // legacy file field kept for lossless editing
     attachments: ResponseAttachmentMeta[];
     useFeedbackLearnings: boolean;
@@ -215,6 +216,7 @@ function parseResponseConfig(value: unknown): ResponseConfig {
     return {
         enabled: asBool(response.enabled, false),
         responseRules: stringList(response.response_rules ?? response.responseRules).join('\n'),
+        requiredGuidance: stringList(response.required_guidance ?? response.requiredGuidance).join('\n'),
         responseTrigger: auto ? 'auto' : 'button',
         attachments: parseAttachments(response.attachments),
         useFeedbackLearnings: asBool(response.use_feedback_learnings ?? response.useFeedbackLearnings, true),
@@ -571,6 +573,14 @@ function serializeIntentMd(form: IntentForm): string {
         responseLines.push('  response_rules:');
         responseLines.push(`    - ${yamlString(responseRules)}`);
     }
+    const requiredGuidance = form.response.requiredGuidance
+        .split('\n')
+        .map(item => item.trim())
+        .filter(Boolean);
+    if (requiredGuidance.length > 0) {
+        responseLines.push('  required_guidance:');
+        requiredGuidance.forEach(item => responseLines.push(`    - ${yamlString(item)}`));
+    }
     if (form.response.attachments.length > 0) {
         responseLines.push('  attachments:');
         for (const att of form.response.attachments) {
@@ -653,6 +663,7 @@ const EMPTY_ACTION: Omit<ActionRow, 'id'> = {
 const DEFAULT_RESPONSE_CONFIG: ResponseConfig = {
     enabled: true,
     responseRules: '',
+    requiredGuidance: '',
     responseTrigger: 'auto',
     attachments: [],
     useFeedbackLearnings: true,
@@ -1958,6 +1969,23 @@ export const Intents = ({ projectId, userRole }: IntentsProps) => {
                                         placeholder={t('State the verified cancellation date\nDescribe pending actions as pending\nNever promise availability without a tool result')}
                                         className="min-h-28 flex-1 resize-none overflow-y-auto field-sizing-fixed text-sm"
                                         rows={3}
+                                    />
+                                </div>
+
+                                <div className="flex min-h-0 flex-1 flex-col gap-1">
+                                    <Label className="shrink-0 text-xs">{t('Required guidance (opt-in)')}</Label>
+                                    <p className="shrink-0 text-xs text-muted-foreground">
+                                        {t('Add one guidance requirement per line. Leave empty when no specific guidance is required.')}
+                                    </p>
+                                    <Textarea
+                                        value={form.response.requiredGuidance}
+                                        onChange={e => setForm(f => ({
+                                            ...f,
+                                            response: { ...f.response, requiredGuidance: e.target.value },
+                                        }))}
+                                        placeholder={t('Explain how to reset the account password\nDescribe where to find the billing invoice')}
+                                        className="min-h-24 flex-1 resize-none overflow-y-auto field-sizing-fixed text-sm"
+                                        rows={2}
                                     />
                                 </div>
 

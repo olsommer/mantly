@@ -39,8 +39,6 @@ from automail.models import (
 )
 from automail.pipeline.intent.activate_intent import (
     MAX_ROUTED_CONCERNS,
-    activate_intent,
-    no_match,
     route_concerns,
     use_intents_dir,
 )
@@ -73,6 +71,9 @@ logger = logging.getLogger(__name__)
 
 _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
 _ROUTER_GRAPH_RECURSION_LIMIT = 6
+_ROUTER_EXECUTION_LIMIT_REVIEW_REASON = (
+    "Intent classification stopped safely; human review is required."
+)
 _MALFORMED_ROUTER_REVIEW_REASON = (
     "Intent classification returned malformed structured output; human review is required."
 )
@@ -499,7 +500,7 @@ def _run_intent_router_agent(
         # behavior bounded even when a model ignores the prompt.
         agent = create_agent(
             model=llm,
-            tools=[route_concerns, activate_intent, no_match],
+            tools=[route_concerns],
             system_prompt=_CLASSIFY_SYSTEM_PROMPT.format(
                 intents_list=_build_intents_list(intents_dir=intents_dir),
             ),
@@ -529,8 +530,15 @@ def _run_intent_router_agent(
                         },
                         recursion_limit=_ROUTER_GRAPH_RECURSION_LIMIT,
                     )
-                except (GraphRecursionError, ToolCallLimitExceededError):
-                    raise
+                except (GraphRecursionError, ToolCallLimitExceededError) as exc:
+                    if attempt + 1 < _ROUTER_STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                        logger.warning(
+                            "Intent router hit %s; retrying once",
+                            type(exc).__name__,
+                        )
+                        continue
+                    logger.error("Intent router stopped at its execution limit twice: %s", exc)
+                    return [], _ROUTER_EXECUTION_LIMIT_REVIEW_REASON
                 except Exception as exc:
                     if not _is_malformed_router_exception(exc):
                         raise
@@ -547,7 +555,7 @@ def _run_intent_router_agent(
                 return [], _MALFORMED_ROUTER_REVIEW_REASON
     except (GraphRecursionError, ToolCallLimitExceededError) as exc:
         logger.error("Intent router stopped at its execution limit: %s", exc)
-        return [], "Intent classification stopped safely; human review is required."
+        return [], _ROUTER_EXECUTION_LIMIT_REVIEW_REASON
 
     messages = raw_result.get("messages")
     if not isinstance(messages, list):

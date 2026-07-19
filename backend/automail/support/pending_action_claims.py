@@ -952,6 +952,66 @@ _ITALIAN_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
     r"ci\s+metteremo\s+in\s+contatto\s+con\s+lei)\b",
     re.IGNORECASE,
 )
+_ACTION_ARTIFACT_PATTERN = (
+    r"(?:(?:export|download)\s+)?(?:link|file|report|copy|data|token|document)|"
+    r"(?:export|download)"
+)
+_FUTURE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN = re.compile(
+    rf"\b{_CUSTOMER_CONTACT_MODAL_PATTERN}\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:"
+    r"(?:provide|send|share|give|deliver|email|message)\s+"
+    r"(?:(?:you|the\s+customer)\s+(?:with\s+)?)?"
+    r"(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"(?:{_ACTION_ARTIFACT_PATTERN})|"
+    r"make\s+(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"(?:{_ACTION_ARTIFACT_PATTERN})\s+available)\b",
+    re.IGNORECASE,
+)
+_FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN = re.compile(
+    rf"\b(?:"
+    rf"(?:you['’]ll|(?:you|the\s+customer)\s+(?:will|shall))\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:receive|get)\s+"
+    r"(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"(?:{_ACTION_ARTIFACT_PATTERN})|"
+    r"(?:(?:the|your|requested|generated)\s+)?"
+    rf"(?:{_ACTION_ARTIFACT_PATTERN})\s+(?:will|shall)\s+"
+    r"(?!(?:not|never)\b)(?:be\s+)?(?:provided|sent|shared|delivered|emailed|made\s+available)"
+    r")\b",
+    re.IGNORECASE,
+)
+_CONFIRMABLE_COMPLETION_SUBJECT_PATTERN = (
+    rf"(?:{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}|"
+    r"(?:(?:account|data|workspace|tenant|requested)\s+){0,2}"
+    r"(?:deletion|erasure|export)(?:\s+(?:request|job))?)"
+)
+_FUTURE_ACTION_COMPLETION_CONFIRMATION_PROMISE_PATTERN = re.compile(
+    rf"\b(?:(?:we|i)['’]ll|{_CUSTOMER_CONTACT_ACTOR_PATTERN}\s+(?:will|shall|can))\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:be\s+able\s+to\s+)?confirm\s+"
+    r"(?!(?:whether|if)\b)(?:that\s+)?"
+    rf"(?:(?:a|an|the|this|your|our)\s+)?{_CONFIRMABLE_COMPLETION_SUBJECT_PATTERN}\b"
+    r"[^.!?\n]{0,100}?\b(?:"
+    r"(?:is|are|was|were)\s+(?!(?:not|never|unverified|unconfirmed)\b)"
+    rf"{_ACTION_MODIFIER_PATTERN}(?:complete|completed|done|successful|no\s+longer\s+pending)|"
+    r"(?:has|have)\s+(?!(?:not|never)\b)"
+    rf"{_ACTION_MODIFIER_PATTERN}been\s+(?:completed|confirmed|successful))\b",
+    re.IGNORECASE,
+)
+_SAFE_NONCOMPLETION_CONFIRMATION_TAIL_PATTERN = re.compile(
+    r"^\s+(?:"
+    r"(?:is|are|remain|remains)\s+(?:(?:still|currently)\s+)*(?:"
+    r"not\s+(?:complete|completed|confirmed|verified)|"
+    r"unconfirmed|unverified|pending)|"
+    r"(?:has|have)\s+not\s+been\s+(?:completed|confirmed|verified)"
+    r")\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_FUTURE_CONFIRMATION_PATTERNS = frozenset(
+    {
+        _CAN_CONFIRM_ACTION_STATE_PATTERN,
+        _FUTURE_CONFIRM_ACTION_STATE_PATTERN,
+        _CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN,
+    }
+)
 _CUSTOMER_CONTACT_PROMISE_PATTERNS = (
     _FUTURE_UPDATE_PROMISE_PATTERN,
     _FUTURE_CONTACT_PROMISE_PATTERN,
@@ -962,8 +1022,17 @@ _CUSTOMER_CONTACT_PROMISE_PATTERNS = (
     _SPANISH_CUSTOMER_CONTACT_PROMISE_PATTERN,
     _ITALIAN_CUSTOMER_CONTACT_PROMISE_PATTERN,
 )
+_NONCONTINGENT_PENDING_ACTION_PROMISE_PATTERNS = (
+    *_CUSTOMER_CONTACT_PROMISE_PATTERNS,
+    _FUTURE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN,
+    _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN,
+    _FUTURE_ACTION_COMPLETION_CONFIRMATION_PROMISE_PATTERN,
+)
 _PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERNS = frozenset(
-    {_FUTURE_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERN}
+    {
+        _FUTURE_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERN,
+        _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN,
+    }
 )
 _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN = re.compile(
     rf"\b{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall)\s+"
@@ -3761,6 +3830,17 @@ def _bare_confirmation_is_safely_pending(
     return _PENDING_CONFIRMATION_REVERSAL_PATTERN.search(tail[pending_match.end() :]) is None
 
 
+def _future_confirmation_is_explicitly_noncomplete(
+    *,
+    pattern: re.Pattern[str],
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    if pattern not in _FUTURE_CONFIRMATION_PATTERNS:
+        return False
+    return _SAFE_NONCOMPLETION_CONFIRMATION_TAIL_PATTERN.fullmatch(unit[match.end() :]) is not None
+
+
 def _claim_is_explicitly_not_completed(
     unit: str,
     match: re.Match[str],
@@ -4009,11 +4089,11 @@ def _has_unsafe_claim(
                     return True
                 continue
             return True
-    # A definite promise of later customer contact is itself an unsupported
-    # commitment while the underlying action awaits approval. Keep this distinct
-    # from ordinary conditional action grammar: adding "after review" or "once
-    # approved" does not prove that a reply, update, or follow-up will occur.
-    for promise_pattern in _CUSTOMER_CONTACT_PROMISE_PATTERNS:
+    # Definite later customer contact, action-artifact delivery, or confirmation
+    # of completion is unsupported while the underlying action awaits approval.
+    # Keep these distinct from ordinary conditional action grammar: adding
+    # "after review" or "once complete" does not prove the promised outcome.
+    for promise_pattern in _NONCONTINGENT_PENDING_ACTION_PROMISE_PATTERNS:
         for match in promise_pattern.finditer(shadow):
             if _is_scoped_negative_epistemic_claim(
                 prefix=shadow[: match.start()],
@@ -4034,6 +4114,12 @@ def _has_unsafe_claim(
             if _is_scoped_negative_epistemic_claim(
                 prefix=prefix,
                 claim=match.group(0),
+            ):
+                continue
+            if _future_confirmation_is_explicitly_noncomplete(
+                pattern=pattern,
+                unit=unit,
+                match=match,
             ):
                 continue
             if _has_scoped_future_contingency(prefix=prefix, suffix=suffix):

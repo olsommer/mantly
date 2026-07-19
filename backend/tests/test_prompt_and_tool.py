@@ -865,7 +865,7 @@ class TestIntentAttachmentContext:
             parsed_attachments={"claim.pdf": "Schadennummer AXA-123"},
         )
 
-        assert captured["tools"] == ["route_concerns", "activate_intent", "no_match"]
+        assert captured["tools"] == ["route_concerns"]
         assert getattr(route_concerns, "return_direct", False)
         assert captured["response_format"] is None
         assert len(captured["middleware"]) == 1
@@ -948,6 +948,210 @@ class TestIntentAttachmentContext:
         ]
         assert reason is None
         assert len(model_calls) == 1
+
+    @pytest.mark.no_gemini
+    @pytest.mark.parametrize("limit_kind", ["graph-recursion", "tool-call-limit"])
+    def test_classification_retries_execution_limit_then_accepts_valid_route(
+        self,
+        monkeypatch,
+        limit_kind,
+    ):
+        from langchain.messages import AIMessage
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import _run_intent_router_agent
+
+        valid_message = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "route_concerns",
+                "args": {"concerns": [{
+                    "summary": "Open a claim",
+                    "source_text": "Please open a claim.",
+                    "intent_name": "claim",
+                    "confidence": 0.99,
+                    "reason": "",
+                }]},
+                "id": "valid_1",
+            }],
+        )
+
+        class SequencedAgent:
+            calls = 0
+
+            def invoke(self, _payload, config=None):
+                assert config is not None
+                self.calls += 1
+                if self.calls == 1:
+                    if limit_kind == "graph-recursion":
+                        raise GraphRecursionError("router loop")
+                    raise ToolCallLimitExceededError(0, 2, None, 1)
+                return {"messages": [valid_message]}
+
+        agent = SequencedAgent()
+        monkeypatch.setattr(
+            "automail.core.config.read_config",
+            lambda config_path=None: AdminConfig(llm_api_key="key"),
+        )
+        monkeypatch.setattr(
+            "automail.llm.resolve_effective_config",
+            lambda config, tenant_id=None, project_id=None: config,
+        )
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent._build_intents_list",
+            lambda intents_dir=None: "**claim**: Claim",
+        )
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.create_agent",
+            lambda *args, **kwargs: agent,
+        )
+
+        concerns, reason = _run_intent_router_agent(
+            _make_email(body="Please open a claim."),
+            {"claim"},
+            None,
+            None,
+            None,
+            "tenant-one",
+            "project-one",
+        )
+
+        assert agent.calls == 2
+        assert [concern.intent_name for concern in concerns] == ["claim"]
+        assert reason is None
+
+    @pytest.mark.no_gemini
+    @pytest.mark.parametrize("limit_kind", ["graph-recursion", "tool-call-limit"])
+    def test_classification_repeated_execution_limit_requires_human(
+        self,
+        monkeypatch,
+        limit_kind,
+    ):
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import _run_intent_router_agent
+
+        class LimitedAgent:
+            calls = 0
+
+            def invoke(self, _payload, config=None):
+                assert config is not None
+                self.calls += 1
+                if limit_kind == "graph-recursion":
+                    raise GraphRecursionError("router loop")
+                raise ToolCallLimitExceededError(0, 2, None, 1)
+
+        agent = LimitedAgent()
+        monkeypatch.setattr(
+            "automail.core.config.read_config",
+            lambda config_path=None: AdminConfig(llm_api_key="key"),
+        )
+        monkeypatch.setattr(
+            "automail.llm.resolve_effective_config",
+            lambda config, tenant_id=None, project_id=None: config,
+        )
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: object())
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent._build_intents_list",
+            lambda intents_dir=None: "**claim**: Claim",
+        )
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent.create_agent",
+            lambda *args, **kwargs: agent,
+        )
+
+        concerns, reason = _run_intent_router_agent(
+            _make_email(body="Please open a claim."),
+            {"claim"},
+            None,
+            None,
+            None,
+            "tenant-one",
+            "project-one",
+        )
+
+        assert agent.calls == 2
+        assert concerns == []
+        assert reason == "Intent classification stopped safely; human review is required."
+
+    @pytest.mark.no_gemini
+    def test_classification_recovers_from_parallel_route_calls(self, monkeypatch):
+        from langchain.messages import AIMessage
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        from automail.core.config import AdminConfig
+        from automail.pipeline.intent.agent import _run_intent_router_agent
+
+        model_calls: list[int] = []
+
+        class SequencedModel(FakeMessagesListChatModel):
+            def bind_tools(self, *_args, **_kwargs):
+                return self
+
+            def _generate(self, *args, **kwargs):
+                model_calls.append(1)
+                return super()._generate(*args, **kwargs)
+
+        route_call = {
+            "name": "route_concerns",
+            "args": {"concerns": [{
+                "summary": "Open a claim",
+                "source_text": "Please open a claim.",
+                "intent_name": "claim",
+                "confidence": 0.99,
+                "reason": "",
+            }]},
+        }
+        model = SequencedModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {**route_call, "id": "duplicate_1"},
+                        {**route_call, "id": "duplicate_2"},
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**route_call, "id": "valid_1"}],
+                ),
+            ]
+        )
+        intent_source = SimpleNamespace(project_id="project-one")
+
+        monkeypatch.setattr(
+            "automail.core.config.read_config",
+            lambda config_path=None: AdminConfig(llm_api_key="key"),
+        )
+        monkeypatch.setattr(
+            "automail.llm.resolve_effective_config",
+            lambda config, tenant_id=None, project_id=None: config,
+        )
+        monkeypatch.setattr("automail.llm.create_llm", lambda *args, **kwargs: model)
+        monkeypatch.setattr(
+            "automail.pipeline.intent.agent._build_intents_list",
+            lambda intents_dir=None: "**claim**: Claim",
+        )
+        monkeypatch.setattr(
+            "automail.pipeline.intent.activate_intent.get_intent_body",
+            lambda intent_name, intents_dir=None: "Claim runbook"
+            if intent_name == "claim" and intents_dir is intent_source
+            else None,
+        )
+
+        concerns, reason = _run_intent_router_agent(
+            _make_email(body="Please open a claim."),
+            {"claim"},
+            intent_source,
+            None,
+            None,
+            "tenant-one",
+            "project-one",
+        )
+
+        assert len(model_calls) == 2
+        assert [concern.intent_name for concern in concerns] == ["claim"]
+        assert reason is None
 
     @pytest.mark.no_gemini
     @pytest.mark.parametrize(

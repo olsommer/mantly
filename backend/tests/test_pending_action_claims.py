@@ -753,6 +753,74 @@ def test_pending_action_guard_blocks_multilingual_conditional_customer_contact(
 @pytest.mark.parametrize(
     "answer",
     [
+        "We will provide the export link once it is available.",
+        "Our team will send you the download link after export approval.",
+        "We will share the export file after review.",
+        "We will email you the report once it is generated.",
+        "You will receive the data export after approval.",
+        "The export link will be sent once it is ready.",
+    ],
+)
+def test_pending_action_guard_blocks_conditional_action_artifact_delivery(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (
+            "Once we have these confirmations, we can confirm the deletion is complete "
+            "and that no retained copies exist."
+        ),
+        "After review, we will confirm the data deletion is complete.",
+        "Our team will confirm the export is complete once approved.",
+        "Once approved, we will be able to confirm the deletion has been completed.",
+    ],
+)
+def test_pending_action_guard_blocks_contingent_confirmation_of_completion(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We can confirm whether the deletion is complete after the audit.",
+        "We can confirm if the deletion is complete after the audit.",
+        "We cannot confirm that the deletion is complete.",
+        "We can confirm the deletion is not complete.",
+        "We can confirm the request is not complete.",
+        "We can confirm the request remains unverified.",
+        "We can confirm the request has not been completed.",
+        "Our team will confirm the request remains unverified.",
+        "The deletion remains unverified.",
+        "The vendor will provide the export link after processing.",
+        "The vendor can confirm the deletion is complete.",
+        "You will receive the export link from the vendor after processing.",
+        "We can provide the export link after approval.",
+    ],
+)
+def test_pending_action_guard_allows_safe_artifact_and_completion_contrasts(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "This request needs human review.",
         "The warehouse verification requires human review before any action.",
     ],
@@ -1534,6 +1602,35 @@ def test_pending_action_repair_removes_conditional_contact_promise_and_preserves
         ).blocked
         is False
     )
+
+
+@pytest.mark.parametrize(
+    "unsafe_claim",
+    [
+        "We will provide the export link once it is available.",
+        (
+            "Once we have these confirmations, we can confirm the deletion is complete "
+            "and that no retained copies exist."
+        ),
+    ],
+)
+def test_pending_action_repair_removes_artifact_or_completion_promise_and_preserves_facts(
+    unsafe_claim: str,
+) -> None:
+    safe_fact = "The workspace identifier is WS-104."
+    answer = f"{safe_fact}\n\n{unsafe_claim}"
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == f"{safe_fact}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+    assert unsafe_claim not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
 
 
 def test_pending_action_repair_preserves_normal_answer_byte_for_byte() -> None:

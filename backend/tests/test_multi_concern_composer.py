@@ -295,3 +295,34 @@ def test_pipeline_composer_blocks_controlled_actor_future_action_claim():
     assert unsafe.blocked is True
     assert conditional.blocked is True
     assert external.blocked is False
+
+
+def test_pipeline_composer_blocks_s04_artifact_and_completion_promises():
+    result = _result()
+    result.concerns[0].action_outcomes = [
+        RunbookActionOutcome(
+            name="delete_workspace",
+            label="Delete workspace data",
+            status="proposed",
+        )
+    ]
+
+    artifact = _pending_action_claim_check(
+        result,
+        "We will provide the export link once it is available.",
+    )
+    completion = _pending_action_claim_check(
+        result,
+        (
+            "Once we have these confirmations, we can confirm the deletion is complete "
+            "and that no retained copies exist."
+        ),
+    )
+    safe = _pending_action_claim_check(
+        result,
+        "We can confirm whether the deletion is complete after evidence is available.",
+    )
+
+    assert artifact.blocked is True
+    assert completion.blocked is True
+    assert safe.blocked is False

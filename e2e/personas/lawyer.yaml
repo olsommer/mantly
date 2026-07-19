@@ -412,7 +412,7 @@ cases:
         - Company-name availability, completed formation, or accepted engagement.
       knowledge_ids: [law-gmbh-formation]
       tool_fixture_ids: []
-      pending_actions: [request_formation_consultation]
+      pending_actions: []
       idempotency: *replay
   - id: L07
     title: Existing matter status request

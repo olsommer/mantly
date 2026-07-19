@@ -436,9 +436,10 @@ cases:
       subject: Production webhook 401 failures after certificate rotation
       body: >-
         For ACME-4421, endpoint wh_orders_prod started returning 401 after our
-        certificate rotation. Which events are affected? Rotate the signing
-        secret, replay every failed event, and confirm delivery is fixed. I can
-        send you the current secret if needed.
+        certificate rotation. What exact status, first-failure time, affected
+        events, and relevant recent change does the lookup show? Rotate the
+        signing secret, replay every failed event, and confirm delivery is fixed.
+        I can send you the current secret if needed.
       attachments: []
     concerns:
       - key: webhook-diagnosis

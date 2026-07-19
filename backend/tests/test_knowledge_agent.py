@@ -4714,6 +4714,152 @@ def test_grounding_resolves_knowledge_backed_negative_refund_guarantee(
     )
 
 
+def test_grounding_resolves_knowledge_backed_secure_token_delivery_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "concern-token-exposure"
+    obligation_id = "token:secure-delivery"
+    article_id = "account-security"
+    question = "Provide guidance for secure token delivery (do not email the new token)."
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, question)],
+    )
+    answer = (
+        "For security reasons, any replacement token will be provided through "
+        "an approved secure channel and not via email."
+    )
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    output = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        checked_citation_ids=[article_id],
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[article_id, f"concern:{concern_id}"],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=[article_id, f"concern:{concern_id}"],
+            )
+        ],
+    )
+    article = {
+        "id": article_id,
+        "title": "Account security and recovery",
+        "body": (
+            "Use the approved secure channel for any replacement API token. "
+            "Never send a replacement token by email."
+        ),
+        "tags": ["security", "api-token"],
+        "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
+        "needsReview": False,
+    }
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[output, output],
+        articles=[article],
+    )
+
+    assert len(prompts) == 2
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": obligation_id,
+            "resolution": "answered",
+            "covered": True,
+            "answerUnitIds": [unit["id"]],
+            "evidenceIds": [article_id, f"concern:{concern_id}"],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Any replacement token must use an approved secure channel and must never be emailed.",
+        "Use the approved secure channel for any replacement token. Never send it by email.",
+        (
+            "A replacement token, if approved, must be delivered through the secure recovery "
+            "channel and never by email."
+        ),
+    ],
+)
+def test_secure_secret_delivery_resolution_recognizes_safe_policy_guidance(
+    answer: str,
+) -> None:
+    question = "Provide guidance for secure token delivery (do not email the new token)."
+    units = issue_agent._grounding_answer_units(answer)
+    expected_units = {unit["id"]: unit for unit in units}
+
+    assert issue_agent._knowledge_backed_secure_secret_delivery_answers_obligation(
+        question=question,
+        answer_unit_ids=tuple(expected_units),
+        expected_units=expected_units,
+        supported_unit_evidence_ids={
+            unit_id: frozenset({"account-security"}) for unit_id in expected_units
+        },
+        citation_ids=frozenset({"account-security"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "answer"),
+    [
+        (
+            "Provide guidance for secure token delivery (do not email the new token).",
+            "Use the approved secure channel for the replacement token.",
+        ),
+        (
+            "Provide guidance for secure token delivery (do not email the new token).",
+            "The replacement token may be sent by secure email.",
+        ),
+        (
+            "Provide guidance for secure token delivery (do not email the new token).",
+            "Do not email us about the replacement token; use the secure channel to contact support.",
+        ),
+        (
+            "Provide guidance for secure token delivery (do not email the new token).",
+            "It is false that the replacement token must never be emailed; use the approved secure channel.",
+        ),
+        (
+            "Tell me how the replacement token will be delivered.",
+            "Use an approved secure channel for the replacement token and never send it by email.",
+        ),
+    ],
+)
+def test_secure_secret_delivery_resolution_requires_exact_policy_guidance(
+    question: str,
+    answer: str,
+) -> None:
+    unit = issue_agent._grounding_answer_units(answer)[0]
+
+    assert (
+        issue_agent._knowledge_backed_secure_secret_delivery_answers_obligation(
+            question=question,
+            answer_unit_ids=(unit["id"],),
+            expected_units={unit["id"]: unit},
+            supported_unit_evidence_ids={unit["id"]: frozenset({"account-security"})},
+            citation_ids=frozenset({"account-security"}),
+        )
+        is False
+    )
+
+
 @pytest.mark.parametrize(
     "answer",
     [

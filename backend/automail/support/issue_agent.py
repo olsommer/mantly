@@ -59,7 +59,7 @@ GROUNDING_MODEL_CALL_TIMEOUT_SECONDS = 30
 # must therefore outlive two provider calls plus bounded orchestration overhead.
 GROUNDING_AGENT_DEADLINE_SECONDS = 70
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v7"
+GROUNDING_GATE_VERSION = "automation-grounding-v8"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
@@ -93,6 +93,9 @@ _AUTOMATION_SYSTEM_PROMPT = (
     + _SYSTEM_SAFETY_PROMPT
 )
 _AUTOMATION_USER_TEMPLATE = (_PROMPTS_DIR / "issue_automation_user_prompt.md").read_text(encoding="utf-8").strip()
+_AUTOMATION_OBLIGATION_REPAIR_TEMPLATE = (
+    (_PROMPTS_DIR / "issue_automation_obligation_repair.md").read_text(encoding="utf-8").strip()
+)
 _GROUNDING_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_grounding_eval_system_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_USER_TEMPLATE = (_PROMPTS_DIR / "issue_grounding_eval_user_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION = """
@@ -655,6 +658,134 @@ def _knowledge_backed_negative_guarantee_answers_obligation(
                     continue
                 return True
     return False
+
+
+_SECRET_DELIVERY_OBJECT_PATTERN = re.compile(
+    r"\b(?:replacement\s+)?(?:(?:api|access|authentication)\s+)?(?:"
+    r"tokens?|secrets?|credentials?|passwords?|api[-\s]?keys?|recovery\s+codes?"
+    r")\b",
+    re.IGNORECASE,
+)
+_SECRET_DELIVERY_ACTION_PATTERN = (
+    r"(?:deliver(?:y|ed|ing)?|provid(?:e|ed|ing)|send|sent|share|shared|"
+    r"transmit(?:ted|ting)?|use|using)"
+)
+_SECURE_DELIVERY_ROUTE_PATTERN = (
+    r"(?:(?:(?:approved|trusted)\s+)?secure\s+|(?:approved|trusted)\s+)"
+    r"(?:(?:recovery|credential|token)\s+)?(?:channel|portal|vault|method|route)"
+)
+_SECRET_SECURE_DELIVERY_PATTERNS = (
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,140}}"
+        rf"\b{_SECRET_DELIVERY_ACTION_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_SECRET_DELIVERY_ACTION_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b[^.!?\n]{{0,120}}"
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b(?:for|to)\b[^.!?\n]{{0,100}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+)
+_SECRET_EMAIL_PROHIBITION_PATTERNS = (
+    re.compile(
+        rf"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+        rf"(?:send|provide|deliver|share|transmit|email)\s+"
+        rf"(?:(?:a|an|the|any|new|your)\s+){{0,3}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,120}}"
+        r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|will\s+not|not)\b"
+        r"[^.!?\n]{0,50}\b(?:e-?mail(?:ed|ing)?|electronic\s+mail)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+        r"(?:send|provide|deliver|share|transmit)\s+(?:it|them|one)\s+"
+        r"(?:via|by|through|over|using)\s+(?:e-?mail|electronic\s+mail)\b",
+        re.IGNORECASE,
+    ),
+)
+_SECRET_EMAIL_ALLOWANCE_PATTERNS = (
+    re.compile(
+        r"\b(?:can|may|should|must|will)\s+(?:be\s+)?emailed\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:can|may|should|must|will)\s+(?:send|email|share|deliver|provide)\b"
+        rf"[^.!?\n]{{0,100}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,100}}"
+        r"\b(?:can|may|should|must|will)\s+(?:be\s+)?"
+        r"(?:emailed|sent|delivered|provided|shared)\b"
+        r"(?:(?!\b(?:not|never)\b)[^.!?\n]){0,60}"
+        r"\b(?:via|by|through|over|using)\s+(?:secure\s+)?e-?mail\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bsecure\s+e-?mail\b", re.IGNORECASE),
+)
+_SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:false|untrue|incorrect)\s+that\b[^.!?\n]{0,120}"
+    r"\b(?:not|never)\b[^.!?\n]{0,60}\be-?mail(?:ed|ing)?\b|"
+    r"\b(?:not|never)\b[^.!?\n]{0,80}\be-?mail(?:ed|ing)?\b[^.!?\n]{0,60}"
+    r"\b(?:is|was)\s+(?:false|untrue|incorrect)\b|"
+    r"\b(?:not|never)\b[^.!?\n]{0,80}\be-?mail(?:ed|ing)?\b[^.!?\n]{0,40}"
+    r"\b(?:unless|except)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _knowledge_backed_secure_secret_delivery_answers_obligation(
+    *,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    citation_ids: frozenset[str],
+) -> bool:
+    """Recognize explicit knowledge-backed secure secret-delivery guidance.
+
+    This is deliberately narrower than general semantic coverage. It handles a
+    repeated evaluator false negative only when both the obligation and cited
+    reply require a secure delivery route and expressly prohibit email.
+    """
+
+    if (
+        _SECRET_DELIVERY_OBJECT_PATTERN.search(question) is None
+        or re.search(r"\b(?:deliver(?:y)?|provide|send|share|transmit)\b", question, re.IGNORECASE) is None
+        or re.search(r"\b(?:secure|approved|trusted)\b", question, re.IGNORECASE) is None
+        or not any(pattern.search(question) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+    ):
+        return False
+
+    cited_text_units = [
+        _string_from(expected_units.get(unit_id, {}).get("text"))
+        for unit_id in answer_unit_ids
+        if supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(citation_ids)
+    ]
+    answer_text = " ".join(text for text in cited_text_units if text)
+    if not answer_text:
+        return False
+    if _SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN.search(answer_text):
+        return False
+    if any(pattern.search(answer_text) for pattern in _SECRET_EMAIL_ALLOWANCE_PATTERNS):
+        return False
+    return bool(
+        _SECRET_DELIVERY_OBJECT_PATTERN.search(answer_text)
+        and any(pattern.search(answer_text) for pattern in _SECRET_SECURE_DELIVERY_PATTERNS)
+        and any(pattern.search(answer_text) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+    )
 
 
 def _string_from(value: Any) -> str:
@@ -3318,6 +3449,8 @@ def draft_issue_automation_answer(
     fallback_confidence: str,
     account_context: dict[str, Any] | None = None,
     conversation_context: dict[str, Any] | None = None,
+    coverage_repair_answer: str = "",
+    coverage_repair_obligations: tuple[str, ...] = (),
     on_late_usage: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> IssueAgentDraft:
     """Preserve the bounded one-shot generator for automatic/shared retrieval paths."""
@@ -3382,6 +3515,18 @@ def draft_issue_automation_answer(
             prior_agent_answers=_json(_agent_chat_context(prior_agent_runs)),
             question=(question.strip() or "Prepare the best support answer and next step.")[:4_000],
         )
+        clean_repair_obligations = tuple(
+            dict.fromkeys(
+                obligation.strip()[:500]
+                for obligation in coverage_repair_obligations[:20]
+                if obligation.strip()
+            )
+        )
+        if clean_repair_obligations:
+            user_prompt += "\n\n" + _AUTOMATION_OBLIGATION_REPAIR_TEMPLATE.format(
+                previous_answer=_json(coverage_repair_answer.strip()[:12_000]),
+                uncovered_obligations=_json(clean_repair_obligations),
+            )
         agent = create_agent(
             model=llm,
             tools=[],
@@ -4153,6 +4298,20 @@ def assess_issue_automation_grounding(
             ):
                 resolution = "pending_or_unavailable"
                 deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _knowledge_backed_secure_secret_delivery_answers_obligation(
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                    citation_ids=frozenset(citation_ids),
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
             obligation_question = _string_from(obligation.get("question"))
             linked_answer_asserts_action_state = any(
                 check_pending_action_claims(
@@ -4262,14 +4421,14 @@ def assess_issue_automation_grounding(
                 model=model,
                 error="; ".join(dict.fromkeys(protocol_errors))[:1_000],
             )
-        deterministic_guarantee_override = bool(
+        deterministic_obligation_override = bool(
             deterministically_resolved_obligation_ids
             and not clean_unsupported
             and not contradictions
             and not clean_uncovered_obligations
         )
         if (
-            (structured.verdict != "grounded" and not deterministic_guarantee_override)
+            (structured.verdict != "grounded" and not deterministic_obligation_override)
             or clean_unsupported
             or contradictions
             or clean_uncovered_obligations

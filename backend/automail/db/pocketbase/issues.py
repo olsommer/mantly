@@ -12022,7 +12022,94 @@ def _create_issue_agent_answer(
             on_late_usage=usage_sink.report_late,
         )
         _require_processing_claim(processing_run)
+        coverage_repair: dict[str, Any] = {}
+        if (
+            not grounding_assessment.verified
+            and grounding_assessment.reason_code == "incomplete_answer"
+            and grounding_assessment.uncovered_obligations
+            and not grounding_assessment.unsupported_claims
+            and not grounding_assessment.contradictions
+            and not grounding_assessment.pending_action_claims
+            and draft.generation_mode == "llm"
+            and not draft.error
+        ):
+            original_answer = answer
+            coverage_repair = {
+                "attempted": True,
+                "triggerReasonCode": grounding_assessment.reason_code,
+                "uncoveredObligations": list(grounding_assessment.uncovered_obligations),
+                "originalAnswerSha256": grounding_text_sha256(original_answer),
+            }
+            _advance_processing_run(
+                processing_run,
+                stage="composer",
+                label="Completing omitted customer questions",
+            )
+            repair_draft = draft_issue_automation_answer(
+                articles=fallback_articles,
+                coverage_repair_answer=original_answer,
+                coverage_repair_obligations=grounding_assessment.uncovered_obligations,
+                **draft_kwargs,
+            )
+            _require_processing_claim(processing_run)
+            coverage_repair.update(
+                {
+                    "generationMode": repair_draft.generation_mode,
+                    "generationError": repair_draft.error,
+                }
+            )
+            if repair_draft.generation_mode == "llm" and not repair_draft.error:
+                draft = repair_draft
+                answer = repair_issue_automation_answer_action_state(
+                    issue=issue,
+                    messages=messages,
+                    answer=draft.answer,
+                )
+                confidence = draft.confidence
+                if draft.requires_human:
+                    clean_approval_required = True
+                fallback_by_id = {
+                    _string_from(article.get("id")): article
+                    for article in fallback_articles
+                    if _string_from(article.get("id"))
+                }
+                articles = [
+                    fallback_by_id[article_id]
+                    for article_id in draft.citation_ids
+                    if article_id in fallback_by_id
+                ]
+                citation_evidence = ()
+                citation_previews = [
+                    _agent_citation_preview(article, citation_evidence)
+                    for article in articles
+                ]
+                _advance_processing_run(
+                    processing_run,
+                    stage="grounding",
+                    label="Rechecking completed answer",
+                )
+                grounding_assessment = assess_issue_automation_grounding(
+                    issue=issue,
+                    messages=messages,
+                    answer=answer,
+                    articles=grounding_articles,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    account_context=account_context,
+                    conversation_context=conversation_context,
+                    on_late_usage=usage_sink.report_late,
+                )
+                _require_processing_claim(processing_run)
+                coverage_repair.update(
+                    {
+                        "repairedAnswerSha256": grounding_text_sha256(answer),
+                        "verified": grounding_assessment.verified,
+                        "resultReasonCode": grounding_assessment.reason_code,
+                    }
+                )
         grounding_gate = grounding_assessment.as_metadata()
+        if coverage_repair:
+            grounding_gate["coverageRepair"] = coverage_repair
         if not grounding_assessment.verified:
             draft_blocked_reason = grounding_assessment.reason_code or "grounding_check_failed"
             confidence = "low"

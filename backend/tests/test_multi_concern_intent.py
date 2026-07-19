@@ -77,6 +77,9 @@ def test_processing_prompt_requires_exact_materially_applicable_action_selection
     assert "exact configured action names" in prompt
     assert "prerequisites fail" in prompt
     assert "lacks sufficient authority" in prompt
+    assert "does not block an internal defensive or review action" in prompt
+    assert "security or safety incident" in prompt
+    assert "remains pending human approval" in prompt
     assert "Return an empty array" in prompt
 
 

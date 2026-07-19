@@ -379,6 +379,94 @@ def test_channel_autopilot_draft_is_grounded_before_reply(monkeypatch, verified)
         assert reply_calls == []
 
 
+def test_channel_autopilot_repairs_pure_incomplete_answer_once(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    draft_calls: list[dict] = []
+    original_answer = "Invoice INV-9012 is open and bills 120 seats."
+    repaired_answer = (
+        "Invoice INV-9012 is open and bills 120 seats. "
+        "The exact mismatch cause is not established; investigation is pending review. "
+        "The requested credit is pending review and has not been approved."
+    )
+    uncovered = (
+        "Explain exactly why the invoice has a seat mismatch.",
+        "Credit the difference.",
+    )
+
+    def fake_draft(**kwargs):
+        draft_calls.append(kwargs)
+        answer = original_answer if len(draft_calls) == 1 else repaired_answer
+        return IssueAgentDraft(
+            answer=answer,
+            confidence="high",
+            generation_mode="llm",
+        )
+
+    def fake_grounding(**kwargs):
+        grounding_calls.append(kwargs)
+        if len(grounding_calls) == 1:
+            return AutomationGroundingAssessment(
+                verified=False,
+                status="failed",
+                reason_code="incomplete_answer",
+                checked_at="2026-07-19T10:05:00Z",
+                answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+                uncovered_obligations=uncovered,
+                provider="test",
+                model="grounding-model",
+            )
+        return AutomationGroundingAssessment(
+            verified=True,
+            status="passed",
+            reason_code="",
+            checked_at="2026-07-19T10:05:01Z",
+            answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+            provider="test",
+            model="grounding-model",
+        )
+
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_draft)
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", fake_grounding)
+    grounding_calls.clear()
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(draft_calls) == 2
+    assert draft_calls[1]["coverage_repair_answer"] == original_answer
+    assert draft_calls[1]["coverage_repair_obligations"] == uncovered
+    assert [call["answer"] for call in grounding_calls] == [
+        original_answer,
+        repaired_answer,
+    ]
+    assert result["draftBlockedReason"] == ""
+    assert result["reply"]["id"] == "reply1"
+    assert reply_calls[0]["body"] == repaired_answer
+    assert reply_calls[0]["metadata"]["groundingGate"]["coverageRepair"] == {
+        "attempted": True,
+        "triggerReasonCode": "incomplete_answer",
+        "uncoveredObligations": list(uncovered),
+        "originalAnswerSha256": issue_agent.grounding_text_sha256(original_answer),
+        "generationMode": "llm",
+        "generationError": "",
+        "repairedAnswerSha256": issue_agent.grounding_text_sha256(repaired_answer),
+        "verified": True,
+        "resultReasonCode": "",
+    }
+
+
 def test_channel_grounding_repairs_against_pending_actions_created_during_composition(monkeypatch):
     reply_calls, grounding_calls = _stub_channel_agent_answer(
         monkeypatch,

@@ -73,17 +73,25 @@ async def judge_e2e_response(
         ]
     )
     expected = {
-        "expected_customer_found": False,
+        # Keep the generic pipeline judge's identity and routing dimensions
+        # neutral. This endpoint grades response text only; marking the intent
+        # unmatched can make the judge reject a correct, grounded answer for
+        # having answered at all.
+        "expected_customer_found": True,
         "expected_customer_data": {},
-        "expected_intent_matched": False,
-        "expected_intent_name": "",
+        "expected_intent_matched": True,
+        "expected_intent_name": "e2e-response-rubric",
         "expected_actions": [],
         "expected_requires_human": True,
         "expected_response": expected_response,
     }
     actual = {
-        "identityResult": {"found": False},
-        "intentResult": {"matched": False, "actions": []},
+        "identityResult": {"found": True},
+        "intentResult": {
+            "matched": True,
+            "intentName": "e2e-response-rubric",
+            "actions": [],
+        },
         "agentResponse": {
             "responseText": body.response_text,
             "requiresHuman": True,

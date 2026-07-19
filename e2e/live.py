@@ -1055,6 +1055,113 @@ def _issue_fingerprint(issue: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _business_state_fingerprint(issue: dict[str, Any]) -> str:
+    """Hash ticket state without webhook receipts, which have their own replay audit."""
+
+    business_state = {
+        key: value for key, value in issue.items() if key != "channelWebhookEvents"
+    }
+    return _issue_fingerprint(business_state)
+
+
+def _replay_receipt_audit(
+    before_issue: dict[str, Any],
+    after_issue: dict[str, Any],
+    *,
+    issue_id: str,
+    channel_id: str,
+    event_id: str,
+    message_id: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Require one correctly linked skipped receipt without changing prior receipts."""
+
+    before_receipts = [
+        item
+        for item in before_issue.get("channelWebhookEvents") or []
+        if isinstance(item, dict)
+    ]
+    after_receipts = [
+        item
+        for item in after_issue.get("channelWebhookEvents") or []
+        if isinstance(item, dict)
+    ]
+    before_by_id = {
+        str(item.get("id") or ""): item for item in before_receipts if item.get("id")
+    }
+    after_by_id = {
+        str(item.get("id") or ""): item for item in after_receipts if item.get("id")
+    }
+    before_ids = set(before_by_id)
+    after_ids = set(after_by_id)
+    new_ids = after_ids - before_ids
+    preserved_ids = before_ids.intersection(after_ids)
+    original_receipts_preserved = (
+        len(before_by_id) == len(before_receipts)
+        and len(after_by_id) == len(after_receipts)
+        and preserved_ids == before_ids
+        and all(
+            _issue_fingerprint(before_by_id[receipt_id])
+            == _issue_fingerprint(after_by_id[receipt_id])
+            for receipt_id in preserved_ids
+        )
+    )
+
+    new_receipt = after_by_id[next(iter(new_ids))] if len(new_ids) == 1 else {}
+    payload = (
+        new_receipt.get("payload")
+        if isinstance(new_receipt.get("payload"), dict)
+        else {}
+    )
+    result = (
+        new_receipt.get("result")
+        if isinstance(new_receipt.get("result"), dict)
+        else {}
+    )
+    resolver = result.get("resolver") if isinstance(result.get("resolver"), dict) else {}
+    expected_event_prefix = f"admin-test-job:{event_id}:"
+    new_receipt_valid = (
+        len(new_ids) == 1
+        and len(after_receipts) == len(before_receipts) + 1
+        and str(new_receipt.get("channelId") or "") == channel_id
+        and str(new_receipt.get("eventId") or "").startswith(expected_event_prefix)
+        and str(new_receipt.get("eventType") or "") == "admin_channel_test_message"
+        and str(new_receipt.get("providerMessageId") or "") == message_id
+        and str(new_receipt.get("status") or "").lower() == "skipped"
+        and str(payload.get("eventId") or "") == event_id
+        and str(payload.get("messageId") or "") == message_id
+        and str(result.get("status") or "").lower() == "skipped"
+        and str(result.get("issueId") or "") == issue_id
+        and str(result.get("messageId") or "") == message_id
+        and str(resolver.get("issueId") or "") == issue_id
+        and str(resolver.get("providerMessageId") or "") == message_id
+    )
+    evidence = {
+        "beforeReceiptIds": sorted(before_ids),
+        "afterReceiptIds": sorted(after_ids),
+        "newReceiptIds": sorted(new_ids),
+        "originalReceiptsPreserved": original_receipts_preserved,
+        "newReceiptValid": new_receipt_valid,
+        "newReceipt": {
+            "id": str(new_receipt.get("id") or ""),
+            "channelId": str(new_receipt.get("channelId") or ""),
+            "eventId": str(new_receipt.get("eventId") or ""),
+            "eventType": str(new_receipt.get("eventType") or ""),
+            "providerMessageId": str(new_receipt.get("providerMessageId") or ""),
+            "status": str(new_receipt.get("status") or ""),
+            "payloadEventId": str(payload.get("eventId") or ""),
+            "payloadMessageId": str(payload.get("messageId") or ""),
+            "resultStatus": str(result.get("status") or ""),
+            "resultIssueId": str(result.get("issueId") or ""),
+            "resultMessageId": str(result.get("messageId") or ""),
+            "resolverIssueId": str(resolver.get("issueId") or ""),
+            "resolverProviderMessageId": str(
+                resolver.get("providerMessageId") or ""
+            ),
+        },
+    }
+    return original_receipts_preserved and new_receipt_valid, evidence
+
+
 def _fetch_issue(api: AdminApi, target: Target, issue_id: str) -> dict[str, Any]:
     result = api.get(f"/api/admin/projects/{target.project_id}/issues/{issue_id}")
     if not isinstance(result, dict):
@@ -1531,7 +1638,7 @@ def run_case(
             issue,
             article_ids,
         )
-        before_replay = _issue_fingerprint(issue)
+        before_replay = _business_state_fingerprint(issue)
         replay = api.post(
             f"/api/admin/projects/{target.project_id}/channels/{target.channel_id}/test-message",
             payload,
@@ -1552,7 +1659,15 @@ def run_case(
             timeout_seconds=timeout_seconds,
             poll_seconds=poll_seconds,
         )
-        after_replay = _issue_fingerprint(replay_issue)
+        after_replay = _business_state_fingerprint(replay_issue)
+        receipt_delta_valid, receipt_delta_evidence = _replay_receipt_audit(
+            issue,
+            replay_issue,
+            issue_id=issue_id,
+            channel_id=target.channel_id,
+            event_id=event_id,
+            message_id=message_id,
+        )
         processed = _count_from_ingest(replay, "processed")
         skipped = _count_from_ingest(replay, "skipped")
         recorder.check(
@@ -1575,6 +1690,11 @@ def run_case(
                 "before": before_replay,
                 "after": after_replay,
             },
+        )
+        recorder.check(
+            "idempotent_replay_receipt_delta",
+            receipt_delta_valid,
+            receipt_delta_evidence,
         )
         follow_ups = _run_follow_ups(
             api,

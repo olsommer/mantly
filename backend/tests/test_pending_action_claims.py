@@ -686,6 +686,73 @@ def test_pending_action_guard_blocks_exact_final_live_residual_phrases(
 @pytest.mark.parametrize(
     "answer",
     [
+        "We will be in touch once the review is complete.",
+        "After the request has been reviewed, we will let you know the result.",
+        "We'll contact you when the billing review is complete.",
+        "Our billing team will follow up with you after human review.",
+        "A human agent will reach out to you if the exception is approved.",
+        "Our support team will contact you after review.",
+        "You will be contacted by our team after review.",
+        "Our team will respond after review.",
+        "You will receive an update after review.",
+        "Our team will follow-up with you after review.",
+        "We will message you after review.",
+        "We will reach back out after review.",
+    ],
+)
+def test_pending_action_guard_blocks_future_customer_contact_despite_condition(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Wir werden Sie nach der Prüfung kontaktieren.",
+        "Nach der Prüfung werden wir Sie kontaktieren.",
+        "Wir werden Ihnen nach der Prüfung antworten.",
+        "Wir werden Sie nach der Prüfung informieren.",
+        "Wir werden Sie nach der Prüfung benachrichtigen.",
+        "Wir werden Sie nach der Prüfung auf dem Laufenden halten.",
+        "Wir werden Ihnen nach der Prüfung ein Update senden.",
+        "Nous vous contacterons après examen.",
+        "Nous vous répondrons après examen.",
+        "Nous vous informerons après examen.",
+        "Nous vous notifierons après examen.",
+        "Nous vous tiendrons informé après examen.",
+        "Nous vous enverrons une mise à jour après examen.",
+        "Le contactaremos después de la revisión.",
+        "Nos pondremos en contacto con usted después de la revisión.",
+        "Le responderemos después de la revisión.",
+        "Le informaremos después de la revisión.",
+        "Le notificaremos después de la revisión.",
+        "Le mantendremos informado después de la revisión.",
+        "Le enviaremos una actualización después de la revisión.",
+        "La contatteremo dopo la revisione.",
+        "Ci metteremo in contatto con lei dopo la revisione.",
+        "Le risponderemo dopo la revisione.",
+        "La informeremo dopo la revisione.",
+        "La notificheremo dopo la revisione.",
+        "La terremo aggiornata dopo la revisione.",
+        "Le invieremo un aggiornamento dopo la revisione.",
+    ],
+)
+def test_pending_action_guard_blocks_multilingual_conditional_customer_contact(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "This request needs human review.",
         "The warehouse verification requires human review before any action.",
     ],
@@ -824,6 +891,22 @@ def test_pending_action_guard_allows_safe_coordinated_escalation_state(
         "We deny that we have escalated the case.",
         "We cannot definitely promise that we are escalating the case.",
         "We cannot promise that we will provide an update.",
+        "We cannot promise that you will be contacted after review.",
+        "Our support team will not contact you after review.",
+        "You will not receive an update after review.",
+        "Nach der Prüfung werden wir Sie nicht kontaktieren.",
+        "Nous ne vous répondrons pas après examen.",
+        "No nos pondremos en contacto con usted después de la revisión.",
+        "No le responderemos después de la revisión.",
+        "Non ci metteremo in contatto con lei dopo la revisione.",
+        "Non le risponderemo dopo la revisione.",
+        "Wir können nicht versprechen, dass wir Sie nach der Prüfung kontaktieren werden.",
+        "Nous ne pouvons pas promettre que nous vous contacterons après examen.",
+        "Nous ne pouvons pas promettre que nous vous répondrons après examen.",
+        "No podemos prometer que le contactaremos después de la revisión.",
+        "No podemos prometer que nos pondremos en contacto con usted después de la revisión.",
+        "Non possiamo promettere che la contatteremo dopo la revisione.",
+        "Non possiamo promettere che ci metteremo in contatto con lei dopo la revisione.",
         "We have noted that there is no conflict.",
         "No conflict has been noted.",
     ],
@@ -906,8 +989,6 @@ def test_subject_to_human_approval_is_a_safe_scoped_condition() -> None:
         "We are unable to promise a replacement or refund before this verification is complete.",
         "We are waiting for approval before escalating.",
         "We are ready to check this after approval.",
-        "We will follow up once our team has reviewed your address change request.",
-        "After the request has been reviewed, we will let you know the result.",
         "Once approved, the warehouse ticket will be opened.",
         ("This parcel is currently in transit and was processed at the DHL Paketzentrum Ruedersdorf today at 08:42."),
         "The parcel will be processed at the depot tomorrow.",
@@ -926,13 +1007,18 @@ def test_pending_action_guard_allows_conditional_future_negative_and_pending_lan
 @pytest.mark.parametrize(
     "answer",
     [
-        "A specialist will follow up once the action is approved.",
-        "A human agent will contact you if available.",
         "A specialist is expected to follow up after review.",
         "The carrier will update tracking tomorrow.",
         "The customer will contact support after review.",
         "A carrier representative will follow up tomorrow.",
         "Carrier operations will update the tracking scan tomorrow.",
+        "Our team will follow up with the carrier after review.",
+        "You will be contacted by the carrier after review.",
+        "Our team will follow up on the carrier trace after review.",
+        "Our team will follow up after review with the carrier.",
+        "Our team will respond to the vendor after review.",
+        "We will reply to the court after review.",
+        "We will reach out regarding the carrier trace after review.",
     ],
 )
 def test_pending_action_guard_allows_contingent_or_external_actor_future_facts(
@@ -943,6 +1029,25 @@ def test_pending_action_guard_allows_contingent_or_external_actor_future_facts(
     assert result.blocked is False
     assert result.pending_actions == ("Open fulfillment investigation",)
     assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We will follow up with you after the carrier review.",
+        "We will follow up after the carrier review with you.",
+        "We will respond to you about the carrier trace.",
+        "We will reply to the customer after the vendor review.",
+        "We will reach out to you regarding the carrier trace.",
+    ],
+)
+def test_external_reference_does_not_hide_explicit_customer_contact_promise(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
 
 
 def test_pending_action_guard_does_not_apply_without_pending_approval() -> None:
@@ -1147,6 +1252,7 @@ def test_pending_action_guard_reports_each_unsafe_answer_unit_once() -> None:
     assert result.claims == (
         "We are checking the parcel.",
         "We have escalated the incident.",
+        "We will reply after approval.",
     )
 
 
@@ -1400,6 +1506,27 @@ def test_pending_action_repair_removes_final_live_residuals_and_preserves_facts(
 
     assert repaired == (f"{safe_status}\n\n{safe_review_state}\n\n{PENDING_ACTION_REPAIR_NOTICE}")
     assert all(unit not in repaired for unit in unsafe_units)
+    assert (
+        check_pending_action_claims(
+            answer=repaired,
+            runbook_actions=_actions(),
+        ).blocked
+        is False
+    )
+
+
+def test_pending_action_repair_removes_conditional_contact_promise_and_preserves_facts() -> None:
+    safe_facts = "The standard consultation fee is CHF 250, and the recorded due date is 25 July 2026."
+    unsafe_promise = "We will be in touch once the review is complete."
+    answer = f"{safe_facts}\n\n{unsafe_promise}"
+
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == f"{safe_facts}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+    assert unsafe_promise not in repaired
     assert (
         check_pending_action_claims(
             answer=repaired,
@@ -1882,7 +2009,6 @@ def test_pending_action_guard_blocks_formal_shall_commitments(
         "We shall not provide you with an update.",
         "We shall not keep you updated.",
         "We shall not be in touch.",
-        "Once approved, we shall be in touch.",
     ],
 )
 def test_pending_action_guard_allows_negative_or_conditional_shall_grammar(

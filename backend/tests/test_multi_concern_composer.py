@@ -293,5 +293,5 @@ def test_pipeline_composer_blocks_controlled_actor_future_action_claim():
     )
 
     assert unsafe.blocked is True
-    assert conditional.blocked is False
+    assert conditional.blocked is True
     assert external.blocked is False

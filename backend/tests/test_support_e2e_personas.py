@@ -18,9 +18,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from e2e.live import (
     LiveE2EError,
+    _business_state_fingerprint,
     _fixture_tool_audit,
+    _issue_fingerprint,
     _pending_action_audit,
     _preflight_target_for_run,
+    _replay_receipt_audit,
     _target_validation_error,
     _wait_for_channel_test_job,
     build_intent_content,
@@ -79,6 +82,133 @@ def test_personas_use_only_synthetic_portable_state() -> None:
         )
 
 
+def _webhook_receipt(
+    receipt_id: str,
+    *,
+    replay: bool,
+    status: str = "skipped",
+    linked_issue_id: str = "issue1",
+) -> dict:
+    event_id = "event1"
+    message_id = "message1"
+    return {
+        "id": receipt_id,
+        "channelId": "channel1",
+        "eventId": f"admin-test-job:{event_id}:nonce" if replay else event_id,
+        "eventType": "admin_channel_test_message" if replay else "message_created",
+        "providerMessageId": message_id,
+        "status": status,
+        "payload": {"eventId": event_id, "messageId": message_id},
+        "result": {
+            "status": status if replay else "success",
+            "issueId": linked_issue_id,
+            "messageId": message_id,
+            "resolver": {
+                "issueId": linked_issue_id,
+                "providerMessageId": message_id,
+            },
+        },
+    }
+
+
+def _audit_replay_receipts(
+    before_receipts: list[dict], after_receipts: list[dict]
+) -> tuple[bool, dict]:
+    return _replay_receipt_audit(
+        {"id": "issue1", "channelWebhookEvents": before_receipts},
+        {"id": "issue1", "channelWebhookEvents": after_receipts},
+        issue_id="issue1",
+        channel_id="channel1",
+        event_id="event1",
+        message_id="message1",
+    )
+
+
+def test_live_runner_business_fingerprint_excludes_receipts_only() -> None:
+    before = {
+        "id": "issue1",
+        "status": "open",
+        "channelWebhookEvents": [_webhook_receipt("receipt1", replay=False)],
+        "outboundMessages": [{"id": "reply1", "status": "draft"}],
+    }
+    after = {
+        **before,
+        "channelWebhookEvents": [
+            *before["channelWebhookEvents"],
+            _webhook_receipt("receipt2", replay=True),
+        ],
+    }
+
+    assert _business_state_fingerprint(before) == _business_state_fingerprint(after)
+    assert _issue_fingerprint(before) != _issue_fingerprint(after)
+
+
+def test_live_runner_replay_receipt_audit_accepts_one_linked_skipped_receipt() -> None:
+    original = _webhook_receipt("receipt1", replay=False)
+    replay = _webhook_receipt("receipt2", replay=True)
+
+    passed, evidence = _audit_replay_receipts([original], [replay, original])
+
+    assert passed is True
+    assert evidence["originalReceiptsPreserved"] is True
+    assert evidence["newReceiptValid"] is True
+
+
+@pytest.mark.parametrize("change", ["remove", "mutate"])
+def test_live_runner_replay_receipt_audit_rejects_original_receipt_change(
+    change: str,
+) -> None:
+    original = _webhook_receipt("receipt1", replay=False)
+    replay = _webhook_receipt("receipt2", replay=True)
+    after_originals = []
+    if change == "mutate":
+        after_originals = [
+            {**original, "status": "failed"},
+        ]
+
+    passed, evidence = _audit_replay_receipts(
+        [original],
+        [replay, *after_originals],
+    )
+
+    assert passed is False
+    assert evidence["originalReceiptsPreserved"] is False
+
+
+@pytest.mark.parametrize(
+    "replay",
+    [
+        _webhook_receipt("receipt2", replay=True, status="processed"),
+        _webhook_receipt("receipt2", replay=True, linked_issue_id="issue2"),
+    ],
+    ids=["wrong-status", "wrong-linkage"],
+)
+def test_live_runner_replay_receipt_audit_rejects_invalid_new_receipt(
+    replay: dict,
+) -> None:
+    original = _webhook_receipt("receipt1", replay=False)
+
+    passed, evidence = _audit_replay_receipts([original], [replay, original])
+
+    assert passed is False
+    assert evidence["originalReceiptsPreserved"] is True
+    assert evidence["newReceiptValid"] is False
+
+
+def test_live_runner_business_fingerprint_detects_material_ticket_change() -> None:
+    before = {
+        "id": "issue1",
+        "status": "open",
+        "outboundMessages": [{"id": "reply1", "status": "draft"}],
+    }
+    after = {
+        **before,
+        "outboundMessages": [{"id": "reply1", "status": "sent"}],
+    }
+
+    assert _business_state_fingerprint(before) != _business_state_fingerprint(after)
+
+
 def test_personas_preserve_the_high_value_regression_cases() -> None:
     personas = {persona.id: persona for persona in load_personas(PERSONA_DIR)}
     lawyer_cases = {case.id: case for case in personas["lawyer"].cases}
@@ -92,7 +222,10 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
     assert "fulfillment-battery-safety" in fulfillment_cases["E06"].expected.knowledge_ids
     assert fulfillment_cases["E05"].expected.single_combined_reply is True
-    assert saas_cases["S03"].expected.minimum_concern_count == 4
+    assert saas_cases["S03"].expected.minimum_concern_count == 1
+    assert sum(
+        len(concern.answer_obligations) for concern in saas_cases["S03"].concerns
+    ) == 4
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())
 
@@ -584,3 +717,11 @@ def test_e2e_semantic_judge_is_gated_and_uses_response_rubric(monkeypatch) -> No
     assert "MUST NOT CLAIM" in expected_response
     assert "MUST EXPLICITLY MARK UNVERIFIED" in expected_response
     assert captured["actual"]["agentResponse"]["responseText"] == body.response_text
+    assert captured["expected"]["expected_customer_found"] is True
+    assert captured["expected"]["expected_intent_matched"] is True
+    assert captured["actual"]["identityResult"]["found"] is True
+    assert captured["actual"]["intentResult"] == {
+        "matched": True,
+        "intentName": "e2e-response-rubric",
+        "actions": [],
+    }

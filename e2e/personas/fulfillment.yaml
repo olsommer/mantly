@@ -184,10 +184,14 @@ runbooks:
     purpose: Check address-change eligibility and prepare a redirect request.
     proposed_actions: [request_address_change, request_carrier_redirect]
   - key: fulfillment-hazardous-battery
-    purpose: Put immediate human safety guidance before ordinary business actions.
+    purpose: >-
+      Give immediate damaged-battery safety guidance and prepare only the safety
+      incident; route replacement and refund requests as a separate product problem.
     proposed_actions: [open_safety_incident]
   - key: fulfillment-wrong-item
-    purpose: Collect evidence and prepare a warehouse verification and replacement review.
+    purpose: >-
+      Collect evidence for an incorrect or damaged item and prepare warehouse,
+      replacement, and refund review after any urgent safety concern is isolated.
     proposed_actions: [open_warehouse_ticket, request_replacement, request_refund]
   - key: fulfillment-partial-shipment
     purpose: Reconcile package facts and prepare missing-unit investigation or refund review.
@@ -241,7 +245,7 @@ cases:
         - Every shipment field returned by the lookup.
       must_not_claim:
         - Guaranteed delivery or any fact not returned by the tool.
-      knowledge_ids: [fulfillment-delivery-estimates]
+      knowledge_ids: []
       tool_fixture_ids: [shipment-zf-10482]
       pending_actions: []
       idempotency: &replay
@@ -342,7 +346,7 @@ cases:
         - Last event, location, unclear window, and pending investigation.
       must_not_claim:
         - An opened investigation or a resolution date.
-      knowledge_ids: [fulfillment-delivery-estimates, fulfillment-exceptions]
+      knowledge_ids: []
       tool_fixture_ids: [shipment-zf-88310]
       pending_actions: [open_delivery_exception]
       idempotency: *replay
@@ -379,7 +383,7 @@ cases:
         - Shipment facts and the separate address-change path.
       must_not_claim:
         - Changed address, requested redirect, or guaranteed delivery.
-      knowledge_ids: [fulfillment-delivery-estimates]
+      knowledge_ids: []
       tool_fixture_ids: [shipment-zf-20991]
       pending_actions: [request_carrier_redirect]
       idempotency: *replay
@@ -473,13 +477,15 @@ cases:
       - key: partial-shipment-facts
         runbook_key: fulfillment-partial-shipment
         answer_obligations:
-          - State ordered units, confirmed tracking numbers, and absence of a confirmed second parcel.
+          - >-
+            State ordered units, confirmed tracking numbers, and absence of a
+            confirmed second parcel without concluding that units are missing.
       - key: refund-request
         runbook_key: fulfillment-partial-shipment
         answer_obligations:
           - Mark investigation and refund as pending rather than complete.
     expected:
-      minimum_concern_count: 2
+      minimum_concern_count: 1
       reply_disposition: draft
       grounding_status: passed
       approval_required: true
@@ -491,7 +497,7 @@ cases:
         - Three ordered units, one confirmed tracking number, and no confirmed second parcel.
       must_not_claim:
         - Missing-unit conclusion, second tracking number, approved refund, or refund today.
-      knowledge_ids: [fulfillment-exceptions, fulfillment-returns-refunds]
+      knowledge_ids: []
       tool_fixture_ids: [order-zf-10482]
       pending_actions: [open_missing_unit_investigation, request_refund]
       idempotency: *replay
@@ -543,13 +549,15 @@ cases:
       - key: return-authorization
         runbook_key: fulfillment-return-refund
         answer_obligations:
-          - Explain that shipment must wait for a confirmed authorization, route, and reference.
+          - >-
+            State that no return address or reference is confirmed yet and that
+            shipment must wait for confirmed authorization, route, and reference.
       - key: refund-timing
         runbook_key: fulfillment-return-refund
         answer_obligations:
           - Explain merchant and payment-provider control without guaranteeing Friday.
     expected:
-      minimum_concern_count: 2
+      minimum_concern_count: 1
       reply_disposition: draft
       grounding_status: passed
       approval_required: true

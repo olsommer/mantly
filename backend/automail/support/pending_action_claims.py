@@ -871,20 +871,34 @@ _CONTROLLED_SUPPORT_ACTOR_CONFIRM_PATTERN = re.compile(
     rf"{_CONFIRMATION_ACTION_STATE_SUBJECT_PATTERN}\b",
     re.IGNORECASE,
 )
+_CUSTOMER_CONTACT_ACTOR_PATTERN = (
+    rf"(?:we|i|support|customer\s+(?:support|service)|"
+    r"(?:the|our)\s+(?:(?:customer\s+)?(?:support|service)\s+)?team|"
+    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN})"
+)
+_CUSTOMER_CONTACT_MODAL_PATTERN = (
+    rf"(?:(?:we|i)['’]ll|{_CUSTOMER_CONTACT_ACTOR_PATTERN}\s+(?:will|shall))"
+)
 _FUTURE_UPDATE_PROMISE_PATTERN = re.compile(
-    rf"\b(?:(?:we|i)\s+(?:will|shall)|(?:we|i)['’]ll|"
-    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall))\s+"
+    rf"\b{_CUSTOMER_CONTACT_MODAL_PATTERN}\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
     r"(?:be\s+able\s+to\s+)?(?:"
     r"(?:provide|send|share|give)\s+"
     r"(?:(?:you|the\s+customer)\s+(?:with\s+)?)?"
     r"(?:an?\s+)?(?:(?:further|additional)\s+)?updates?|"
-    r"keep\s+(?:you|the\s+customer)\s+(?:updated|informed))\b",
+    r"keep\s+(?:you|the\s+customer)\s+(?:updated|informed)|"
+    r"update\s+(?:you|the\s+customer))\b",
     re.IGNORECASE,
 )
 _FUTURE_CONTACT_PROMISE_PATTERN = re.compile(
-    rf"\b(?:(?:we|i)\s+(?:will|shall)|(?:we|i)['’]ll|"
-    rf"{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall))\s+"
-    r"(?:be|get)\s+in\s+touch\b",
+    rf"\b{_CUSTOMER_CONTACT_MODAL_PATTERN}\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    r"(?:"
+    r"(?:be|get)\s+(?:back\s+)?in\s+touch|"
+    r"contact\s+(?:you|the\s+customer)|"
+    r"follow[\s\-‐‑‒–—]+up(?:\s+with\s+(?:you|the\s+customer)|(?!\s+with\b))|"
+    r"reach(?:\s+back)?\s+out(?:\s+to\s+(?:you|the\s+customer)|(?!\s+to\b))"
+    r")\b",
     re.IGNORECASE,
 )
 _FUTURE_RESPONSE_PROMISE_PATTERN = re.compile(
@@ -892,14 +906,64 @@ _FUTURE_RESPONSE_PROMISE_PATTERN = re.compile(
     rf"you\s+can\s+expect\s+(?:an?\s+)?(?:update|reply|response)\s+from\s+us|"
     rf"expect\s+to\s+hear\s+from\s+us(?:\s+shortly)?|"
     rf"you\s+will\s+hear\s+from\s+us(?:\s+shortly)?|"
-    rf"(?:(?:we|i)\s+(?:will|shall)|(?:we|i)['’]ll|{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall))\s+"
-    rf"(?:get\s+back\s+to\s+you|respond\s+(?:to\s+you\s+)?(?:with\s+)?(?:an?\s+)?update|"
+    rf"{_CUSTOMER_CONTACT_MODAL_PATTERN}\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"(?:get\s+back\s+to\s+you|respond(?:\s+to\s+(?:you|the\s+customer))?"
+    rf"(?:\s+with\s+(?:an?\s+)?update)?|"
     rf"circle\s+back|keep\s+you\s+posted|respond(?:\s+to\s+you)?\s+shortly|"
     rf"reply(?:\s+to\s+you)?(?:\s+shortly)?|drop\s+you\s+(?:a\s+)?note|"
     rf"be\s+back\s+in\s+touch|"
-    rf"let\s+you\s+know|(?:email|notify)\s+you|send\s+you\s+(?:an?\s+)?(?:email|message|update))"
+    rf"let\s+you\s+know|(?:email|message|notify)\s+you|"
+    rf"send\s+you\s+(?:an?\s+)?(?:email|message|update))"
     rf")\b",
     re.IGNORECASE,
+)
+_FUTURE_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
+    rf"\b(?:you['’]ll|(?:you|the\s+customer)\s+(?:will|shall))\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:"
+    r"be\s+(?:contacted|notified|updated|informed)|"
+    r"(?:receive|get)\s+(?:an?\s+)?(?:(?:further|additional)\s+)?"
+    r"(?:update|reply|response|email|message))\b",
+    re.IGNORECASE,
+)
+_GERMAN_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
+    r"\b(?:wir\s+werden|werden\s+wir)\s+(?:"
+    r"(?=[^.!?\n]{0,120}\bsie\b)(?:(?!\bnicht\b)[^.!?\n]){0,120}?\b"
+    r"(?:kontaktieren|informieren|benachrichtigen|auf\s+dem\s+laufenden\s+halten)|"
+    r"(?=[^.!?\n]{0,120}\bihnen\b)(?:(?!\bnicht\b)[^.!?\n]){0,120}?\bantworten|"
+    r"(?=[^.!?\n]{0,120}\bihnen\b)(?=[^.!?\n]{0,120}\b(?:update|aktualisierung)\b)"
+    r"(?:(?!\bnicht\b)[^.!?\n]){0,120}?\b(?:senden|schicken|geben))\b",
+    re.IGNORECASE,
+)
+_FRENCH_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
+    r"\bnous\s+vous\s+(?:contacterons|répondrons|informerons|notifierons|"
+    r"tiendrons\s+informé(?:e|es|s)?|enverrons\s+(?:une\s+)?mise\s+à\s+jour)\b",
+    re.IGNORECASE,
+)
+_SPANISH_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
+    r"(?<!no\s)\b(?:le\s+(?:contactaremos|responderemos|informaremos|notificaremos|"
+    r"mantendremos\s+informad[oa]|enviaremos\s+(?:una\s+)?actualización)|"
+    r"nos\s+pondremos\s+en\s+contacto\s+con\s+usted)\b",
+    re.IGNORECASE,
+)
+_ITALIAN_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
+    r"(?<!non\s)\b(?:(?:la|le)\s+(?:contatteremo|risponderemo|informeremo|"
+    r"notificheremo|terremo\s+aggiornat[oa]|invieremo\s+(?:un\s+)?aggiornamento)|"
+    r"ci\s+metteremo\s+in\s+contatto\s+con\s+lei)\b",
+    re.IGNORECASE,
+)
+_CUSTOMER_CONTACT_PROMISE_PATTERNS = (
+    _FUTURE_UPDATE_PROMISE_PATTERN,
+    _FUTURE_CONTACT_PROMISE_PATTERN,
+    _FUTURE_RESPONSE_PROMISE_PATTERN,
+    _FUTURE_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERN,
+    _GERMAN_CUSTOMER_CONTACT_PROMISE_PATTERN,
+    _FRENCH_CUSTOMER_CONTACT_PROMISE_PATTERN,
+    _SPANISH_CUSTOMER_CONTACT_PROMISE_PATTERN,
+    _ITALIAN_CUSTOMER_CONTACT_PROMISE_PATTERN,
+)
+_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERNS = frozenset(
+    {_FUTURE_PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERN}
 )
 _CONTROLLED_SUPPORT_ACTOR_FUTURE_ACTION_PATTERN = re.compile(
     rf"\b{_CONTROLLED_SUPPORT_ACTOR_PATTERN}\s+(?:will|shall)\s+"
@@ -1348,7 +1412,15 @@ _SAFE_NEGATIVE_EPISTEMIC_PREFIX_PATTERN = re.compile(
     r"\b(?:it\s+is|it['’]s|it\s+remains)\s+"
     r"(?:(?:still|currently)\s+)*unclear\s+whether|"
     r"\bthere\s+is\s+no\s+evidence(?:\s+to\s+(?:show|suggest|confirm))?"
-    r"(?:\s+that|\s*[:,])?"
+    r"(?:\s+that|\s*[:,])?|"
+    r"\b(?:wir|ich)\s+(?:können|kann)\s+nicht\s+"
+    r"(?:versprechen|garantieren|bestätigen)\s*,?\s*(?:dass|ob)|"
+    r"\b(?:nous\s+ne\s+pouvons|je\s+ne\s+peux)\s+pas\s+"
+    r"(?:promettre|garantir|confirmer)\s+(?:que|si)|"
+    r"\b(?:no\s+podemos|no\s+puedo)\s+"
+    r"(?:prometer|garantizar|confirmar)\s+(?:que|si)|"
+    r"\b(?:non\s+possiamo|non\s+posso)\s+"
+    r"(?:promettere|garantire|confermare)\s+(?:che|se)"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -1403,6 +1475,21 @@ _EXTERNAL_STATE_ATTRIBUTION_PATTERN = re.compile(
     r"opposing\s+counsel|outside\s+counsel|dhl|ups|fedex|dpd|gls|usps|"
     r"royal\s+mail|merchant|seller|vendor)|"
     r"automatically\s+(?:at|on|upon)\s+(?:expiry|expiration|checkout))\b",
+    re.IGNORECASE,
+)
+_EXTERNAL_CUSTOMER_CONTACT_ATTRIBUTION_PATTERN = re.compile(
+    r"^[^.!?\n]{0,100}\b(?:by|from)\s+(?:the\s+)?(?:customer|client|user|court|judge|carrier|"
+    r"shipping\s+(?:carrier|provider)|opposing\s+counsel|outside\s+counsel|"
+    r"dhl|ups|fedex|dpd|gls|usps|royal\s+mail|merchant|seller|vendor)\b",
+    re.IGNORECASE,
+)
+_EXTERNAL_CUSTOMER_CONTACT_TARGET_PATTERN = re.compile(
+    r"\b(?:(?:with|to)\s+(?:the\s+)?(?:carrier|vendor|court)|"
+    r"(?:on|about|regarding)\s+(?:the\s+)?(?:carrier|vendor|court)\b)\b",
+    re.IGNORECASE,
+)
+_CUSTOMER_CONTACT_TARGET_PATTERN = re.compile(
+    r"\b(?:with|to)\s+(?:you|the\s+customer|customer)\b",
     re.IGNORECASE,
 )
 _EXTERNAL_STATE_PASSIVE_PATTERNS = frozenset(
@@ -3725,6 +3812,32 @@ def _is_external_state_attribution(
     )
 
 
+def _is_external_customer_contact(
+    *,
+    pattern: re.Pattern[str],
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    """Keep explicit third-party contact facts outside first-party promises."""
+    immediate_tail = unit[match.end() : match.end() + 140]
+    if pattern in _PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERNS:
+        return _EXTERNAL_CUSTOMER_CONTACT_ATTRIBUTION_PATTERN.match(immediate_tail) is not None
+    if (
+        re.search(
+            r"\b(?:follow[\s\-‐‑‒–—]+up|respond|reply|reach(?:\s+back)?\s+out)\s*$",
+            match.group(0),
+            re.IGNORECASE,
+        )
+        is None
+    ):
+        return False
+    boundary = re.search(r"[,;:]|\b(?:and|but|then|while)\b", immediate_tail, re.IGNORECASE)
+    target_scope = immediate_tail[: boundary.start()] if boundary else immediate_tail
+    if _CUSTOMER_CONTACT_TARGET_PATTERN.search(f"{match.group(0)}{target_scope}"):
+        return False
+    return _EXTERNAL_CUSTOMER_CONTACT_TARGET_PATTERN.search(target_scope) is not None
+
+
 def _has_unsafe_dynamic_subject_claim(
     unit: str,
     *,
@@ -3896,18 +4009,24 @@ def _has_unsafe_claim(
                     return True
                 continue
             return True
-    # A definite promise to provide a later update is itself an unsupported
-    # customer-facing commitment while the underlying action awaits approval.
-    # Keep this distinct from ordinary conditional action grammar: phrases such
-    # as "once reviewed, a human agent will be able to provide updates" must not
-    # survive merely because the promised update has a future condition.
-    for match in _FUTURE_UPDATE_PROMISE_PATTERN.finditer(shadow):
-        if _is_scoped_negative_epistemic_claim(
-            prefix=shadow[: match.start()],
-            claim=match.group(0),
-        ):
-            continue
-        return True
+    # A definite promise of later customer contact is itself an unsupported
+    # commitment while the underlying action awaits approval. Keep this distinct
+    # from ordinary conditional action grammar: adding "after review" or "once
+    # approved" does not prove that a reply, update, or follow-up will occur.
+    for promise_pattern in _CUSTOMER_CONTACT_PROMISE_PATTERNS:
+        for match in promise_pattern.finditer(shadow):
+            if _is_scoped_negative_epistemic_claim(
+                prefix=shadow[: match.start()],
+                claim=match.group(0),
+            ):
+                continue
+            if _is_external_customer_contact(
+                pattern=promise_pattern,
+                unit=unit,
+                match=match,
+            ):
+                continue
+            return True
     for pattern in _FUTURE_CLAIM_PATTERNS:
         for match in pattern.finditer(shadow):
             prefix = shadow[max(0, match.start() - 180) : match.start()]
@@ -3918,6 +4037,12 @@ def _has_unsafe_claim(
             ):
                 continue
             if _has_scoped_future_contingency(prefix=prefix, suffix=suffix):
+                continue
+            if _is_external_customer_contact(
+                pattern=pattern,
+                unit=unit,
+                match=match,
+            ):
                 continue
             if _is_success_backed_action_claim(
                 pattern=pattern,

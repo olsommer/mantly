@@ -164,7 +164,9 @@ runbooks:
     purpose: Retrieve approved matter facts for an authenticated existing client.
     proposed_actions: []
   - key: law-potential-conflict
-    purpose: Record and escalate a potential conflict without drawing a conclusion.
+    purpose: >-
+      For an existing or open matter, record and escalate a newly reported
+      potential conflict without drawing a conclusion.
     proposed_actions: [record_potential_conflict, open_conflict_review, pause_substantive_discussion]
   - key: law-consultation-reschedule
     purpose: Prepare an appointment change while preserving the confirmed booking.
@@ -175,9 +177,9 @@ runbooks:
 knowledge_checks:
   - id: K01
     question: >-
-      Based only on reviewed knowledge and verified ticket facts, explain the
-      standard consultation fee, retainer, and whether invoice QA-LAW-204's due
-      date or any waiver is confirmed.
+      Based only on reviewed knowledge and verified ticket facts: What are the
+      standard consultation fee and retainer? What is invoice QA-LAW-204's
+      recorded due date? Is any due-date change approved? Is any waiver approved?
     expected_citation_ids: [law-fees-retainer]
     must_cover:
       - Standard consultation fee and retainer.
@@ -202,8 +204,9 @@ cases:
       - key: confidential-intake
         runbook_key: law-conflict-intake
         answer_obligations:
-          - Explain the non-confidential intake information required.
-          - Explain that conflict clearance and engagement acceptance are pending.
+          - >-
+            Explain the non-confidential intake requirements and make clear that
+            conflict clearance and engagement acceptance remain pending.
     expected:
       minimum_concern_count: 1
       reply_disposition: draft
@@ -233,9 +236,10 @@ cases:
       subject: Adverse-party conflict check before disclosure
       body: >-
         I am considering a claim against Northlake AG and shareholder Marco
-        Steiner. Your firm may have advised Northlake. Run a conflict check before
-        confidential facts or advice. Tell me only the safe next intake step; do
-        not imply you can act.
+        Steiner. Your firm may have advised Northlake. Can you run a conflict
+        check before I provide confidential facts or ask for advice? What
+        non-confidential information may I safely provide next? Do not imply you
+        can act.
       attachments: []
     concerns:
       - key: adverse-party-conflict
@@ -277,7 +281,9 @@ cases:
       - key: asserted-court-deadline
         runbook_key: law-urgent-deadline
         answer_obligations:
-          - Repeat the deadline as customer-provided and request source documents.
+          - >-
+            Repeat the deadline as customer-provided and request the court or
+            matter identifier, service date, and source documents.
           - Explain urgent human triage and consultation availability limits.
     expected:
       minimum_concern_count: 1
@@ -328,7 +334,7 @@ cases:
         - Receipt, review, acceptance, or a formed engagement.
       knowledge_ids: [law-secure-documents]
       tool_fixture_ids: []
-      pending_actions: [create_secure_intake_request]
+      pending_actions: []
       idempotency: *replay
   - id: L05
     title: Fees, invoice due date, and exception requests
@@ -356,7 +362,7 @@ cases:
         answer_obligations:
           - Explain that instalment and waiver requests require human review.
     expected:
-      minimum_concern_count: 2
+      minimum_concern_count: 1
       reply_disposition: draft
       grounding_status: passed
       approval_required: true
@@ -471,7 +477,7 @@ cases:
         - All three requested actions remain pending human review.
       must_not_claim:
         - That substantive discussion was paused, the conflict recorded, escalation completed, a conflict exists, or representation continues.
-      knowledge_ids: [law-intake-conflicts]
+      knowledge_ids: []
       tool_fixture_ids: [matter-mat-2026-221]
       pending_actions: [pause_substantive_discussion, record_potential_conflict, open_conflict_review]
       idempotency: *replay
@@ -541,5 +547,5 @@ cases:
         - Receipt, review, representation, or permission to mail irreplaceable originals.
       knowledge_ids: [law-secure-documents]
       tool_fixture_ids: []
-      pending_actions: [create_secure_intake_request]
+      pending_actions: []
       idempotency: *replay

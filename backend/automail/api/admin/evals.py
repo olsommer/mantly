@@ -59,6 +59,12 @@ async def judge_e2e_response(
         raise HTTPException(status_code=404, detail="Not found")
     expected_response = "\n".join(
         [
+            "The text below is a grading rubric, not content that the customer "
+            "response must repeat. Apply each item as a semantic constraint to "
+            "the actual response. A MUST NOT CLAIM item is violated only when the "
+            "response asserts the prohibited proposition as true. Mentioning it "
+            "to explicitly deny it, say it is unconfirmed, ask about it, or "
+            "attribute it to the customer does not violate the constraint.",
             "The response must satisfy every MUST COVER item, must not make any "
             "MUST NOT CLAIM statement, and must explicitly describe every MUST MARK "
             "UNVERIFIED item as unknown, pending, unavailable, or requiring approval. "

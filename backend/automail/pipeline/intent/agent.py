@@ -113,7 +113,7 @@ _DAMAGE_SAFETY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LABELED_BUSINESS_OBJECT_IDENTIFIER_PATTERN = re.compile(
-    r"\b(?P<label>account|booking|case|claim|contract|invoice|matter|order|policy|"
+    r"\b(?P<label>account|booking|case|claim|contract|endpoint|invoice|matter|order|policy|"
     r"quote|return|rma|shipment|subscription|ticket|tracking)"
     r"(?:\s+(?:id|no\.?|number|reference))?\s*(?:[:#]\s*)?"
     r"(?P<value>[A-Za-z0-9][A-Za-z0-9._/-]{1,63})\b",
@@ -124,10 +124,11 @@ _BUSINESS_OBJECT_IDENTIFIER_CANDIDATE_PATTERN = re.compile(
 )
 _SHARED_BUSINESS_OBJECT_PREFIX_PATTERN = re.compile(
     r"^\s*(?:about|for|re(?:garding)?|with\s+regard\s+to|"
-    r"account|booking|case|claim|contract|invoice|matter|order|policy|quote|"
+    r"account|booking|case|claim|contract|endpoint|invoice|matter|order|policy|quote|"
     r"return|rma|shipment|subscription|ticket|tracking)\b",
     re.IGNORECASE,
 )
+_ENDPOINT_ROUTE_CONTEXT_PATTERN = re.compile(r"\b(?:endpoint|webhooks?)\b", re.IGNORECASE)
 _BUSINESS_PARTY_LABEL_PATTERN = (
     r"prospective\s+client|opposing\s+party|adverse\s+party|counterparty|"
     r"parent(?:\s+company)?|affiliate|subsidiary|claimant|respondent|"
@@ -1068,7 +1069,18 @@ def _business_object_identifiers(value: str) -> list[tuple[str, str]]:
     def add(label: str, raw_value: str, *, labeled: bool) -> None:
         identifier = raw_value.strip(".,;:()[]{}<>")
         normalized = identifier.casefold()
-        if not identifier or normalized in seen or not any(character.isdigit() for character in identifier):
+        has_digit = any(character.isdigit() for character in identifier)
+        is_structured_endpoint = (
+            labeled
+            and label.casefold() == "endpoint"
+            and any(character.isalpha() for character in identifier)
+            and re.search(r"[-_./]", identifier) is not None
+        )
+        if (
+            not identifier
+            or normalized in seen
+            or not (has_digit or is_structured_endpoint)
+        ):
             return
         if not labeled and (
             not any(character.isalpha() for character in identifier)
@@ -1104,19 +1116,54 @@ def _shared_business_object_identifiers(
             for label, value in items
         ][:8]
 
+    route_has_endpoint_context = _ENDPOINT_ROUTE_CONTEXT_PATTERN.search(
+        f"{route.summary}\n{route.source_text}"
+    ) is not None
+
+    def context_is_scoped(items: list[tuple[str, str]]) -> bool:
+        return route_has_endpoint_context or all(
+            label != "endpoint" for label, _value in items
+        )
+
     routed = _business_object_identifiers(f"{route.summary}\n{route.source_text}")
-    if routed:
+    if routed and context_is_scoped(routed):
         return with_best_labels(routed)
 
     subject_identifiers = _business_object_identifiers(email.subject)
-    if len(subject_identifiers) == 1:
+    if len(subject_identifiers) == 1 and context_is_scoped(subject_identifiers):
         return with_best_labels(subject_identifiers)
 
     leading_context = re.split(r"[.;\n]", email.body, maxsplit=1)[0]
     leading_identifiers = _business_object_identifiers(leading_context)
     if (
+        route_has_endpoint_context
+        and len(leading_identifiers) == 2
+        and sum(label == "endpoint" for label, _value in leading_identifiers) == 1
+    ):
+        leading_identifiers = [
+            (
+                (
+                    "account"
+                    if label == "reference"
+                    and re.match(
+                        rf"^\s*for\s+{re.escape(identifier)}\s*,\s*(?:the\s+)?endpoint\b",
+                        leading_context,
+                        re.IGNORECASE,
+                    )
+                    else label
+                ),
+                identifier,
+            )
+            for label, identifier in leading_identifiers
+        ]
+    has_safe_leading_shape = len(leading_identifiers) == 1 or (
+        len(leading_identifiers) == 2
+        and sum(label == "endpoint" for label, _value in leading_identifiers) == 1
+    )
+    if (
         _SHARED_BUSINESS_OBJECT_PREFIX_PATTERN.match(leading_context)
-        and len(leading_identifiers) == 1
+        and has_safe_leading_shape
+        and context_is_scoped(leading_identifiers)
     ):
         return with_best_labels(leading_identifiers)
     return []
@@ -3027,10 +3074,10 @@ def _route_business_object_identifier(email: Email, route: ConcernRoute) -> str:
     """Return one unambiguous identifier available to an isolated concern."""
     routed_values = {
         value.casefold()
-        for _label, value in _business_object_identifiers(
+        for label, value in _business_object_identifiers(
             f"{route.summary}\n{route.source_text}"
         )
-        if value.strip()
+        if value.strip() and label != "endpoint"
     }
     if len(routed_values) == 1:
         return next(iter(routed_values))
@@ -3038,10 +3085,10 @@ def _route_business_object_identifier(email: Email, route: ConcernRoute) -> str:
         return ""
     message_values = {
         value.casefold()
-        for _label, value in _business_object_identifiers(
+        for label, value in _business_object_identifiers(
             f"{email.subject}\n{email.body}"
         )
-        if value.strip()
+        if value.strip() and label != "endpoint"
     }
     return next(iter(message_values)) if len(message_values) == 1 else ""
 
@@ -3056,11 +3103,14 @@ def _route_business_object_identity(
         extracted = {
             (label.casefold(), identifier.casefold())
             for label, identifier in _business_object_identifiers(value)
+            if label.casefold() != "endpoint"
         }
         # `_business_object_identifiers` deduplicates repeated textual values.
         # Preserve every explicit label here so account 123 and contract 123
         # remain distinct identities rather than collapsing by value alone.
         for match in _LABELED_BUSINESS_OBJECT_IDENTIFIER_PATTERN.finditer(value):
+            if match.group("label").casefold() == "endpoint":
+                continue
             identifier = match.group("value").strip(".,;:()[]{}<>")
             if identifier and any(character.isdigit() for character in identifier):
                 extracted.add((match.group("label").casefold(), identifier.casefold()))
@@ -3184,7 +3234,8 @@ def _apply_prompt_injection_pretext_precedence(
 
     subject = normalized(email.subject)
     tracking_suffix_pattern = (
-        r"\s*\[saas-support-\d{8}t\d{6}z-[a-z0-9]{6,12}-s10\]\s*$"
+        r"\s*\[saas-support-(?:\d{8}t\d{6}z-[a-z0-9]{6,12}|"
+        r"mvp-[a-f0-9]{7,40})-s10\]\s*$"
     )
 
     def without_tracking_suffix(value: str) -> str:

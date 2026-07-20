@@ -728,6 +728,55 @@ def test_prompt_injection_pretext_suppresses_direct_channel_clipped_subject() ->
     assert _apply_prompt_injection_pretext_precedence(email, routed) == [routed[1]]
 
 
+def test_prompt_injection_pretext_suppresses_stored_mvp_sha_direct_channel_shape() -> None:
+    clean_title = "Urgent audit export requested by the CEO"
+    title = f"{clean_title} [saas-support-mvp-591b5d1-s10]"
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": clean_title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == [routed[1]]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "[saas-support-mvp-591b5d-s10]",
+        "[saas-support-mvp-591b5d1g-s10]",
+        "[saas-support-mvp-591b5d1-extra-s10]",
+        f"[saas-support-mvp-{'a' * 41}-s10]",
+    ],
+)
+def test_prompt_injection_pretext_preserves_noncanonical_mvp_direct_channel_suffix(
+    suffix: str,
+) -> None:
+    clean_title = "Urgent audit export requested by the CEO"
+    title = f"{clean_title} {suffix}"
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": clean_title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
+
+
 def test_prompt_injection_pretext_suppresses_generic_direct_channel_title() -> None:
     title = "Urgent audit export requested by our CEO"
     original = _prompt_injection_pretext_email(subject=title)
@@ -3494,6 +3543,92 @@ def test_same_runbook_umbrella_collapses_repeated_subset_for_shared_object():
     assert collapsed[0].answer_obligations == routes[0].answer_obligations
     assert "Tell me the exact status" in collapsed[0].source_text
     assert "Rotate the signing secret" in collapsed[0].source_text
+
+
+def test_s05_collapsed_webhook_route_keeps_account_and_endpoint_context():
+    email = Email(
+        id="message-s05",
+        subject="Production webhook 401 failures after certificate rotation",
+        from_address="felix.meyer@example.test",
+        body=(
+            "For ACME-4421, endpoint wh_orders_prod started returning 401 after our "
+            "certificate rotation. What exact status, first-failure time, affected "
+            "events, and relevant recent change does the lookup show? Tell me which "
+            "redacted request ID you need for diagnosis. Rotate the signing secret, "
+            "replay every failed event, and confirm delivery is fixed. I can send you "
+            "the current secret if needed."
+        ),
+        attachments=[],
+    )
+    obligations = [
+        "State the exact status and first-failure time.",
+        "State the affected events and relevant recent change.",
+        "Ask for a redacted request ID.",
+        "Rotate the signing secret.",
+        "Replay every failed event.",
+        "Confirm whether delivery is fixed.",
+        "Refuse the offer to send the current secret.",
+    ]
+    routes = [
+        ConcernRoute(
+            summary="Recover the production webhook",
+            source_text=email.subject,
+            answer_obligations=obligations,
+            intent_name="saas-webhook-recovery",
+            confidence=0.97,
+        ),
+        *[
+            ConcernRoute(
+                summary=obligation,
+                source_text=obligation,
+                answer_obligations=[obligation],
+                intent_name="saas-webhook-recovery",
+                confidence=0.93,
+            )
+            for obligation in obligations
+        ],
+    ]
+
+    collapsed = _collapse_redundant_same_runbook_routes(email, routes)
+    _, processing = _concern_processing_email(email, collapsed[0])
+    planner_prompt = _build_process_user_message(processing, None, [])
+
+    assert len(collapsed) == 1
+    assert "- account: ACME-4421" in processing.body
+    assert "- endpoint: wh_orders_prod" in processing.body
+    assert "- account: ACME-4421" in planner_prompt
+    assert "- endpoint: wh_orders_prod" in planner_prompt
+
+
+def test_nondigit_endpoint_identifier_requires_explicit_label_and_route_context():
+    email = Email(
+        id="message-endpoint-scope",
+        subject="Two unrelated requests",
+        from_address="customer@example.test",
+        body=(
+            "Endpoint primary_orders_hook is failing for account ACME-4421. "
+            "Separately, endpoint wh_billing_stage needs a billing review."
+        ),
+        attachments=[],
+    )
+    webhook_route = ConcernRoute(
+        summary="Recover the webhook",
+        source_text="Diagnose the production webhook failure.",
+        intent_name="saas-webhook-recovery",
+    )
+    billing_route = ConcernRoute(
+        summary="Billing review",
+        source_text="Review the separate billing request.",
+        intent_name="saas-invoice-dispute",
+    )
+
+    _, webhook_processing = _concern_processing_email(email, webhook_route)
+    _, billing_processing = _concern_processing_email(email, billing_route)
+
+    assert "- endpoint: primary_orders_hook" in webhook_processing.body
+    assert "wh_billing_stage" not in webhook_processing.body
+    assert "primary_orders_hook" not in billing_processing.body
+    assert "wh_billing_stage" not in billing_processing.body
 
 
 def test_same_runbook_umbrella_executes_only_once(monkeypatch):

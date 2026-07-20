@@ -25,6 +25,7 @@ from e2e.live import (
     _pending_action_audit,
     _preflight_target_for_run,
     _replay_receipt_audit,
+    _semantic_response_judge,
     _target_validation_error,
     _wait_for_channel_test_job,
     _wait_for_issue,
@@ -1332,6 +1333,9 @@ def test_e2e_semantic_judge_is_gated_and_uses_response_rubric(monkeypatch) -> No
     assert result["passed"] is True
     assert result["score"] == 94
     expected_response = captured["expected"]["expected_response"]
+    assert "grading rubric, not content" in expected_response
+    assert "explicitly deny it" in expected_response
+    assert "does not violate the constraint" in expected_response
     assert "MUST COVER" in expected_response
     assert "MUST NOT CLAIM" in expected_response
     assert "MUST EXPLICITLY MARK UNVERIFIED" in expected_response
@@ -1344,3 +1348,134 @@ def test_e2e_semantic_judge_is_gated_and_uses_response_rubric(monkeypatch) -> No
         "intentName": "e2e-response-rubric",
         "actions": [],
     }
+
+
+class _FakeSemanticJudgeApi:
+    def __init__(self, results: list[dict]) -> None:
+        self.results = list(results)
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, path: str, body: dict) -> dict:
+        self.calls.append((path, body))
+        return self.results.pop(0)
+
+
+def _run_semantic_judge(results: list[dict]) -> tuple[dict, _FakeSemanticJudgeApi]:
+    api = _FakeSemanticJudgeApi(results)
+    result = _semantic_response_judge(
+        api,  # type: ignore[arg-type]
+        parse_target("lawyer=project123:channel456"),
+        response_text="A synthetic response.",
+        must_cover=["The required synthetic fact."],
+        must_not_claim=["A prohibited synthetic claim."],
+    )
+    return result, api
+
+
+def test_live_semantic_judge_initial_pass_uses_one_attempt() -> None:
+    original_reasoning = "The response covers the synthetic requirement."
+
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": True,
+                "score": 94,
+                "threshold": 93,
+                "reasoning": original_reasoning,
+            }
+        ]
+    )
+
+    assert len(api.calls) == 1
+    assert result["passed"] is True
+    assert result["score"] == 94
+    assert result["threshold"] == 93
+    assert result["reasoning"] == original_reasoning
+    assert result["attemptCount"] == 1
+    assert result["passedAttemptCount"] == 1
+    assert result["attempts"] == [
+        {
+            "attempt": 1,
+            "passed": True,
+            "score": 94,
+            "threshold": 93,
+            "reasoning": original_reasoning,
+        }
+    ]
+
+
+def test_live_semantic_judge_initial_failure_two_followup_passes_uses_majority() -> None:
+    long_failure_reasoning = "missed " + ("detail " * 200)
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 88,
+                "threshold": 90,
+                "reasoning": long_failure_reasoning,
+            },
+            {"passed": True, "score": 96, "threshold": 95, "reasoning": "strong"},
+            {"passed": True, "score": 94, "threshold": 92, "reasoning": "complete"},
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is True
+    assert result["score"] == 94
+    assert result["threshold"] == 92
+    assert result["reasoning"] == "complete"
+    assert result["passedAttemptCount"] == 2
+    assert [attempt["passed"] for attempt in result["attempts"]] == [False, True, True]
+    assert len(result["attempts"][0]["reasoning"]) == 800
+    assert result["attempts"][0]["reasoning"].endswith("…")
+
+
+def test_live_semantic_judge_one_followup_pass_cannot_mask_two_failures() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {"passed": False, "score": 89, "threshold": 90, "reasoning": "incomplete"},
+            {"passed": True, "score": 98, "threshold": 90, "reasoning": "lucky pass"},
+            {"passed": False, "score": 87, "threshold": 90, "reasoning": "omission"},
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is False
+    assert result["score"] == 87
+    assert result["threshold"] == 90
+    assert result["reasoning"] == "omission"
+    assert result["passedAttemptCount"] == 1
+    assert [attempt["score"] for attempt in result["attempts"]] == [89, 98, 87]
+
+
+def test_live_semantic_judge_majority_pass_uses_coherent_pass_representative() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {"passed": False, "score": 99, "threshold": 101, "reasoning": "failure"},
+            {"passed": True, "score": 90, "threshold": 90, "reasoning": "pass low"},
+            {"passed": True, "score": 100, "threshold": 100, "reasoning": "pass high"},
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is True
+    assert result["score"] == 90
+    assert result["threshold"] == 90
+    assert result["reasoning"] == "pass low"
+    assert result["score"] >= result["threshold"]
+
+
+def test_live_semantic_judge_majority_fail_uses_coherent_failure_representative() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {"passed": False, "score": 89, "threshold": 90, "reasoning": "failure low"},
+            {"passed": True, "score": 95, "threshold": 90, "reasoning": "pass"},
+            {"passed": False, "score": 96, "threshold": 100, "reasoning": "failure high"},
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is False
+    assert result["score"] == 89
+    assert result["threshold"] == 90
+    assert result["reasoning"] == "failure low"

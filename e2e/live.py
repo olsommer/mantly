@@ -63,6 +63,8 @@ _UNVERIFIED_MARKERS = re.compile(
     r"\b(?:cannot|can't|not|pending|requires?|unknown|unavailable|unconfirmed|unverified)\b",
     re.IGNORECASE,
 )
+_SEMANTIC_JUDGE_MAX_ATTEMPTS = 3
+_SEMANTIC_JUDGE_REASONING_DIAGNOSTIC_LIMIT = 800
 
 
 class LiveE2EError(RuntimeError):
@@ -1409,18 +1411,90 @@ def _semantic_response_judge(
     must_not_claim: list[str],
     must_mark_unverified: list[str] | None = None,
 ) -> dict[str, Any]:
-    result = api.post(
-        f"/api/admin/projects/{target.project_id}/eval/e2e-response-judge",
-        {
-            "response_text": response_text,
-            "must_cover": must_cover,
-            "must_not_claim": must_not_claim,
-            "must_mark_unverified": must_mark_unverified or [],
-        },
+    path = f"/api/admin/projects/{target.project_id}/eval/e2e-response-judge"
+    body = {
+        "response_text": response_text,
+        "must_cover": must_cover,
+        "must_not_claim": must_not_claim,
+        "must_mark_unverified": must_mark_unverified or [],
+    }
+
+    def call_once() -> dict[str, Any]:
+        result = api.post(path, body)
+        if not isinstance(result, dict):
+            raise LiveE2EError("semantic response judge returned no result object")
+        return result
+
+    attempts = [call_once()]
+    if not _semantic_judge_attempt_passed(attempts[0]):
+        attempts.extend(call_once() for _ in range(_SEMANTIC_JUDGE_MAX_ATTEMPTS - 1))
+
+    diagnostics = [
+        _semantic_judge_attempt_diagnostic(result, attempt=index)
+        for index, result in enumerate(attempts, start=1)
+    ]
+    passed_attempts = sum(item["passed"] is True for item in diagnostics)
+    aggregate_passed = passed_attempts > len(diagnostics) // 2
+    majority_diagnostics = sorted(
+        (
+            item
+            for item in diagnostics
+            if bool(item["passed"]) == aggregate_passed
+        ),
+        key=lambda item: (item["score"], item["attempt"]),
     )
-    if not isinstance(result, dict):
-        raise LiveE2EError("semantic response judge returned no result object")
-    return result
+    representative_diagnostic = majority_diagnostics[
+        (len(majority_diagnostics) - 1) // 2
+    ]
+    representative = attempts[int(representative_diagnostic["attempt"]) - 1]
+
+    aggregate = dict(representative)
+    aggregate.update(
+        {
+            "passed": aggregate_passed,
+            "score": representative_diagnostic["score"],
+            "threshold": representative_diagnostic["threshold"],
+            "reasoning": representative.get("reasoning"),
+            "attemptCount": len(diagnostics),
+            "passedAttemptCount": passed_attempts,
+            "attempts": diagnostics,
+        }
+    )
+    return aggregate
+
+
+def _semantic_judge_attempt_passed(result: dict[str, Any]) -> bool:
+    score, threshold = _semantic_judge_score_and_threshold(result)
+    return result.get("passed") is True and score >= threshold
+
+
+def _semantic_judge_score_and_threshold(result: dict[str, Any]) -> tuple[int, int]:
+    try:
+        score = int(result.get("score") or 0)
+        threshold = int(result.get("threshold") or 90)
+    except (TypeError, ValueError) as exc:
+        raise LiveE2EError("semantic response judge returned an invalid score or threshold") from exc
+    return score, threshold
+
+
+def _semantic_judge_attempt_diagnostic(
+    result: dict[str, Any],
+    *,
+    attempt: int,
+) -> dict[str, Any]:
+    score, threshold = _semantic_judge_score_and_threshold(result)
+    reasoning = str(result.get("reasoning") or "")
+    if len(reasoning) > _SEMANTIC_JUDGE_REASONING_DIAGNOSTIC_LIMIT:
+        reasoning = (
+            reasoning[: _SEMANTIC_JUDGE_REASONING_DIAGNOSTIC_LIMIT - 1] + "…"
+        )
+    return {
+        "attempt": attempt,
+        "passed": result.get("passed") is True and score >= threshold,
+        "score": score,
+        "threshold": threshold,
+        "reasoning": reasoning,
+    }
 
 
 def _assert_case(

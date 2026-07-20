@@ -1452,12 +1452,43 @@ def _semantic_response_judge(
         _semantic_judge_attempt_diagnostic(result, attempt=index)
         for index, result in enumerate(attempts, start=1)
     ]
-    passed_attempts = sum(item["passed"] is True for item in diagnostics)
-    aggregate_passed = passed_attempts > len(diagnostics) // 2
+    invalid_protocol_attempts = {
+        index
+        for index, result in enumerate(attempts, start=1)
+        if _semantic_judge_attempt_is_invalid_protocol(result)
+    }
+    for diagnostic in diagnostics:
+        if diagnostic["attempt"] in invalid_protocol_attempts:
+            diagnostic["invalidProtocol"] = True
+    valid_diagnostics = [
+        item
+        for item in diagnostics
+        if item["attempt"] not in invalid_protocol_attempts
+    ]
+    passed_attempts = sum(item["passed"] is True for item in valid_diagnostics)
+    if not valid_diagnostics:
+        return {
+            "passed": False,
+            "score": 0,
+            "threshold": 90,
+            "reasoning": (
+                "Semantic evaluation was skipped because every judge attempt "
+                "incorrectly required the customer response to reproduce the "
+                "internal grading rubric."
+            ),
+            "evaluationStatus": "skipped",
+            "skipReason": "all_attempts_invalid_protocol",
+            "attemptCount": len(diagnostics),
+            "validAttemptCount": 0,
+            "invalidProtocolAttemptCount": len(invalid_protocol_attempts),
+            "passedAttemptCount": 0,
+            "attempts": diagnostics,
+        }
+    aggregate_passed = passed_attempts > len(valid_diagnostics) // 2
     majority_diagnostics = sorted(
         (
             item
-            for item in diagnostics
+            for item in valid_diagnostics
             if bool(item["passed"]) == aggregate_passed
         ),
         key=lambda item: (item["score"], item["attempt"]),
@@ -1475,6 +1506,8 @@ def _semantic_response_judge(
             "threshold": representative_diagnostic["threshold"],
             "reasoning": representative.get("reasoning"),
             "attemptCount": len(diagnostics),
+            "validAttemptCount": len(valid_diagnostics),
+            "invalidProtocolAttemptCount": len(invalid_protocol_attempts),
             "passedAttemptCount": passed_attempts,
             "attempts": diagnostics,
         }
@@ -1485,6 +1518,28 @@ def _semantic_response_judge(
 def _semantic_judge_attempt_passed(result: dict[str, Any]) -> bool:
     score, threshold = _semantic_judge_score_and_threshold(result)
     return result.get("passed") is True and score >= threshold
+
+
+def _semantic_judge_attempt_is_invalid_protocol(result: dict[str, Any]) -> bool:
+    """Reject only judge votes that demand copying the private grading rubric."""
+
+    if _semantic_judge_attempt_passed(result):
+        return False
+    reasoning = " ".join(str(result.get("reasoning") or "").casefold().split())
+    if not re.search(
+        r"\bthe expected response (?:is|was) (?:a )?(?:detailed )?grading rubric\b",
+        reasoning,
+    ):
+        return False
+    return any(
+        marker in reasoning
+        for marker in (
+            "failed to produce the expected rubric",
+            "failed to reproduce the expected rubric",
+            "does not convey the expected rubric",
+            "does not reproduce the expected rubric",
+        )
+    )
 
 
 def _semantic_judge_score_and_threshold(result: dict[str, Any]) -> tuple[int, int]:

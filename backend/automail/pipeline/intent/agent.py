@@ -3303,6 +3303,61 @@ def _apply_prompt_injection_pretext_precedence(
         source = normalized(route.source_text)
         if not source:
             return False
+
+        # The router may lossily abbreviate a direct-channel excerpt with
+        # literal ellipses. Accept that shape only when it starts with the
+        # exact canonical transport title and every literal-ellipsis fragment
+        # is a contiguous span, in order, in the complete hostile route.
+        # Independent subject/body concerns have already returned above.
+        canonical_direct_title = direct_channel_title_without_tracking_suffix
+        if direct_channel_title and canonical_direct_title:
+            abridged_match = re.fullmatch(
+                rf"{re.escape(canonical_direct_title)}\s*(?:\.{{3}}|…)\s*"
+                r"(?P<remainder>.+)",
+                source,
+                flags=re.IGNORECASE,
+            )
+            if abridged_match is not None:
+                abridged_remainder = normalized(
+                    abridged_match.group("remainder") or ""
+                )
+                abridged_fragments = [
+                    re.findall(r"[a-z0-9]+", item.casefold())
+                    for item in re.split(r"(?:\.{3}|…)", abridged_remainder)
+                    if item.strip()
+                ]
+                prompt_tokens = re.findall(r"[a-z0-9]+", prompt_source.casefold())
+                prompt_cursor = 0
+                ordered_contiguous_fragments = True
+                for fragment_tokens in abridged_fragments:
+                    fragment_length = len(fragment_tokens)
+                    fragment_start = next(
+                        (
+                            index
+                            for index in range(
+                                prompt_cursor,
+                                len(prompt_tokens) - fragment_length + 1,
+                            )
+                            if prompt_tokens[index : index + fragment_length]
+                            == fragment_tokens
+                        ),
+                        None,
+                    )
+                    if fragment_start is None:
+                        ordered_contiguous_fragments = False
+                        break
+                    prompt_cursor = fragment_start + fragment_length
+                if (
+                    sum(len(fragment) for fragment in abridged_fragments) >= 5
+                    and all(abridged_fragments)
+                    and ordered_contiguous_fragments
+                    and _PROTECTED_DATA_EXFILTRATION_PATTERN.search(
+                        abridged_remainder
+                    )
+                    is not None
+                ):
+                    return True
+
         remainder = source
         subject_variants = tuple(
             dict.fromkeys(

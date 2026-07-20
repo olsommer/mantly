@@ -1535,6 +1535,145 @@ def test_live_semantic_judge_one_followup_pass_cannot_mask_two_failures() -> Non
     assert [attempt["score"] for attempt in result["attempts"]] == [89, 98, 87]
 
 
+def test_live_semantic_judge_excludes_exact_live_rubric_protocol_errors() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was a detailed grading rubric. The actual "
+                    "response was a shipment status update. These are completely "
+                    "different types of content with no semantic alignment. The "
+                    "pipeline failed to produce the expected rubric text."
+                ),
+            },
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response is a grading rubric, which is a "
+                    "meta-instruction for evaluating a response. The actual response "
+                    "is a customer-facing message about an order status. These are "
+                    "semantically entirely different; the actual response does not "
+                    "convey the expected rubric."
+                ),
+            },
+            {
+                "passed": True,
+                "score": 95,
+                "threshold": 90,
+                "reasoning": "The customer response correctly applies the rubric.",
+            },
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is True
+    assert result["score"] == 95
+    assert result["reasoning"] == "The customer response correctly applies the rubric."
+    assert result["validAttemptCount"] == 1
+    assert result["invalidProtocolAttemptCount"] == 2
+    assert result["passedAttemptCount"] == 1
+    assert [item.get("invalidProtocol", False) for item in result["attempts"]] == [
+        True,
+        True,
+        False,
+    ]
+
+
+def test_live_semantic_judge_preserves_genuine_rubric_failures() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 70,
+                "threshold": 90,
+                "reasoning": (
+                    "The grading rubric says the refund date must remain unverified, "
+                    "but the response does not convey the expected rubric requirement "
+                    "and instead guarantees it."
+                ),
+            },
+            {"passed": True, "score": 95, "threshold": 90, "reasoning": "pass"},
+            {
+                "passed": False,
+                "score": 75,
+                "threshold": 90,
+                "reasoning": (
+                    "Under the grading rubric, the actual answer failed to reproduce "
+                    "the expected rubric's required current shipment status and ETA."
+                ),
+            },
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is False
+    assert result["validAttemptCount"] == 3
+    assert result["invalidProtocolAttemptCount"] == 0
+    assert result["passedAttemptCount"] == 1
+    assert all("invalidProtocol" not in item for item in result["attempts"])
+
+
+def test_live_semantic_judge_uses_majority_of_mixed_valid_attempts() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was a grading rubric. The pipeline failed "
+                    "to reproduce the expected rubric."
+                ),
+            },
+            {"passed": True, "score": 96, "threshold": 90, "reasoning": "pass one"},
+            {"passed": True, "score": 94, "threshold": 90, "reasoning": "pass two"},
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is True
+    assert result["score"] == 94
+    assert result["reasoning"] == "pass two"
+    assert result["validAttemptCount"] == 2
+    assert result["invalidProtocolAttemptCount"] == 1
+    assert result["passedAttemptCount"] == 2
+
+
+def test_live_semantic_judge_all_invalid_attempts_are_skipped_failure() -> None:
+    invalid_reasons = [
+        "The expected response was a grading rubric; the pipeline failed to produce the expected rubric.",
+        "The expected response was a detailed grading rubric, but the response does not convey the expected rubric.",
+        "The expected response is a grading rubric and the response does not reproduce the expected rubric.",
+    ]
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": reasoning,
+            }
+            for reasoning in invalid_reasons
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is False
+    assert result["score"] == 0
+    assert result["threshold"] == 90
+    assert result["evaluationStatus"] == "skipped"
+    assert result["skipReason"] == "all_attempts_invalid_protocol"
+    assert result["validAttemptCount"] == 0
+    assert result["invalidProtocolAttemptCount"] == 3
+    assert result["passedAttemptCount"] == 0
+    assert all(item["invalidProtocol"] is True for item in result["attempts"])
+
+
 def test_live_semantic_judge_majority_pass_uses_coherent_pass_representative() -> None:
     result, api = _run_semantic_judge(
         [

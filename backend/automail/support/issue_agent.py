@@ -91,6 +91,9 @@ _ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset(
         "pending_or_unavailable",
     }
 )
+_GROUNDING_INCONSISTENT_VERDICT_ERROR = (
+    "Evaluator verdict contradicts exhaustive grounded assessments"
+)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _SYSTEM_SAFETY_PROMPT = lithium_battery_safety_system_prompt()
@@ -461,7 +464,7 @@ def _grounding_retryable_protocol_errors(
         and all_obligations_addressed
         and not any(_string_from(value) for value in structured.contradictions)
     ):
-        errors.append("Evaluator verdict contradicts exhaustive grounded assessments")
+        errors.append(_GROUNDING_INCONSISTENT_VERDICT_ERROR)
     return tuple(dict.fromkeys(errors))
 
 
@@ -7205,7 +7208,10 @@ def assess_issue_automation_grounding(
                 record_usage_from_result(response, usage_context)
             return response
 
+        protocol_correction_attempted = False
+
         def invoke_agent() -> dict[str, Any]:
+            nonlocal protocol_correction_attempted
             response: dict[str, Any] = {}
             active_prompt = prompt
             for attempt in range(GROUNDING_MODEL_CALL_LIMIT):
@@ -7218,6 +7224,7 @@ def assess_issue_automation_grounding(
                     allowed_evidence_ids=frozenset(allowed_evidence_ids),
                 )
                 if retryable_errors and attempt + 1 < GROUNDING_MODEL_CALL_LIMIT:
+                    protocol_correction_attempted = True
                     logger.warning(
                         "Grounding evaluator returned malformed protocol output; retrying once: %s",
                         "; ".join(retryable_errors),
@@ -7704,8 +7711,48 @@ def assess_issue_automation_grounding(
             and not contradictions
             and not clean_uncovered_obligations
         )
+        clean_components_are_exhaustively_grounded = bool(
+            len(clean_unit_assessments) == len(expected_units)
+            and all(
+                assessment.get("supported") is True
+                and bool(assessment.get("evidenceIds"))
+                for assessment in clean_unit_assessments
+            )
+            and len(clean_obligation_assessments) == len(expected_obligations)
+            and all(
+                assessment.get("covered") is True
+                for assessment in clean_obligation_assessments
+            )
+            and not clean_unsupported
+            and not contradictions
+            and not clean_uncovered_obligations
+        )
+        final_retryable_protocol_errors = _grounding_retryable_protocol_errors(
+            structured,
+            expected_unit_ids=expected_unit_ids_for_retry,
+            expected_obligation_ids=expected_obligation_ids_for_retry,
+            allowed_evidence_ids=frozenset(allowed_evidence_ids),
+        )
+        stale_inconsistent_verdict_override = bool(
+            protocol_correction_attempted
+            and structured.verdict == "not_grounded"
+            and final_retryable_protocol_errors
+            == (_GROUNDING_INCONSISTENT_VERDICT_ERROR,)
+            and clean_components_are_exhaustively_grounded
+        )
+        if stale_inconsistent_verdict_override:
+            logger.warning(
+                "Grounding evaluator retained an internally inconsistent not_grounded "
+                "verdict after protocol correction; accepting exhaustive validated "
+                "components for issue %s",
+                _string_from(issue.get("id")),
+            )
+        deterministic_grounding_override = bool(
+            deterministic_obligation_override
+            or stale_inconsistent_verdict_override
+        )
         if (
-            (structured.verdict != "grounded" and not deterministic_obligation_override)
+            (structured.verdict != "grounded" and not deterministic_grounding_override)
             or clean_unsupported
             or contradictions
             or clean_uncovered_obligations

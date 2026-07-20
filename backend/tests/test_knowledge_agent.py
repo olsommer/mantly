@@ -4237,7 +4237,7 @@ def _assess_with_grounding_outputs(
 
 
 @pytest.mark.parametrize("second_attempt_grounded", [True, False])
-def test_grounding_retries_internally_inconsistent_not_grounded_verdict(
+def test_grounding_retries_then_accepts_exhaustive_validated_components(
     monkeypatch: pytest.MonkeyPatch,
     second_attempt_grounded: bool,
 ) -> None:
@@ -4285,12 +4285,52 @@ def test_grounding_retries_internally_inconsistent_not_grounded_verdict(
     assert prompts[0] != prompts[1]
     assert "## Required Protocol Correction" in prompts[1]
     assert "verdict contradicts exhaustive grounded assessments" in prompts[1]
-    assert result.verified is second_attempt_grounded
-    if second_attempt_grounded:
-        assert result.status == "passed"
-    else:
-        assert result.status == "failed"
-        assert result.reason_code == "ungrounded_answer"
+    assert result.verified is True
+    assert result.status == "passed"
+
+
+def test_grounding_keeps_supported_but_uncovered_not_grounded_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="delivery",
+        questions=[("delivery:status", "What is the current delivery status?")],
+    )
+    answer = "Thank you for contacting us."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    not_covered = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=["ticket"],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id="delivery:status",
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=["ticket"],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[not_covered],
+    )
+
+    assert len(prompts) == 1
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == ("What is the current delivery status?",)
 
 
 def test_grounding_does_not_retry_genuine_unsupported_not_grounded_verdict(

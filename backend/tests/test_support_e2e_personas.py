@@ -17,7 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from e2e.live import (
+    AssertionRecorder,
     LiveE2EError,
+    _assert_case,
     _business_state_fingerprint,
     _fixture_tool_audit,
     _issue_fingerprint,
@@ -799,7 +801,7 @@ def test_live_runner_rejects_async_channel_test_without_run_id() -> None:
         )
 
 
-def test_live_runner_fails_fast_when_terminal_processing_has_no_expected_draft(
+def test_live_runner_returns_terminal_issue_with_no_expected_draft_for_assertions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = parse_target("fulfillment=project123:channel456")
@@ -835,16 +837,16 @@ def test_live_runner_fails_fast_when_terminal_processing_has_no_expected_draft(
     api = FakeApi()
     monkeypatch.setattr("e2e.live.time.sleep", lambda _seconds: None)
 
-    with pytest.raises(LiveE2EError, match="completed processing with 0 drafts"):
-        _wait_for_issue(
-            api,  # type: ignore[arg-type]
-            target,
-            "issue-no-draft",
-            expected_drafts=1,
-            timeout_seconds=60,
-            poll_seconds=0,
-        )
+    result = _wait_for_issue(
+        api,  # type: ignore[arg-type]
+        target,
+        "issue-no-draft",
+        expected_drafts=1,
+        timeout_seconds=60,
+        poll_seconds=0,
+    )
 
+    assert result is issue
     assert api.calls == 2
 
 
@@ -1402,6 +1404,91 @@ def test_live_semantic_judge_initial_pass_uses_one_attempt() -> None:
             "reasoning": original_reasoning,
         }
     ]
+
+
+def test_live_semantic_judge_empty_response_fails_locally_without_request() -> None:
+    api = _FakeSemanticJudgeApi([])
+
+    result = _semantic_response_judge(
+        api,  # type: ignore[arg-type]
+        parse_target("lawyer=project123:channel456"),
+        response_text=" \n\t",
+        must_cover=["The required synthetic fact."],
+        must_not_claim=["A prohibited synthetic claim."],
+    )
+
+    assert api.calls == []
+    assert result == {
+        "passed": False,
+        "score": 0,
+        "threshold": 90,
+        "reasoning": (
+            "Semantic evaluation was skipped because the runtime produced no "
+            "non-empty response text. Inspect the draft-count and grounding "
+            "assertions for the upstream withholding reason."
+        ),
+        "evaluationStatus": "skipped",
+        "skipReason": "empty_response_text",
+        "responseTextPresent": False,
+        "attemptCount": 0,
+        "passedAttemptCount": 0,
+        "attempts": [],
+    }
+
+
+def test_live_case_without_draft_preserves_deterministic_assertions() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "saas-support"
+    )
+    case = next(item for item in persona.cases if item.id == "S09")
+    target = parse_target("saas-support=project123:channel456")
+    issue = {
+        "id": "issue-no-draft",
+        "aiRuns": [
+            {
+                "id": "run-1",
+                "status": "needs_human",
+                "metadata": {
+                    "processingProgress": {
+                        "status": "completed",
+                        "stage": "completed",
+                        "stages": [
+                            {"key": key, "status": "completed"}
+                            for key in REQUIRED_PROCESSING_STAGES
+                        ],
+                    }
+                },
+            }
+        ],
+        "outboundMessages": [],
+    }
+
+    class NoPostApi:
+        def post(self, _path: str, _body: dict) -> dict:
+            raise AssertionError("empty drafts must not reach the semantic judge API")
+
+    recorder = AssertionRecorder()
+    observed = _assert_case(
+        recorder,
+        NoPostApi(),  # type: ignore[arg-type]
+        target,
+        persona,
+        case,
+        issue,
+        {},
+    )
+    assertions = {item["name"]: item for item in recorder.assertions}
+
+    assert assertions["exactly_one_combined_draft"]["passed"] is False
+    assert assertions["grounding_passed"]["passed"] is False
+    assert assertions["answer_obligations_covered"]["passed"] is False
+    assert assertions["semantic_persona_reply_rubric"] == {
+        "name": "semantic_persona_reply_rubric",
+        "passed": False,
+        "evidence": observed["semanticJudge"],
+    }
+    assert observed["semanticJudge"]["skipReason"] == "empty_response_text"
+    assert observed["semanticJudge"]["attemptCount"] == 0
 
 
 def test_live_semantic_judge_initial_failure_two_followup_passes_uses_majority() -> None:

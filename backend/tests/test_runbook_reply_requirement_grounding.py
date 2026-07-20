@@ -35,6 +35,8 @@ def _ground_with_output(
     issue: dict[str, Any],
     answer: str,
     resolutions: list[tuple[str, str, list[str], list[str]]],
+    articles: list[dict[str, Any]] | None = None,
+    verdict: str = "grounded",
 ) -> issue_agent.AutomationGroundingAssessment:
     answer_units = issue_agent._grounding_answer_units(answer)
     evidence_by_unit: dict[str, list[str]] = {}
@@ -42,7 +44,7 @@ def _ground_with_output(
         for unit_id in answer_unit_ids:
             evidence_by_unit.setdefault(unit_id, []).extend(evidence_ids)
     output = AutomationGroundingOutput(
-        verdict="grounded",
+        verdict=verdict,  # type: ignore[arg-type]
         answer_sha256=issue_agent.grounding_text_sha256(answer),
         unit_assessments=[
             AutomationGroundingUnitAssessment(
@@ -96,9 +98,401 @@ def _ground_with_output(
         issue=issue,
         messages=[{"direction": "customer", "body": "Please help with this request."}],
         answer=answer,
-        articles=[],
+        articles=articles or [],
         tenant_id="tenant-1",
         project_id="project-1",
+    )
+
+
+def _audit_reporting_tool_evidence(
+    *,
+    audit_api: str = "true",
+    scheduled_audit_email: str = "false",
+) -> dict[str, Any]:
+    return {
+        "name": "fixture_saas_entitlements_acme",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {
+                "path": "fixture_evidence.result.0",
+                "value": f"audit_api: {audit_api}",
+            },
+            {
+                "path": "fixture_evidence.result.1",
+                "value": f"scheduled_audit_email: {scheduled_audit_email}",
+            },
+        ],
+    }
+
+
+def _audit_reporting_issue(
+    *,
+    concern_id: str = "audit-reporting",
+    tool_evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return _issue(
+        {
+            "concernId": concern_id,
+            "matched": True,
+            "intentName": "saas-audit-reporting",
+            "requiredGuidance": [
+                "State reviewed current audit workarounds and unavailable "
+                "scheduled-email capability explicitly."
+            ],
+            "outcome": {
+                "toolEvidence": tool_evidence or [_audit_reporting_tool_evidence()],
+            },
+        }
+    )
+
+
+def _audit_reporting_article() -> dict[str, Any]:
+    return {
+        "id": "saas-audit-reporting-policy",
+        "title": "Audit reporting capabilities",
+        "body": (
+            "Audit events can be exported through the API or as CSV. Scheduled "
+            "email delivery of audit reports is not currently available."
+        ),
+        "tags": ["audit", "reporting"],
+        "status": "published",
+        "reviewStatus": "reviewed",
+        "freshnessStatus": "fresh",
+        "needsReview": False,
+        "automationAllowed": True,
+        "public": True,
+        "visibility": "public",
+    }
+
+
+def _audit_reporting_override_inputs(
+    issue: dict[str, Any],
+    answer: str,
+) -> tuple[
+    dict[str, Any],
+    tuple[str, ...],
+    dict[str, dict[str, Any]],
+    dict[str, frozenset[str]],
+]:
+    ticket = issue_agent._automatic_ticket_context(issue)
+    units = issue_agent._grounding_answer_units(answer)
+    expected_units = {unit["id"]: unit for unit in units}
+    tool_id = "tool:audit-reporting:fixture_saas_entitlements_acme"
+    evidence = {
+        unit_id: frozenset({tool_id, "saas-audit-reporting-policy"})
+        for unit_id in expected_units
+    }
+    return ticket, tuple(expected_units), expected_units, evidence
+
+
+def test_s09_supported_audit_capability_conjunction_overrides_semantic_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "audit-reporting"
+    issue = _audit_reporting_issue(concern_id=concern_id)
+    answer = (
+        "Scheduled daily email reporting for admin audit events is not currently "
+        "available. As a workaround, you can export current audit events via API "
+        "or CSV."
+    )
+    units = issue_agent._grounding_answer_units(answer)
+    tool_id = f"tool:{concern_id}:fixture_saas_entitlements_acme"
+    article_id = "saas-audit-reporting-policy"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                f"{concern_id}:required-guidance-1",
+                "not_covered",
+                [unit["id"] for unit in units],
+                [tool_id, article_id],
+            )
+        ],
+        articles=[_audit_reporting_article()],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": f"{concern_id}:required-guidance-1",
+            "resolution": "answered",
+            "covered": True,
+            "answerUnitIds": [unit["id"] for unit in units],
+            "evidenceIds": [tool_id, article_id],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Scheduled daily email reporting for audit events is not currently available.",
+        "As a workaround, you can export current audit events via API or CSV.",
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. As a workaround, you can export current audit events via API."
+        ),
+        (
+            'The customer says "scheduled daily email reporting for audit events is '
+            'not currently available." As a workaround, you can export current audit '
+            "events via API or CSV."
+        ),
+        (
+            "It is not true that scheduled daily email reporting for audit events is "
+            "unavailable. As a workaround, you can export current audit events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. API and CSV audit exports are not available as a workaround."
+        ),
+        (
+            "'Scheduled daily email reporting for audit events is not currently "
+            "available.' As a workaround, you can export current audit events via "
+            "API or CSV."
+        ),
+        (
+            "The policy states scheduled daily email reporting for audit events is "
+            "not currently available. As a workaround, you can export current audit "
+            "events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available, but that statement is false. As a workaround, you can export "
+            "current audit events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available, although it is currently available. As a workaround, you can "
+            "export current audit events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available, though it remains available. As a workaround, you can export "
+            "current audit events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available, but currently available to admins. As a workaround, you can "
+            "export current audit events via API or CSV."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. As a workaround, you can export current audit events via API "
+            "or CSV, but neither method works."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. As a workaround, you can export current audit events via API "
+            "or CSV, although this is false."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. As a workaround, you can export current audit events via API "
+            "or CSV, but both are disabled."
+        ),
+        (
+            "Scheduled daily email reporting for audit events is not currently "
+            "available. You can export current audit events via API or CSV."
+        ),
+    ],
+)
+def test_audit_capability_conjunction_override_rejects_missing_or_indirect_legs(
+    answer: str,
+) -> None:
+    issue = _audit_reporting_issue()
+    ticket, unit_ids, expected_units, evidence = _audit_reporting_override_inputs(
+        issue,
+        answer,
+    )
+
+    assert (
+        issue_agent._tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+            ticket=ticket,
+            concern_id="audit-reporting",
+            question=(
+                "State reviewed current audit workarounds and unavailable "
+                "scheduled-email capability explicitly."
+            ),
+            answer_unit_ids=unit_ids,
+            expected_units=expected_units,
+            supported_unit_evidence_ids=evidence,
+            citation_ids=frozenset({"saas-audit-reporting-policy"}),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        (
+            "Do not state reviewed current audit workarounds and unavailable "
+            "scheduled-email capability explicitly."
+        ),
+        (
+            "You might call current audit workarounds and scheduled-email capability "
+            "unavailable."
+        ),
+        (
+            "State reviewed current audit workaround and unavailable scheduled-email "
+            "capability explicitly."
+        ),
+    ],
+)
+def test_audit_capability_conjunction_override_requires_exact_controlled_guidance(
+    question: str,
+) -> None:
+    answer = (
+        "Scheduled daily email reporting for admin audit events is not currently "
+        "available. As a workaround, you can export current audit events via API or CSV."
+    )
+    issue = _audit_reporting_issue()
+    ticket, unit_ids, expected_units, evidence = _audit_reporting_override_inputs(
+        issue,
+        answer,
+    )
+
+    assert not issue_agent._tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+        ticket=ticket,
+        concern_id="audit-reporting",
+        question=question,
+        answer_unit_ids=unit_ids,
+        expected_units=expected_units,
+        supported_unit_evidence_ids=evidence,
+        citation_ids=frozenset({"saas-audit-reporting-policy"}),
+    )
+
+
+def test_audit_capability_conjunction_override_rejects_unsupported_or_foreign_scope() -> None:
+    answer = (
+        "Scheduled daily email reporting for admin audit events is not currently "
+        "available. As a workaround, you can export current audit events via API or CSV."
+    )
+    issue = _audit_reporting_issue()
+    ticket, unit_ids, expected_units, evidence = _audit_reporting_override_inputs(
+        issue,
+        answer,
+    )
+    unsupported_evidence = dict(evidence)
+    unsupported_evidence.pop(unit_ids[-1])
+
+    assert not issue_agent._tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+        ticket=ticket,
+        concern_id="audit-reporting",
+        question=(
+            "State reviewed current audit workarounds and unavailable "
+            "scheduled-email capability explicitly."
+        ),
+        answer_unit_ids=unit_ids,
+        expected_units=expected_units,
+        supported_unit_evidence_ids=unsupported_evidence,
+        citation_ids=frozenset({"saas-audit-reporting-policy"}),
+    )
+
+    foreign_ticket = issue_agent._automatic_ticket_context(
+        _audit_reporting_issue(concern_id="other-concern")
+    )
+    assert not issue_agent._tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+        ticket=foreign_ticket,
+        concern_id="audit-reporting",
+        question=(
+            "State reviewed current audit workarounds and unavailable "
+            "scheduled-email capability explicitly."
+        ),
+        answer_unit_ids=unit_ids,
+        expected_units=expected_units,
+        supported_unit_evidence_ids=evidence,
+        citation_ids=frozenset({"saas-audit-reporting-policy"}),
+    )
+
+
+def test_audit_capability_conjunction_override_rejects_conflicting_tool_state() -> None:
+    answer = (
+        "Scheduled daily email reporting for admin audit events is not currently "
+        "available. As a workaround, you can export current audit events via API or CSV."
+    )
+    issue = _audit_reporting_issue(
+        tool_evidence=[
+            _audit_reporting_tool_evidence(),
+            _audit_reporting_tool_evidence(scheduled_audit_email="true"),
+        ]
+    )
+    ticket, unit_ids, expected_units, evidence = _audit_reporting_override_inputs(
+        issue,
+        answer,
+    )
+
+    assert not issue_agent._tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+        ticket=ticket,
+        concern_id="audit-reporting",
+        question=(
+            "State reviewed current audit workarounds and unavailable "
+            "scheduled-email capability explicitly."
+        ),
+        answer_unit_ids=unit_ids,
+        expected_units=expected_units,
+        supported_unit_evidence_ids=evidence,
+        citation_ids=frozenset({"saas-audit-reporting-policy"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "draft"),
+        ("reviewStatus", "pending"),
+        ("freshnessStatus", "stale"),
+        ("needsReview", True),
+        ("automationAllowed", False),
+        ("public", False),
+    ],
+)
+def test_audit_capability_conjunction_override_rejects_ineligible_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: Any,
+) -> None:
+    concern_id = "audit-reporting"
+    issue = _audit_reporting_issue(concern_id=concern_id)
+    answer = (
+        "Scheduled daily email reporting for admin audit events is not currently "
+        "available. As a workaround, you can export current audit events via API or CSV."
+    )
+    units = issue_agent._grounding_answer_units(answer)
+    tool_id = f"tool:{concern_id}:fixture_saas_entitlements_acme"
+    article = _audit_reporting_article()
+    article[field] = value
+    if field == "public":
+        article["visibility"] = "private"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                f"{concern_id}:required-guidance-1",
+                "not_covered",
+                [unit["id"] for unit in units],
+                [tool_id, article["id"]],
+            )
+        ],
+        articles=[article],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (
+        "State reviewed current audit workarounds and unavailable "
+        "scheduled-email capability explicitly.",
     )
 
 

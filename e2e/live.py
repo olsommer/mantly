@@ -1251,10 +1251,11 @@ def _wait_for_issue(
                 )
                 missing_draft_fingerprint = fingerprint
                 if missing_draft_count >= 2:
-                    raise LiveE2EError(
-                        f"issue {issue_id} completed processing with {draft_count} "
-                        f"drafts; expected at least {expected_drafts}"
-                    )
+                    # Completed processing can intentionally withhold a draft.
+                    # Return the stable issue so the case-level assertions can report
+                    # the missing draft and its upstream evidence instead of reducing
+                    # the whole case to a runner exception.
+                    return last_issue
             else:
                 missing_draft_count = 0
                 missing_draft_fingerprint = ""
@@ -1411,6 +1412,24 @@ def _semantic_response_judge(
     must_not_claim: list[str],
     must_mark_unverified: list[str] | None = None,
 ) -> dict[str, Any]:
+    if not response_text.strip():
+        return {
+            "passed": False,
+            "score": 0,
+            "threshold": 90,
+            "reasoning": (
+                "Semantic evaluation was skipped because the runtime produced no "
+                "non-empty response text. Inspect the draft-count and grounding "
+                "assertions for the upstream withholding reason."
+            ),
+            "evaluationStatus": "skipped",
+            "skipReason": "empty_response_text",
+            "responseTextPresent": False,
+            "attemptCount": 0,
+            "passedAttemptCount": 0,
+            "attempts": [],
+        }
+
     path = f"/api/admin/projects/{target.project_id}/eval/e2e-response-judge"
     body = {
         "response_text": response_text,

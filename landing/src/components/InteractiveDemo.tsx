@@ -81,6 +81,7 @@ export function InteractiveDemo() {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.origin !== addinOrigin) return
+      if (event.source !== iframeRef.current?.contentWindow) return
       const data = typeof event.data === "object" && event.data !== null
         ? event.data as Record<string, unknown>
         : {}
@@ -89,11 +90,6 @@ export function InteractiveDemo() {
         setIframeReady(true)
         postToEmbed({ type: "embed-ack" })
         postToEmbed({ type: "set-locale", locale: lang })
-        if (pendingRun) {
-          setPendingRun(false)
-          setStatus("processing")
-          postToEmbed({ type: "run-cached-demo", scenarioId: selectedId, locale: lang })
-        }
       }
       if (data.type === "embed-status") {
         const nextStatus = data.status
@@ -110,7 +106,17 @@ export function InteractiveDemo() {
 
     window.addEventListener("message", handler)
     return () => window.removeEventListener("message", handler)
-  }, [lang, pendingRun, postToEmbed, selectedId])
+  }, [lang, postToEmbed])
+
+  useEffect(() => {
+    if (!iframeReady || !pendingRun) return
+    const timer = window.setTimeout(() => {
+      setPendingRun(false)
+      setStatus("processing")
+      postToEmbed({ type: "run-cached-demo", scenarioId: selectedId, locale: lang })
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [iframeReady, lang, pendingRun, postToEmbed, selectedId])
 
   useEffect(() => {
     if (previousLangRef.current === lang) return
@@ -242,7 +248,6 @@ export function InteractiveDemo() {
                 title={t("interactiveDemo.iframeTitle")}
                 loading="lazy"
                 className="min-h-0 flex-1 border-0"
-                onLoad={() => setIframeReady(true)}
               />
             ) : (
               <div className="flex flex-1 items-center justify-center p-6 text-center">

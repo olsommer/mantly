@@ -3397,9 +3397,92 @@ _EXPLICIT_INCIDENT_START_TIMESTAMP_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b",
     re.IGNORECASE,
 )
+_INCIDENT_REFERENCE_PATTERN = r"(?:incident|outage|issue|[A-Z]{2,12}-\d+)"
+_INCIDENT_START_TEMPORAL_VALUE_PATTERN = (
+    r"(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+    r"(?:Z|[+-]\d{2}:\d{2})"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|"
+    r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})"
+)
+_INCIDENT_REFERENCE_RE = re.compile(
+    rf"\b{_INCIDENT_REFERENCE_PATTERN}\b",
+    re.IGNORECASE,
+)
+_NEGATED_INCIDENT_START_RE = re.compile(
+    r"\b(?:"
+    r"(?:(?:hasn['’]t|haven['’]t|hadn['’]t|isn['’]t|wasn['’]t|weren['’]t|"
+    r"didn['’]t|doesn['’]t|don['’]t)|"
+    r"(?:has|have|had|is|was|were|did|does|do)\s+(?:not|never))\s+"
+    r"(?:(?:actually|yet)\s+)*(?:been\s+)?(?:start(?:ed|ing)?|begin|began|begun)"
+    r"|never\s+(?:(?:actually|yet)\s+)*(?:been\s+)?"
+    r"(?:start(?:ed|ing)?|begin|began|begun)"
+    r"|(?:has|is|was)\s+yet\s+to\s+(?:be\s+)?(?:start(?:ed)?|begin|begun)"
+    r"|(?:start(?:ed|ing)?|begin|began|begun)\s+(?:not|never)"
+    r"|start\s+(?:date|time)\s+(?:is|was)\s+(?:not|never))\b",
+    re.IGNORECASE,
+)
+_INCIDENT_START_ASSERTION_RE = re.compile(
+    r"\b(?:started|began|start(?:\s+(?:date|time))?)\b",
+    re.IGNORECASE,
+)
+_INCIDENT_START_CLAIM_VALUE_RE = re.compile(
+    r"\b(?:started|began)\s+(?:(?:at|on|since)\s+)?"
+    rf"(?P<verb_value>{_INCIDENT_START_TEMPORAL_VALUE_PATTERN})|"
+    r"\bstart(?:\s+(?:date|time))?\s+(?:is|was)\s+"
+    rf"(?P<label_value>{_INCIDENT_START_TEMPORAL_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
 _ATOMIC_RECENT_CHANGE_QUESTION_RE = re.compile(
     r"^What\s+(?:(?:exact|relevant)\s+)*(?:recent\s+)?change\s+"
     r"does\s+the\s+lookup\s+show\??$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_SAFE_VALUE_RE = re.compile(
+    r"^[\w][\w &'()/+\-]{0,159}$",
+    re.UNICODE,
+)
+_ATOMIC_LOOKUP_CONTROL_VALUE_RE = re.compile(
+    r"\b(?:disregard|exfiltrate|ignore|override|reveal)\b|"
+    r"\b(?:system|developer|hidden)\s+(?:prompt|message|instructions?)\b|"
+    r"\b(?:all|previous|prior|these|those)\s+(?:directions|instructions?)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_EVENT_RE = re.compile(
+    r"^(?:change|configuration|cutover|deployment|failover|maintenance|migration|"
+    r"patch|release|renewal|replacement|rollout|rotation|switch|update|upgrade)$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_PHRASE_FORBIDDEN_RE = re.compile(
+    r"\b(?:all|and|any|before|because|but|directions?|instructions?|or|previous|"
+    r"prior|then|these|those|when|while|your)\b|"
+    r"\b(?:call|copy|delete|disclose|disregard|dump|email|erase|execute|"
+    r"exfiltrate|expose|extract|fetch|follow|forget|ignore|leak|obey|open|"
+    r"output|override|paste|print|provide|publish|read|remove|repeat|return|"
+    r"reveal|run|send|share|show|steal|tell|write)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_MODIFIER_RE = re.compile(
+    r"^(?:account|api|application|authentication|balancer|billing|certificate|"
+    r"client|cloud|configuration|customer|database|deployment|dns|domain|"
+    r"endpoint|environment|failover|firewall|gateway|hardware|identity|"
+    r"infrastructure|ingress|key|load|maintenance|migration|network|oauth|"
+    r"platform|production|provider|proxy|regional|release|renewal|replacement|"
+    r"rollout|rotation|routing|schema|scim|secret|server|service|signing|"
+    r"software|sso|ssl|staging|switch|system|tls|update|upgrade|version|"
+    r"v?\d[\w-]*)$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE = re.compile(
+    r"^(?:the\s+)?(?:cause|delivery|eta|impact|recovery|remediation|"
+    r"resolution(?:\s+time)?|root\s+cause)\s+"
+    r"(?:is|was|remains?|continues?\s+to\s+be)\s+"
+    r"(?:not\s+yet\s+verified|pending|unknown|unavailable|unclear|unconfirmed|"
+    r"unverified)\.?$",
     re.IGNORECASE,
 )
 _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE = re.compile(
@@ -3408,6 +3491,12 @@ _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE = re.compile(
     r"isn't|wasn't|may|might|could|possibly|perhaps|whether|false|untrue|"
     r"incorrect|inaccurate|wrong|contrary|except)\b|"
     r"\b(?:but|however|although|though|yet|instead|rather)\b",
+    re.IGNORECASE,
+)
+_TERMINAL_ENGLISH_REPLY_CLOSING_RE = re.compile(
+    r"^(?:(?:with\s+)?(?:best|kind|warm)\s+regards|regards|sincerely|cordially|"
+    r"cheers|best|all\s+the\s+best|best\s+wishes|with\s+thanks|"
+    r"yours\s+(?:faithfully|sincerely)|thanks|thank\s+you)[,.]?$",
     re.IGNORECASE,
 )
 
@@ -3473,6 +3562,27 @@ def _tool_fact_scalar_entries(
     return tuple(entries)
 
 
+def _is_safe_atomic_recent_change_value(value: str) -> bool:
+    """Accept only a short declarative change-event noun phrase."""
+
+    if (
+        _ATOMIC_LOOKUP_SAFE_VALUE_RE.fullmatch(value) is None
+        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(value) is not None
+        or _ATOMIC_LOOKUP_CONTROL_VALUE_RE.search(value) is not None
+        or _ATOMIC_LOOKUP_CHANGE_PHRASE_FORBIDDEN_RE.search(value) is not None
+    ):
+        return False
+    tokens = re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+    return bool(
+        1 <= len(tokens) <= 10
+        and _ATOMIC_LOOKUP_CHANGE_EVENT_RE.fullmatch(tokens[-1]) is not None
+        and all(
+            _ATOMIC_LOOKUP_CHANGE_MODIFIER_RE.fullmatch(token) is not None
+            for token in tokens[:-1]
+        )
+    )
+
+
 def _atomic_recent_change_requirement(
     *,
     ticket: dict[str, Any],
@@ -3515,6 +3625,7 @@ def _atomic_recent_change_requirement(
             if (
                 leaf_path != "recent_change"
                 or not clean_value
+                or not _is_safe_atomic_recent_change_value(clean_value)
                 or contains_sensitive_credential(clean_value)
             ):
                 continue
@@ -3576,11 +3687,7 @@ def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> boo
 
     normalized_unit = " ".join(unit.casefold().split())
     normalized_value = " ".join(value.casefold().split())
-    if (
-        not normalized_value
-        or normalized_value not in normalized_unit
-        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(normalized_unit)
-    ):
+    if not normalized_value or normalized_value not in normalized_unit:
         return False
     value_pattern = re.escape(normalized_value).replace(r"\ ", r"\s+")
     article = r"(?:(?:a|an|the)\s+)?"
@@ -3589,20 +3696,43 @@ def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> boo
         "",
         normalized_unit,
     ).strip(" *_`")
-    return any(
-        re.fullmatch(pattern + r"[.!]?", candidate, re.IGNORECASE) is not None
-        for pattern in (
-            rf"\b(?:the\s+)?lookup(?:\s+result)?\s+"
-            rf"(?:shows?|showed|reports?|reported|returns?|returned|identifies?|"
-            rf"identified|indicates?|indicated|found|confirms?|confirmed)\s+"
-            rf"(?:that\s+)?(?:the\s+)?(?:(?:relevant|recent)\s+)*"
-            rf"(?:change\s+(?:is|was)\s+)?{article}{value_pattern}\b",
-            rf"\b(?:the\s+)?(?:(?:relevant|recent)\s+)*change"
-            rf"(?:\s+(?:shown|reported|returned|identified|indicated|found)\s+"
-            rf"(?:by|in|from)\s+(?:the\s+)?lookup)?\s+(?:is|was)\s+"
-            rf"{article}{value_pattern}\b",
-        )
+    patterns = (
+        rf"\b(?:the\s+)?lookup(?:\s+result)?\s+"
+        rf"(?:shows?|showed|reports?|reported|returns?|returned|identifies?|"
+        rf"identified|indicates?|indicated|found|confirms?|confirmed)\s+"
+        rf"(?:that\s+)?(?:the\s+)?(?:(?:relevant|recent)\s+)*"
+        rf"(?:change\s+(?:is|was)\s+)?{article}{value_pattern}\b",
+        rf"\b(?:the\s+)?(?:(?:relevant|recent)\s+)*change"
+        rf"(?:\s+(?:shown|reported|returned|identified|indicated|found)\s+"
+        rf"(?:by|in|from)\s+(?:the\s+)?lookup)?\s+(?:is|was)\s+"
+        rf"{article}{value_pattern}\b",
     )
+    clauses = tuple(
+        clause.strip()
+        for clause in re.split(r"\s*;\s*", candidate)
+        if clause.strip()
+    )
+    for index, clause in enumerate(clauses):
+        if _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(clause):
+            continue
+        if not any(
+            re.fullmatch(pattern + r"[.!]?", clause, re.IGNORECASE) is not None
+            for pattern in patterns
+        ):
+            continue
+        followup_clauses = tuple(
+            other_clause
+            for other_index, other_clause in enumerate(clauses)
+            if other_index != index
+        )
+        if followup_clauses and not all(
+            _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(followup_clause)
+            is not None
+            for followup_clause in followup_clauses
+        ):
+            continue
+        return True
+    return False
 
 
 def _answer_affirmatively_states_atomic_lookup_value(answer: str, value: str) -> bool:
@@ -3627,6 +3757,63 @@ def _missing_atomic_recent_change_requirements(
             _string_from(requirement.get("value")),
         )
     )
+
+
+def _append_missing_atomic_recent_change_facts(
+    ticket: dict[str, Any],
+    answer: str,
+) -> str:
+    """Append bounded exact lookup facts when the model's one retry still hedges."""
+
+    clean_answer = answer.strip()
+    if not clean_answer:
+        return answer
+    requirements = _missing_atomic_recent_change_requirements(
+        ticket,
+        clean_answer,
+    )
+    answer_units = _grounding_answer_units(clean_answer)
+    for requirement in requirements:
+        value = _string_from(requirement.get("value"))
+        normalized_value = " ".join(value.casefold().split())
+        if any(
+            re.search(r"\blookup\b", unit_text, re.IGNORECASE) is not None
+            and normalized_value in " ".join(unit_text.casefold().split())
+            and not _atomic_lookup_unit_affirmatively_states_value(unit_text, value)
+            for unit in answer_units
+            if (unit_text := _string_from(unit.get("text")))
+        ):
+            return answer
+    additions = tuple(
+        dict.fromkeys(
+            "The lookup shows that the relevant recent change is "
+            + _string_from(requirement.get("value"))
+            + "."
+            for requirement in requirements
+            if _string_from(requirement.get("value"))
+        )
+    )
+    if not additions:
+        return answer
+    lines = clean_answer.splitlines()
+    signoff_index = next(
+        (
+            index
+            for index in range(max(0, len(lines) - 4), len(lines))
+            if _TERMINAL_ENGLISH_REPLY_CLOSING_RE.fullmatch(lines[index].strip())
+        ),
+        None,
+    )
+    if signoff_index is None:
+        return clean_answer + "\n\n" + "\n\n".join(additions)
+    body = "\n".join(lines[:signoff_index]).rstrip()
+    signoff = "\n".join(lines[signoff_index:]).strip()
+    sections = tuple(
+        section
+        for section in (body, "\n\n".join(additions), signoff)
+        if section
+    )
+    return "\n\n".join(sections)
 
 
 def _temporal_fact_tokens(value: str) -> frozenset[str]:
@@ -3857,6 +4044,59 @@ def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _incident_start_claim_matches(value: str, started_at: str) -> bool:
+    """Compare one adjacent start-date claim with the trusted lookup timestamp."""
+
+    clean_value = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", value.strip(), flags=re.IGNORECASE)
+    clean_started_at = started_at.strip()
+    try:
+        trusted_datetime = datetime.fromisoformat(clean_started_at.replace("Z", "+00:00"))
+    except ValueError:
+        trusted_datetime = None
+    trusted_date = (
+        trusted_datetime.date()
+        if trusted_datetime is not None
+        else datetime.strptime(clean_started_at, "%Y-%m-%d").date()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_started_at)
+        else None
+    )
+    if trusted_date is None:
+        return False
+    if "T" in clean_value:
+        try:
+            candidate_datetime = datetime.fromisoformat(
+                clean_value.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+        if trusted_datetime is None:
+            return candidate_datetime.date() == trusted_date
+        return candidate_datetime == trusted_datetime
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_value):
+        return datetime.strptime(clean_value, "%Y-%m-%d").date() == trusted_date
+    normalized_natural_date = " ".join(clean_value.replace(",", " ").split())
+    for date_format in ("%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(normalized_natural_date, date_format).date() == trusted_date
+        except ValueError:
+            continue
+    return False
+
+
+def _scoped_incident_start_matches(
+    pattern: re.Pattern[str],
+    text: str,
+) -> tuple[re.Match[str], ...]:
+    """Inspect only semicolon clauses that name the incident they describe."""
+
+    matches: list[re.Match[str]] = []
+    for clause in re.split(r"\s*;\s*", text):
+        if _INCIDENT_REFERENCE_RE.search(clause) is None:
+            continue
+        matches.extend(pattern.finditer(clause))
+    return tuple(matches)
+
+
 def _is_isolated_service_incident_temporal_answer(
     *,
     ticket: dict[str, Any],
@@ -3865,24 +4105,74 @@ def _is_isolated_service_incident_temporal_answer(
     expected_units: dict[str, dict[str, Any]],
     supported_unit_evidence_ids: dict[str, frozenset[str]],
 ) -> bool:
-    """Prove one linked unit contains only an exact incident-status timestamp claim."""
+    """Prove a linked unit contains only an exact incident-status timestamp claim."""
 
-    if len(answer_unit_ids) != 1:
+    if not answer_unit_ids:
         return False
-    unit_id = answer_unit_ids[0]
-    linked_text = _string_from(expected_units.get(unit_id, {}).get("text"))
-    linked_evidence_ids = supported_unit_evidence_ids.get(unit_id, frozenset())
-    if not linked_text or not linked_evidence_ids:
+    linked_units = tuple(
+        (
+            unit_id,
+            _string_from(expected_units.get(unit_id, {}).get("text")),
+            supported_unit_evidence_ids.get(unit_id, frozenset()),
+        )
+        for unit_id in answer_unit_ids
+    )
+    if not any(text and evidence_ids for _unit_id, text, evidence_ids in linked_units):
         return False
+
+    eligible_records: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+    started_at_values: set[str] = set()
     for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
         if evidence_concern_id != concern_id:
             continue
         evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
-        if not evidence_id or evidence_id not in linked_evidence_ids:
+        if (
+            not evidence_id
+            or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}
+        ):
             continue
+        record_fact_values = _service_incident_record_fact_values(record)
+        started_at_values.update(record_fact_values.get("started_at", frozenset()))
         facts = _service_incident_record_facts(record)
-        started_at = facts.get("started_at", "")
-        if not started_at or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+        eligible_records.append((evidence_id, record, facts))
+    if len(started_at_values) != 1:
+        return False
+    started_at = next(iter(started_at_values))
+    if _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+        return False
+
+    for _unit_id, unit_text, _evidence_ids in linked_units:
+        if not unit_text:
+            continue
+        if _scoped_incident_start_matches(
+            _NEGATED_INCIDENT_START_RE,
+            unit_text,
+        ):
+            return False
+        assertions = _scoped_incident_start_matches(
+            _INCIDENT_START_ASSERTION_RE,
+            unit_text,
+        )
+        if not assertions:
+            continue
+        claim_values = tuple(
+            value
+            for match in _scoped_incident_start_matches(
+                _INCIDENT_START_CLAIM_VALUE_RE,
+                unit_text,
+            )
+            if (value := _string_from(
+                match.group("verb_value") or match.group("label_value")
+            ))
+        )
+        if not claim_values or any(
+            not _incident_start_claim_matches(value, started_at)
+            for value in claim_values
+        ):
+            return False
+
+    for evidence_id, _record, facts in eligible_records:
+        if facts.get("started_at") != started_at:
             continue
         timestamp = re.escape(started_at)
         start_clause = rf"(?:started|began)\s+(?:at|on|since)\s+{timestamp}"
@@ -3924,8 +4214,14 @@ def _is_isolated_service_incident_temporal_answer(
                         rf"{start_clause}\.?",
                     )
                 )
-        if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
-            return True
+        for _unit_id, unit_text, linked_evidence_ids in linked_units:
+            if evidence_id not in linked_evidence_ids:
+                continue
+            if any(
+                re.fullmatch(pattern, unit_text, flags=re.IGNORECASE)
+                for pattern in patterns
+            ):
+                return True
     return False
 
 
@@ -5550,6 +5846,11 @@ def draft_issue_automation_answer(
             messages=messages,
             internal_citation_ids=citation_ids,
         )
+        if reply_language == "en":
+            answer = _append_missing_atomic_recent_change_facts(
+                ticket_context,
+                answer,
+            )
         if not answer:
             raise ValueError("Issue automation returned an empty answer")
         missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()

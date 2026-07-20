@@ -420,6 +420,8 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "verified domains" in rule
         for rule in saas_runbooks["saas-sso-scim-setup"].required_guidance
     )
+    assert "pricing questions" in saas_runbooks["saas-sso-scim-setup"].purpose
+    assert "Price-only" in saas_runbooks["saas-subscription-change"].purpose
     assert any(
         "remove the exposed token" in rule
         for rule in saas_runbooks["saas-token-exposure"].required_guidance

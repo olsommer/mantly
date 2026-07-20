@@ -53,6 +53,12 @@ Call `route_concerns` exactly once with between one and six concerns.
   business object in one concern when one runbook can process them. Represent
   the subquestions as separate answer obligations instead of executing the
   same runbook repeatedly.
+- A price, fee, or cost question alone does not prove that the customer wants a
+  purchase, cancellation, plan change, seat change, or refund. Keep it as an
+  answer obligation of a specialized setup or capability concern when that
+  intent explicitly covers associated pricing. Use a generic commercial-change
+  intent only for an explicit commercial mutation or when no specialized intent
+  owns the pricing question.
 - The same intent may appear more than once when the email contains distinct
   instances, such as requests about two different orders.
 - If more than six concerns exist, combine only closely related concerns and

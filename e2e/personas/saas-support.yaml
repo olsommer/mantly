@@ -234,7 +234,11 @@ runbooks:
       - State the exact start time only from the successful service-status lookup.
       - State the ETA only from the successful service-status lookup; if it is absent, say that it is unavailable.
   - key: saas-subscription-change
-    purpose: Treat cancellation, seat, purchase, and refund requests as separate actions.
+    purpose: >-
+      Process only explicit commercial mutations such as add-on cancellation,
+      seat or plan changes, purchases or upgrades, and refunds. Price-only and
+      technical setup or enablement questions belong to a matching specialized
+      runbook when one exists.
     proposed_actions: [cancel_add_on, reduce_seats, purchase_add_on, request_refund]
     required_read_only_tools: [fixture_saas_subscription_acme]
   - key: saas-privacy-export
@@ -272,7 +276,10 @@ runbooks:
       - State the exact invoice due date only from the successful invoice lookup.
       - State that credit eligibility and any amount remain unverified unless successful action evidence explicitly proves approval.
   - key: saas-sso-scim-setup
-    purpose: Explain tool-confirmed SSO and SCIM capabilities and prepare setup.
+    purpose: >-
+      Explain tool-confirmed SSO and SCIM availability and associated setup,
+      enablement, provisioning, and pricing questions; prepare setup while
+      keeping unknown pricing and incomplete activation explicitly unverified.
     proposed_actions: [request_sso_setup]
     required_guidance:
       - >-

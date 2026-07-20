@@ -3563,6 +3563,10 @@ def _is_isolated_service_incident_temporal_answer(
                         rf"This\s+incident,\s+which\s+affects\s+the\s+{escaped_region}\s+"
                         rf"{escaped_service}\s+service,\s+is\s+currently\s+under\s+"
                         rf"investigation\s+and\s+began\s+at\s+{timestamp}\.?",
+                        rf"(?:This|The)\s+incident,\s+which\s+affects\s+(?:the\s+)?"
+                        rf"{escaped_service}\s+services?\s+in\s+(?:the\s+)?{escaped_region}"
+                        rf"(?:\s+region)?,\s+is\s+currently\s+under\s+investigation\s+and\s+"
+                        rf"{start_clause}\.?",
                     )
                 )
         if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):

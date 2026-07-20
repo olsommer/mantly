@@ -4606,6 +4606,18 @@ def test_grounding_does_not_override_not_covered_fixture_tool_timestamp(
             "This incident, which affects the EU authentication service, is currently under "
             "investigation and began at 2026-07-19T07:40:00Z."
         ),
+        (
+            "This incident, which affects authentication services in the EU, is currently under "
+            "investigation and started on 2026-07-19T07:40:00Z."
+        ),
+        (
+            "The incident, which affects the authentication service in the EU region, is "
+            "currently under investigation and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects authentication services in EU, is currently under "
+            "investigation and started since 2026-07-19T07:40:00Z."
+        ),
     ],
 )
 def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
@@ -4980,6 +4992,31 @@ def test_grounding_rejects_two_incident_times_in_one_tool_record(
         (
             "This incident, which affects the EU authentication service, is currently under "
             "investigation and began at 2026-07-19T07:40:00Z, while an SLA credit is being "
+            "approved."
+        ),
+        (
+            "This incident, which affects authentication services in the US, is currently under "
+            "investigation and started on 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects billing services in the EU, is currently under "
+            "investigation and started on 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects authentication services in the EU, is currently under "
+            "review and started on 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects authentication services in the EU, is currently under "
+            "investigation and started on 2026-07-19T08:40:00Z."
+        ),
+        (
+            "This incident, which affects authentication services in the EU, is currently under "
+            "investigation and the service started on 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects authentication services in the EU, is currently under "
+            "investigation and started on 2026-07-19T07:40:00Z, while an SLA credit is being "
             "approved."
         ),
     ],

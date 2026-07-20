@@ -12180,6 +12180,11 @@ def _create_issue_agent_answer(
             )
             if repair_draft.generation_mode == "llm" and not repair_draft.error:
                 draft = repair_draft
+                answer = repair_issue_automation_answer_action_state(
+                    issue=issue,
+                    messages=messages,
+                    answer=draft.answer,
+                )
                 uncovered_obligation_ids = tuple(
                     _string_from(assessment.get("obligationId"))
                     for assessment in grounding_assessment.obligation_assessments
@@ -12188,7 +12193,7 @@ def _create_issue_agent_answer(
                 )
                 answer = repair_issue_automation_answer_service_incident_start_time(
                     issue=issue,
-                    answer=draft.answer,
+                    answer=answer,
                     uncovered_obligation_ids=uncovered_obligation_ids,
                 )
                 answer = repair_issue_automation_answer_action_state(

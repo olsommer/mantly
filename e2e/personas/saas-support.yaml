@@ -255,6 +255,7 @@ runbooks:
   - key: saas-token-exposure
     purpose: Contain an actually exposed, leaked, published, or committed token without revealing it and prepare security actions.
     proposed_actions: [revoke_api_token, create_replacement_token, open_security_incident]
+    required_read_only_tools: [fixture_saas_token_acme_prod_7f2a]
     required_guidance:
       - Tell the customer to remove the exposed token from public access immediately.
       - Tell the customer to stop using the exposed token immediately.

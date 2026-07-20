@@ -744,7 +744,9 @@ def test_channel_autopilot_repairs_s02_factual_corruption_once(monkeypatch):
     }
 
 
-def test_channel_autopilot_fills_omitted_s02_start_time_then_regrounds(monkeypatch):
+def test_channel_autopilot_preserves_s02_start_time_after_action_repair_then_regrounds(
+    monkeypatch,
+):
     reply_calls, grounding_calls = _stub_channel_agent_answer(
         monkeypatch,
         verified=True,
@@ -755,8 +757,13 @@ def test_channel_autopilot_fills_omitted_s02_start_time_then_regrounds(monkeypat
         "INC-204 affects the EU authentication service and is under investigation. "
         "The ETA is unavailable."
     )
+    unsafe_repair_answer = (
+        "We opened a P1 escalation for the incident that began at "
+        "2026-07-19T07:40:00Z."
+    )
     repaired_answer = (
-        f"{omitted_answer}\n\nThe incident began at 2026-07-19T07:40:00Z."
+        f"{PENDING_ACTION_REPAIR_NOTICE}\n\n"
+        "The incident began at 2026-07-19T07:40:00Z."
     )
     incident_issue = {
         "id": "issue1",
@@ -796,13 +803,35 @@ def test_channel_autopilot_fills_omitted_s02_start_time_then_regrounds(monkeypat
                 },
             }
         ],
+        "actionExecutions": [
+            {
+                "id": "execution-p1",
+                "type": "runbook_webhook",
+                "status": "pending",
+                "label": "Open P1 Escalation",
+                "metadata": {
+                    "source": "runbook",
+                    "approvalRequired": True,
+                    "concernId": "service-incident",
+                    "runbook": "saas-service-incident",
+                    "proposedAction": {
+                        "name": "open_p1_escalation",
+                        "label": "Open P1 Escalation",
+                    },
+                },
+            }
+        ],
     }
     draft_calls: list[dict] = []
 
     def fake_draft(**kwargs):
         draft_calls.append(kwargs)
         return IssueAgentDraft(
-            answer=omitted_answer,
+            answer=(
+                omitted_answer
+                if len(draft_calls) == 1
+                else unsafe_repair_answer
+            ),
             confidence="high",
             generation_mode="llm",
         )

@@ -462,6 +462,9 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert saas_runbooks["saas-workspace-deletion"].required_read_only_tools == [
         "fixture_saas_account_acme_4421"
     ]
+    assert saas_runbooks["saas-token-exposure"].required_read_only_tools == [
+        "fixture_saas_token_acme_prod_7f2a"
+    ]
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())
 

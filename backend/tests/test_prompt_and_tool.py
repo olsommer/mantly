@@ -977,8 +977,6 @@ class TestIntentAttachmentContext:
                     "source_text": "Please open a claim.",
                     "answer_obligations": ["Confirm whether a claim can be opened."],
                     "intent_name": "claim",
-                    "confidence": 0.99,
-                    "reason": "",
                 }]},
                 "id": "valid_1",
             }],

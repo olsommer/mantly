@@ -798,14 +798,10 @@ def _route_concerns_call_is_invalid(messages: list[Any]) -> bool:
     for raw_concern in raw_concerns:
         if not isinstance(raw_concern, dict):
             return True
-        required_fields = {
-            "summary",
-            "source_text",
-            "answer_obligations",
-            "intent_name",
-            "confidence",
-            "reason",
-        }
+        # Pydantic exposes the remaining fields as optional in the provider
+        # tool schema. Require only the routing decision and the explicit
+        # customer-answer contract; defaults safely normalize the rest.
+        required_fields = {"answer_obligations", "intent_name"}
         if not required_fields.issubset(raw_concern):
             return True
         raw_obligations = raw_concern.get("answer_obligations")

@@ -67,6 +67,7 @@ from automail.pipeline.intent.intents_factory import (
     get_intent_required_read_only_tools,
     get_intent_response_attachments,
     get_intent_response_config,
+    get_intent_subsumes_runbooks,
     get_intent_tools,
     get_known_intent_names,
 )
@@ -120,6 +121,26 @@ _SHARED_BUSINESS_OBJECT_PREFIX_PATTERN = re.compile(
     r"return|rma|shipment|subscription|ticket|tracking)\b",
     re.IGNORECASE,
 )
+_BUSINESS_PARTY_LABEL_PATTERN = (
+    r"prospective\s+client|opposing\s+party|adverse\s+party|counterparty|"
+    r"parent(?:\s+company)?|affiliate|subsidiary|claimant|respondent|"
+    r"plaintiff|defendant|buyer|seller|vendor|supplier|merchant|carrier|"
+    r"customer|client|employer|employee|landlord|tenant|debtor|creditor|"
+    r"insurer|insured"
+)
+_LABELED_BUSINESS_PARTY_PATTERN = re.compile(
+    rf"\b(?P<label>{_BUSINESS_PARTY_LABEL_PATTERN})\b"
+    r"(?:\s+(?:name|organisation|organization))?\s*"
+    r"(?:(?:is|was)\s+|[:=]\s*)?",
+    re.IGNORECASE,
+)
+_BUSINESS_PARTY_NAME_TOKEN_PATTERN = re.compile(
+    r"^[A-ZÀ-ÖØ-Þ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9&'’.\-/]*$"
+)
+_BUSINESS_PARTY_NAME_CONNECTORS = frozenset(
+    {"&", "and", "de", "del", "der", "la", "le", "of", "the", "van", "von"}
+)
+_CUSTOMER_TEXT_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
 _SAFETY_INTENT_WEIGHTS = {
     "hazard": 12,
     "hazardous": 12,
@@ -569,6 +590,7 @@ def _concern_processing_email(
         return focused, focused
 
     shared_identifiers = _shared_business_object_identifiers(email, route)
+    shared_parties = _shared_business_party_references(email, route)
     processing_sections = [f"## Routed concern to process\n{focused.body}"]
     if shared_identifiers:
         processing_sections.append(
@@ -577,6 +599,13 @@ def _concern_processing_email(
             + "\n".join(
                 f"- {label}: {value}" for label, value in shared_identifiers
             )
+        )
+    if shared_parties:
+        processing_sections.append(
+            "## Shared business-party references\n"
+            "These explicitly labeled parties are identity context for this concern, "
+            "not separate requests.\n"
+            + "\n".join(f"- {label}: {value}" for label, value in shared_parties)
         )
 
     processing = focused.model_copy(
@@ -645,6 +674,84 @@ def _shared_business_object_identifiers(
     ):
         return with_best_labels(leading_identifiers)
     return []
+
+
+def _business_party_references(value: str) -> list[tuple[str, str]]:
+    """Extract bounded names only when customer text gives an explicit party label."""
+    normalized = re.sub(r"[ \t]*\r?\n[ \t]*", " ", str(value or "")).strip()
+    matches = list(_LABELED_BUSINESS_PARTY_PATTERN.finditer(normalized))
+    references: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, match in enumerate(matches[:8]):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        raw_name = normalized[match.end() : end]
+        if index + 1 < len(matches):
+            raw_name = re.sub(r"(?:,\s*)?\band\s+(?:the\s+)?$", "", raw_name, flags=re.IGNORECASE)
+        raw_name = re.split(r"[;!?]", raw_name, maxsplit=1)[0]
+
+        name_tokens: list[str] = []
+        for raw_token in raw_name.split():
+            token = raw_token.strip(" \t,;:!?()[]{}\"")
+            token = token.rstrip(".")
+            if not token:
+                continue
+            if token.casefold() in _BUSINESS_PARTY_NAME_CONNECTORS:
+                if name_tokens:
+                    name_tokens.append(token)
+                continue
+            if _BUSINESS_PARTY_NAME_TOKEN_PATTERN.fullmatch(token) is None:
+                break
+            name_tokens.append(token)
+            if len(name_tokens) >= 8:
+                break
+        while name_tokens and name_tokens[-1].casefold() in _BUSINESS_PARTY_NAME_CONNECTORS:
+            name_tokens.pop()
+        name = " ".join(name_tokens).strip()
+        if not name or len(name) > 120 or not any(character.isalpha() for character in name):
+            continue
+        label = " ".join(match.group("label").casefold().split())
+        key = (label, name.casefold())
+        if key not in seen:
+            references.append((label, name))
+            seen.add(key)
+    return references
+
+
+def _shared_business_party_references(
+    email: Email,
+    route: ConcernRoute,
+) -> list[tuple[str, str]]:
+    """Carry only adjacent, explicitly labeled parties into one isolated concern."""
+    if _business_party_references(f"{route.summary}\n{route.source_text}"):
+        return []
+
+    body = re.sub(r"[ \t]*\r?\n[ \t]*", " ", email.body).strip()
+    source = re.sub(r"[ \t]*\r?\n[ \t]*", " ", route.source_text).strip()
+    if not body or not source or body.casefold().count(source.casefold()) != 1:
+        return []
+
+    source_start = body.casefold().find(source.casefold())
+    prior_sentences = [
+        item.strip()
+        for item in _CUSTOMER_TEXT_SENTENCE_SPLIT_PATTERN.split(body[:source_start].rstrip())
+        if item.strip()
+    ]
+    collected: list[list[tuple[str, str]]] = []
+    for sentence in reversed(prior_sentences[-2:]):
+        if "?" in sentence or _explicit_request_sentences(sentence):
+            break
+        references = _business_party_references(sentence)
+        if not references:
+            break
+        collected.append(references)
+
+    flattened = [reference for group in reversed(collected) for reference in group]
+    if not flattened:
+        return []
+    values = [value.casefold() for _, value in flattened]
+    if len(values) != len(set(values)):
+        return []
+    return flattened[:8]
 
 
 def _is_malformed_function_call_reason(value: Any) -> bool:
@@ -2113,6 +2220,158 @@ def _dedupe_concern_routes(routes: list[ConcernRoute]) -> list[ConcernRoute]:
     return deduplicated
 
 
+def _route_business_object_identifier(email: Email, route: ConcernRoute) -> str:
+    """Return one unambiguous identifier available to an isolated concern."""
+    routed_values = {
+        value.casefold()
+        for _label, value in _business_object_identifiers(
+            f"{route.summary}\n{route.source_text}"
+        )
+        if value.strip()
+    }
+    if len(routed_values) == 1:
+        return next(iter(routed_values))
+    if routed_values:
+        return ""
+    message_values = {
+        value.casefold()
+        for _label, value in _business_object_identifiers(
+            f"{email.subject}\n{email.body}"
+        )
+        if value.strip()
+    }
+    return next(iter(message_values)) if len(message_values) == 1 else ""
+
+
+def _merge_routed_source_text(primary: str, subsumed: str) -> str:
+    """Preserve both routed excerpts without repeating a contained span."""
+    primary = primary.strip()
+    subsumed = subsumed.strip()
+    if not primary:
+        return subsumed
+    if not subsumed:
+        return primary
+    normalized_primary = " ".join(primary.split()).casefold()
+    normalized_subsumed = " ".join(subsumed.split()).casefold()
+    if normalized_subsumed in normalized_primary:
+        return primary
+    if normalized_primary in normalized_subsumed:
+        return subsumed
+    return f"{primary}\n{subsumed}"
+
+
+def _merge_subsumed_route(
+    specialized: ConcernRoute,
+    generic: ConcernRoute,
+) -> ConcernRoute:
+    """Merge one generic route into its configured specialized runbook route."""
+    return specialized.model_copy(
+        update={
+            "source_text": _merge_routed_source_text(
+                specialized.source_text,
+                generic.source_text,
+            ),
+            "answer_obligations": _dedupe_strings(
+                specialized.answer_obligations,
+                generic.answer_obligations,
+            )[:10],
+            "confidence": max(specialized.confidence, generic.confidence),
+        }
+    )
+
+
+def _apply_runbook_subsumption(
+    email: Email,
+    routes: list[ConcernRoute],
+    intents_dir: Any,
+) -> list[ConcernRoute]:
+    """Collapse an opted-in generic route only for one proven shared object."""
+    if len(routes) < 2:
+        return routes
+
+    configured: dict[str, set[str]] = {}
+    identifiers = [
+        _route_business_object_identifier(email, route)
+        for route in routes
+    ]
+    for route in routes:
+        intent_name = str(route.intent_name or "").strip().casefold()
+        if not intent_name or intent_name in configured:
+            continue
+        configured[intent_name] = {
+            name.strip().casefold()
+            for name in get_intent_subsumes_runbooks(
+                intent_name,
+                intents_dir=intents_dir,
+            )
+            if name.strip()
+        }
+
+    parents: dict[int, int] = {}
+    for generic_index, generic in enumerate(routes):
+        generic_intent = str(generic.intent_name or "").strip().casefold()
+        generic_identifier = identifiers[generic_index]
+        if not generic_intent or not generic_identifier:
+            continue
+        candidates = [
+            specialized_index
+            for specialized_index, specialized in enumerate(routes)
+            if specialized_index != generic_index
+            and generic_intent
+            in configured.get(
+                str(specialized.intent_name or "").strip().casefold(),
+                set(),
+            )
+            and identifiers[specialized_index] == generic_identifier
+        ]
+        if len(candidates) != 1:
+            continue
+        parents[generic_index] = candidates[0]
+
+    for start in parents:
+        visited: set[int] = set()
+        current = start
+        while current in parents:
+            if current in visited:
+                logger.warning(
+                    "Skipping cyclic runbook subsumption contract for this email"
+                )
+                return routes
+            visited.add(current)
+            current = parents[current]
+
+    def parent_depth(index: int) -> int:
+        depth = 0
+        while index in parents:
+            depth += 1
+            index = parents[index]
+        return depth
+
+    replacements = {index: route for index, route in enumerate(routes)}
+    for generic_index in sorted(
+        parents,
+        key=lambda index: (-parent_depth(index), index),
+    ):
+        specialized_index = parents[generic_index]
+        specialized = replacements[specialized_index]
+        generic = replacements[generic_index]
+        replacements[specialized_index] = _merge_subsumed_route(
+            specialized,
+            generic,
+        )
+        logger.info(
+            "Runbook '%s' subsumed '%s' for shared business object",
+            specialized.intent_name,
+            generic.intent_name,
+        )
+
+    return [
+        replacements[index]
+        for index in range(len(routes))
+        if index not in parents
+    ]
+
+
 def _concern_id(
     email: Email,
     route: ConcernRoute,
@@ -2238,6 +2497,7 @@ def run_intent_agent(
     del creator
     routes = _apply_safety_intent_precedence(routes, known_intents)
     routes = _dedupe_concern_routes(routes)
+    routes = _apply_runbook_subsumption(email, routes, intents_dir)
     if not routes:
         reason = router_error or "No configured intent matches this email."
         routes = [

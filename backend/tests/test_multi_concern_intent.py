@@ -34,6 +34,7 @@ from automail.pipeline.intent.agent import (
     _apply_deterministic_action_eligibility,
     _build_process_user_message,
     _concern_id,
+    _concern_processing_email,
     _execute_routed_concern,
     _route_concerns_call_is_invalid,
     run_intent_agent,
@@ -1807,6 +1808,109 @@ def test_each_concern_processing_input_keeps_shared_identifier_from_original_mes
     )
     assert "Change the delivery address" not in processing_bodies[0]
     assert "current shipment status" not in processing_bodies[1]
+
+
+def test_l01_narrow_router_span_keeps_adjacent_labeled_conflict_parties() -> None:
+    email = Email(
+        id="message-l01",
+        subject="New client intake and conflict check",
+        from_address="sophie.mueller@example.test",
+        body=(
+            "I may need advice about a failed software implementation. "
+            "Opposing party Helvetia Systems AG and parent Helvetia Holdings SA. "
+            "Before confidential facts or documents, explain the intake and conflict-check process. "
+            "Do not imply mandate acceptance or give substantive advice."
+        ),
+        attachments=[],
+    )
+    route = ConcernRoute(
+        summary="Explain the intake and conflict-check process for a potential new matter.",
+        source_text="Before confidential facts or documents, explain the intake and conflict-check process.",
+        intent_name="law-conflict-intake",
+    )
+
+    _, processing = _concern_processing_email(email, route)
+
+    assert processing.body == (
+        "## Routed concern to process\n"
+        "Before confidential facts or documents, explain the intake and conflict-check process.\n\n"
+        "## Shared business-party references\n"
+        "These explicitly labeled parties are identity context for this concern, not separate requests.\n"
+        "- opposing party: Helvetia Systems AG\n"
+        "- parent: Helvetia Holdings SA"
+    )
+    assert "failed software implementation" not in processing.body
+    assert "mandate acceptance" not in processing.body
+
+
+def test_labeled_parties_stay_with_their_adjacent_concerns() -> None:
+    email = Email(
+        id="message-two-party-groups",
+        subject="Two separate requests",
+        from_address="operator@example.test",
+        body=(
+            "Opposing party Northlake AG and parent Northlake Holdings SA. "
+            "Explain the conflict-check process. "
+            "Supplier Bluebird GmbH and carrier Rapid Parcel AG. "
+            "Find the delayed shipment."
+        ),
+        attachments=[],
+    )
+    conflict_route = ConcernRoute(
+        summary="Conflict check",
+        source_text="Explain the conflict-check process.",
+        intent_name="law-conflict-intake",
+    )
+    shipment_route = ConcernRoute(
+        summary="Shipment lookup",
+        source_text="Find the delayed shipment.",
+        intent_name="fulfillment-shipment-status",
+    )
+
+    _, conflict_processing = _concern_processing_email(email, conflict_route)
+    _, shipment_processing = _concern_processing_email(email, shipment_route)
+
+    assert "Northlake AG" in conflict_processing.body
+    assert "Northlake Holdings SA" in conflict_processing.body
+    assert "Bluebird GmbH" not in conflict_processing.body
+    assert "Rapid Parcel AG" not in conflict_processing.body
+    assert "Bluebird GmbH" in shipment_processing.body
+    assert "Rapid Parcel AG" in shipment_processing.body
+    assert "Northlake AG" not in shipment_processing.body
+
+
+def test_business_party_context_requires_unique_span_and_explicit_labels() -> None:
+    unlabeled = Email(
+        id="message-unlabeled-party",
+        subject="Conflict request",
+        from_address="operator@example.test",
+        body="Northlake AG and Marco Steiner. Explain the conflict-check process.",
+        attachments=[],
+    )
+    repeated = Email(
+        id="message-repeated-request",
+        subject="Two conflict requests",
+        from_address="operator@example.test",
+        body=(
+            "Opposing party Northlake AG. Explain the conflict-check process. "
+            "Opposing party Bluebird GmbH. Explain the conflict-check process."
+        ),
+        attachments=[],
+    )
+    route = ConcernRoute(
+        summary="Conflict check",
+        source_text="Explain the conflict-check process.",
+        intent_name="law-conflict-intake",
+    )
+
+    _, unlabeled_processing = _concern_processing_email(unlabeled, route)
+    _, repeated_processing = _concern_processing_email(repeated, route)
+
+    assert "Shared business-party references" not in unlabeled_processing.body
+    assert "Northlake AG" not in unlabeled_processing.body
+    assert "Shared business-party references" not in repeated_processing.body
+    assert "Northlake AG" not in repeated_processing.body
+    assert "Bluebird GmbH" not in repeated_processing.body
 
 
 def test_e04_split_concerns_each_keep_the_shared_order_identifier(monkeypatch):

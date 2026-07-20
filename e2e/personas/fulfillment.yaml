@@ -180,6 +180,8 @@ runbooks:
   - key: fulfillment-delivery-exception
     purpose: Prepare a carrier investigation for a stalled shipment.
     proposed_actions: [open_delivery_exception]
+    required_read_only_tools: [fixture_shipment_zf_88310]
+    subsumes_runbooks: [fulfillment-shipment-status]
   - key: fulfillment-address-change
     purpose: Check address-change eligibility and prepare a redirect request.
     proposed_actions: [request_address_change, request_carrier_redirect]

@@ -251,6 +251,7 @@ def build_intent_content(persona: E2EPersona, runbook_key: str, api_base: str) -
         "active": True,
         "require_review": True,
         "required_read_only_tools": runbook.required_read_only_tools,
+        "subsumes_runbooks": runbook.subsumes_runbooks,
         "tools": tools,
         "actions": actions,
         "response": {
@@ -613,6 +614,25 @@ def _preflight_target_for_run(
         ):
             raise LiveE2EError(
                 f"QA runbook {name!r} required read-only tool contract drifted"
+            )
+        raw_subsumed = intent.get(
+            "subsumes_runbooks",
+            intent.get("subsumesRunbooks", []),
+        )
+        actual_subsumed = (
+            [item.strip() for item in raw_subsumed]
+            if isinstance(raw_subsumed, list)
+            and all(isinstance(item, str) and item.strip() for item in raw_subsumed)
+            else []
+        )
+        if (
+            not isinstance(raw_subsumed, list)
+            or len(actual_subsumed) != len(raw_subsumed)
+            or len(actual_subsumed) != len(set(actual_subsumed))
+            or set(actual_subsumed) != set(expected.subsumes_runbooks)
+        ):
+            raise LiveE2EError(
+                f"QA runbook {name!r} subsumption contract drifted"
             )
         for tool_name, expected_url in expected_tools.items():
             tool = actual_tools[tool_name]

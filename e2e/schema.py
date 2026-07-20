@@ -98,6 +98,7 @@ class RunbookExpectation(StrictModel):
     response_rules: list[str] = Field(default_factory=list)
     required_guidance: list[str] = Field(default_factory=list)
     required_read_only_tools: list[str] = Field(default_factory=list)
+    subsumes_runbooks: list[str] = Field(default_factory=list)
 
 
 class ConcernExpectation(StrictModel):
@@ -246,6 +247,38 @@ class E2EPersona(StrictModel):
                     f"runbook {runbook.key} requires undeclared read-only tools: "
                     f"{unknown_required_tools}"
                 )
+            if len(runbook.subsumes_runbooks) != len(
+                set(runbook.subsumes_runbooks)
+            ):
+                raise ValueError(
+                    f"runbook {runbook.key} contains duplicate subsumed runbooks"
+                )
+            unknown_subsumed = set(runbook.subsumes_runbooks) - runbook_key_set
+            if unknown_subsumed:
+                raise ValueError(
+                    f"runbook {runbook.key} subsumes unknown runbooks: "
+                    f"{unknown_subsumed}"
+                )
+            if runbook.key in runbook.subsumes_runbooks:
+                raise ValueError(f"runbook {runbook.key} cannot subsume itself")
+
+        subsumption_graph = {
+            runbook.key: set(runbook.subsumes_runbooks)
+            for runbook in self.runbooks
+        }
+        for start in runbook_keys:
+            pending = list(subsumption_graph[start])
+            visited: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current == start:
+                    raise ValueError(
+                        f"runbook subsumption contract contains a cycle at {start}"
+                    )
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(subsumption_graph[current])
 
         for case in self.cases:
             if expected_case_pattern.fullmatch(case.id) is None:

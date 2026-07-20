@@ -228,10 +228,11 @@ runbooks:
     purpose: State live incident facts and prepare P1 escalation and SLA review.
     proposed_actions: [open_p1_escalation, request_sla_credit]
     required_guidance:
-      - >-
-        State the incident status, affected region, affected service, exact start
-        time, and ETA only from the successful service-status lookup; if ETA is
-        absent, say that it is unavailable.
+      - State the incident status only from the successful service-status lookup.
+      - State the affected region only from the successful service-status lookup.
+      - State the affected service only from the successful service-status lookup.
+      - State the exact start time only from the successful service-status lookup.
+      - State the ETA only from the successful service-status lookup; if it is absent, say that it is unavailable.
   - key: saas-subscription-change
     purpose: Treat cancellation, seat, purchase, and refund requests as separate actions.
     proposed_actions: [cancel_add_on, reduce_seats, purchase_add_on, request_refund]
@@ -246,11 +247,11 @@ runbooks:
     purpose: Explain verified integration failures and prepare secret rotation or event replay.
     proposed_actions: [rotate_signing_secret, replay_webhook_events]
     required_guidance:
-      - >-
-        State that delivery remains unverified until approved recovery actions
-        complete and a separate post-action delivery check succeeds.
+      - State that delivery remains unverified.
+      - State that the approved recovery actions must complete before delivery can be considered recovered.
+      - State that a separate post-action delivery check must succeed before delivery can be considered fixed.
   - key: saas-token-exposure
-    purpose: Give containment guidance without exposing the token and prepare security actions.
+    purpose: Contain an actually exposed, leaked, published, or committed token without revealing it and prepare security actions.
     proposed_actions: [revoke_api_token, create_replacement_token, open_security_incident]
     required_guidance:
       - Tell the customer to remove the exposed token from public access immediately.
@@ -260,6 +261,9 @@ runbooks:
   - key: saas-invoice-dispute
     purpose: State invoice facts and prepare investigation and billing-profile changes.
     proposed_actions: [open_invoice_investigation, update_billing_profile]
+    required_guidance:
+      - State the invoice status only from the successful invoice lookup.
+      - State the exact invoice due date only from the successful invoice lookup.
   - key: saas-sso-scim-setup
     purpose: Explain tool-confirmed SSO and SCIM capabilities and prepare setup.
     proposed_actions: [request_sso_setup]

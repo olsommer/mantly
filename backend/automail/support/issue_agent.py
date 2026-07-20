@@ -56,9 +56,11 @@ _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_MODEL_CALL_LIMIT = 2
 GROUNDING_MODEL_CALL_TIMEOUT_SECONDS = 30
-# A protocol-complete second pass is intentionally allowed. The parent future
-# must therefore outlive two provider calls plus bounded orchestration overhead.
-GROUNDING_AGENT_DEADLINE_SECONDS = 70
+# A protocol-complete second pass is intentionally allowed. Provider clients can
+# return after their nominal transport timeout; live evidence observed an 86.8s
+# first adjudication followed by a 20.8s reassessment. Keep enough parent-future
+# headroom for both calls while retaining the same bounded, fail-closed deadline.
+GROUNDING_AGENT_DEADLINE_SECONDS = 120
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
 GROUNDING_GATE_VERSION = "automation-grounding-v8"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60

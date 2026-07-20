@@ -1243,7 +1243,8 @@ def test_automation_prompt_does_not_receive_unrelated_account_signal_body(
     assert "issue-other" not in prompts[0]
 
 
-def test_grounding_parent_deadline_covers_every_allowed_model_call() -> None:
+def test_grounding_parent_deadline_covers_slow_two_pass_provider_execution() -> None:
+    assert issue_agent.GROUNDING_AGENT_DEADLINE_SECONDS == 120
     assert issue_agent.GROUNDING_AGENT_DEADLINE_SECONDS >= (
         issue_agent.GROUNDING_MODEL_CALL_LIMIT * issue_agent.GROUNDING_MODEL_CALL_TIMEOUT_SECONDS + 5
     )

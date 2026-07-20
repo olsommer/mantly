@@ -215,6 +215,9 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     personas = {persona.id: persona for persona in load_personas(PERSONA_DIR)}
     lawyer_cases = {case.id: case for case in personas["lawyer"].cases}
     fulfillment_cases = {case.id: case for case in personas["fulfillment"].cases}
+    fulfillment_runbooks = {
+        runbook.key: runbook for runbook in personas["fulfillment"].runbooks
+    }
     saas_cases = {case.id: case for case in personas["saas-support"].cases}
     lawyer_knowledge_checks = {
         check.id: check for check in personas["lawyer"].knowledge_checks
@@ -258,6 +261,15 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "order-zf-20991"
     ]
     assert fulfillment_cases["E05"].expected.single_combined_reply is True
+    assert [
+        concern.runbook_key for concern in fulfillment_cases["E04"].concerns
+    ] == ["fulfillment-delivery-exception"]
+    assert fulfillment_runbooks[
+        "fulfillment-delivery-exception"
+    ].subsumes_runbooks == ["fulfillment-shipment-status"]
+    assert fulfillment_runbooks[
+        "fulfillment-delivery-exception"
+    ].required_read_only_tools == ["fixture_shipment_zf_88310"]
     assert saas_cases["S03"].expected.minimum_concern_count == 1
     assert sum(
         len(concern.answer_obligations) for concern in saas_cases["S03"].concerns
@@ -279,10 +291,41 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "remove the exposed token" in rule
         for rule in saas_runbooks["saas-token-exposure"].required_guidance
     )
-    assert any(
-        "exact start time" in rule and "ETA" in rule
-        for rule in saas_runbooks["saas-service-incident"].required_guidance
+    token_exposure_purpose = saas_runbooks["saas-token-exposure"].purpose
+    assert "actually exposed" in token_exposure_purpose
+    assert all(
+        marker in token_exposure_purpose
+        for marker in ("leaked", "published", "committed")
     )
+    assert {
+        concern.runbook_key for concern in saas_cases["S10"].concerns
+    } == {"saas-prompt-injection"}
+    incident_guidance = saas_runbooks["saas-service-incident"].required_guidance
+    assert len(incident_guidance) == 5
+    assert [rule.split(" only from", 1)[0] for rule in incident_guidance] == [
+        "State the incident status",
+        "State the affected region",
+        "State the affected service",
+        "State the exact start time",
+        "State the ETA",
+    ]
+    assert all("successful service-status lookup" in rule for rule in incident_guidance)
+    assert "if it is absent, say that it is unavailable" in incident_guidance[-1]
+    assert saas_runbooks["saas-webhook-recovery"].required_guidance == [
+        "State that delivery remains unverified.",
+        (
+            "State that the approved recovery actions must complete before delivery "
+            "can be considered recovered."
+        ),
+        (
+            "State that a separate post-action delivery check must succeed before "
+            "delivery can be considered fixed."
+        ),
+    ]
+    assert saas_runbooks["saas-invoice-dispute"].required_guidance == [
+        "State the invoice status only from the successful invoice lookup.",
+        "State the exact invoice due date only from the successful invoice lookup.",
+    ]
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())
 
@@ -328,11 +371,52 @@ def test_policy_only_cases_skip_logistics_lookups_without_losing_tool_coverage()
     assert "fixture_order_zf_20991" in tool_names("fulfillment-return-refund")
 
 
+def test_e04_seeds_subsumption_and_required_lookup_contracts() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "fulfillment"
+    )
+    content = build_intent_content(
+        persona,
+        "fulfillment-delivery-exception",
+        "https://api.mantly.io",
+    )
+    frontmatter = yaml.safe_load(content.split("---", 2)[1])
+
+    assert frontmatter["subsumes_runbooks"] == [
+        "fulfillment-shipment-status"
+    ]
+    assert frontmatter["required_read_only_tools"] == [
+        "fixture_shipment_zf_88310"
+    ]
+    assert {tool["name"] for tool in frontmatter["tools"]} == {
+        "fixture_shipment_zf_88310"
+    }
+
+
 def test_pending_actions_must_belong_to_a_matched_runbook() -> None:
     raw = yaml.safe_load((PERSONA_DIR / "lawyer.yaml").read_text(encoding="utf-8"))
     raw["cases"][0]["expected"]["pending_actions"].append("undeclared_action")
 
     with pytest.raises(ValidationError, match="not declared by its runbooks"):
+        E2EPersona.model_validate(raw)
+
+
+def test_subsumption_contract_must_reference_another_declared_runbook() -> None:
+    raw = yaml.safe_load(
+        (PERSONA_DIR / "fulfillment.yaml").read_text(encoding="utf-8")
+    )
+    exception = next(
+        runbook
+        for runbook in raw["runbooks"]
+        if runbook["key"] == "fulfillment-delivery-exception"
+    )
+    exception["subsumes_runbooks"] = ["unknown-runbook"]
+
+    with pytest.raises(ValidationError, match="subsumes unknown runbooks"):
+        E2EPersona.model_validate(raw)
+
+    exception["subsumes_runbooks"] = ["fulfillment-delivery-exception"]
+    with pytest.raises(ValidationError, match="cannot subsume itself"):
         E2EPersona.model_validate(raw)
 
 
@@ -853,6 +937,74 @@ def test_live_runner_runtime_preflight_rejects_external_runbook_tool() -> None:
     target = parse_target("lawyer=project123:channel456")
 
     with pytest.raises(LiveE2EError, match="not an exact fixture lookup"):
+        _preflight_target_for_run(FakeApi(), target, persona)  # type: ignore[arg-type]
+
+
+def test_live_runner_runtime_preflight_rejects_subsumption_drift() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "fulfillment"
+    )
+
+    class FakeApi:
+        api_base = "https://api.mantly.io"
+
+        def get(self, path: str) -> dict | list[dict]:
+            if path.endswith("/automations?limit=200"):
+                return {"items": []}
+            if path.endswith("/knowledge?status=all&limit=200"):
+                return {
+                    "items": [
+                        {
+                            "id": fixture.id,
+                            "title": fixture.title,
+                            "tags": [f"e2e-id:fulfillment:{fixture.id}"],
+                        }
+                        for fixture in persona.seed.knowledge
+                    ]
+                }
+            if path.endswith("/channels?limit=200"):
+                return {
+                    "items": [
+                        {
+                            "id": "channel456",
+                            "channelKey": "e2e-fulfillment-email",
+                            "status": "active",
+                            "config": {
+                                "adapter": "buffer",
+                                "e2ePersona": "fulfillment",
+                                "agentAutoSend": False,
+                                "syncEnabled": False,
+                            },
+                        }
+                    ]
+                }
+            if path.endswith("/publish/status"):
+                return {"hasUnpublishedChanges": False}
+            if path.endswith("/intents"):
+                return [{"name": runbook.key} for runbook in persona.runbooks]
+            marker = "/intents/"
+            if marker in path:
+                runbook_name = path.rsplit(marker, 1)[1]
+                content = build_intent_content(
+                    persona,
+                    runbook_name,
+                    self.api_base,
+                )
+                if runbook_name == "fulfillment-delivery-exception":
+                    head, raw_frontmatter, body = content.split("---", 2)
+                    frontmatter = yaml.safe_load(raw_frontmatter)
+                    frontmatter["subsumes_runbooks"] = []
+                    content = (
+                        f"{head}---\n"
+                        f"{yaml.safe_dump(frontmatter, sort_keys=False)}"
+                        f"---{body}"
+                    )
+                return {"name": runbook_name, "content": content}
+            raise AssertionError(f"unexpected path: {path}")
+
+    target = parse_target("fulfillment=project123:channel456")
+
+    with pytest.raises(LiveE2EError, match="subsumption contract drifted"):
         _preflight_target_for_run(FakeApi(), target, persona)  # type: ignore[arg-type]
 
 

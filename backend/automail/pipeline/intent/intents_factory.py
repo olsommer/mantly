@@ -106,6 +106,33 @@ def get_intent_required_read_only_tools(
     return []
 
 
+def get_intent_subsumes_runbooks(
+    intent_name: str,
+    intents_dir: Path | None = None,
+) -> list[str]:
+    """Return generic runbooks this runbook may replace for one business object."""
+    target = intent_name.strip().lower()
+    for frontmatter in get_intent_frontmatters(intents_dir=intents_dir):
+        if str(frontmatter.get("name") or "").lower() != target:
+            continue
+        raw_names = frontmatter.get(
+            "subsumes_runbooks",
+            frontmatter.get("subsumesRunbooks", []),
+        )
+        if not isinstance(raw_names, list):
+            return []
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw_name in raw_names:
+            name = str(raw_name or "").strip()
+            normalized = name.casefold()
+            if name and normalized != target.casefold() and normalized not in seen:
+                names.append(name)
+                seen.add(normalized)
+        return names
+    return []
+
+
 def get_intent_require_review(intent_name: str, intents_dir: Path | None = None) -> bool:
     """Return whether a matched intent must stop for human review."""
     target = intent_name.strip().lower()

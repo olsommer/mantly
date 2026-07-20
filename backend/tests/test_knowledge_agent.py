@@ -3634,7 +3634,12 @@ def test_automation_draft_requires_independent_grounding_for_auto_send(
         project_id="project-1",
     )
 
-    assert captured["llm_kwargs"] == {"timeout": 30, "max_retries": 0, "temperature": 0}
+    assert captured["llm_kwargs"] == {
+        "timeout": 30,
+        "max_retries": 0,
+        "temperature": 0,
+        "thinking_budget": issue_agent.GROUNDING_MODEL_THINKING_BUDGET,
+    }
     assert captured["agent_kwargs"]["tools"] == []
     assert captured["agent_kwargs"]["response_format"].schema is AutomationGroundingOutput
     assert captured["agent_kwargs"]["middleware"][0].run_limit == 1

@@ -840,6 +840,7 @@ class TestIntentAttachmentContext:
                                 "args": {"concerns": [{
                                     "summary": "Unmatched claim",
                                     "source_text": "See attachment.",
+                                    "answer_obligations": ["Explain that no runbook matches."],
                                     "intent_name": None,
                                     "confidence": 0.4,
                                     "reason": "No matching intent.",
@@ -974,6 +975,7 @@ class TestIntentAttachmentContext:
                 "args": {"concerns": [{
                     "summary": "Open a claim",
                     "source_text": "Please open a claim.",
+                    "answer_obligations": ["Confirm whether a claim can be opened."],
                     "intent_name": "claim",
                     "confidence": 0.99,
                     "reason": "",
@@ -1103,6 +1105,7 @@ class TestIntentAttachmentContext:
             "args": {"concerns": [{
                 "summary": "Open a claim",
                 "source_text": "Please open a claim.",
+                "answer_obligations": ["Confirm whether a claim can be opened."],
                 "intent_name": "claim",
                 "confidence": 0.99,
                 "reason": "",
@@ -1162,7 +1165,12 @@ class TestIntentAttachmentContext:
     @pytest.mark.no_gemini
     @pytest.mark.parametrize(
         "malformed_kind",
-        ["finish-reason", "invalid-tool-call", "invalid-route-args"],
+        [
+            "finish-reason",
+            "invalid-tool-call",
+            "invalid-route-args",
+            "missing-answer-obligations",
+        ],
     )
     def test_classification_retries_two_malformed_outputs_then_accepts_valid_route(
         self,
@@ -1190,12 +1198,27 @@ class TestIntentAttachmentContext:
                     "error": "Invalid JSON",
                 }],
             )
-        else:
+        elif malformed_kind == "invalid-route-args":
             malformed_message = AIMessage(
                 content="",
                 tool_calls=[{
                     "name": "route_concerns",
                     "args": {"concerns": "not-a-list"},
+                    "id": "invalid_1",
+                }],
+            )
+        else:
+            malformed_message = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "route_concerns",
+                    "args": {"concerns": [{
+                        "summary": "Open a claim",
+                        "source_text": "Please open a claim.",
+                        "intent_name": "claim",
+                        "confidence": 0.99,
+                        "reason": "",
+                    }]},
                     "id": "invalid_1",
                 }],
             )
@@ -1207,6 +1230,7 @@ class TestIntentAttachmentContext:
                 "args": {"concerns": [{
                     "summary": "Open a claim",
                     "source_text": "Please open a claim.",
+                    "answer_obligations": ["Confirm whether a claim can be opened."],
                     "intent_name": "claim",
                     "confidence": 0.99,
                     "reason": "",
@@ -1217,9 +1241,11 @@ class TestIntentAttachmentContext:
 
         class SequencedAgent:
             calls = 0
+            prompts = []
 
-            def invoke(self, _payload, config=None):
+            def invoke(self, payload, config=None):
                 assert config is not None
+                self.prompts.append(payload["messages"][0]["content"])
                 response = [malformed_message, malformed_message, valid_message][self.calls]
                 self.calls += 1
                 return {"messages": [response]}
@@ -1254,6 +1280,12 @@ class TestIntentAttachmentContext:
         )
 
         assert agent.calls == 3
+        assert "previous route_concerns output was malformed" not in agent.prompts[0]
+        assert all(
+            "previous route_concerns output was malformed" in prompt
+            for prompt in agent.prompts[1:]
+        )
+        assert all("one to six objects" in prompt for prompt in agent.prompts[1:])
         assert [concern.intent_name for concern in concerns] == ["claim"]
         assert reason is None
 
@@ -1371,6 +1403,7 @@ class TestIntentAttachmentContext:
                                 "args": {"concerns": [{
                                     "summary": "Open a claim",
                                     "source_text": "Please open a claim.",
+                                    "answer_obligations": ["Confirm whether a claim can be opened."],
                                     "intent_name": "claim",
                                     "confidence": 0.95,
                                     "reason": "",

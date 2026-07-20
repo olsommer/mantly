@@ -83,6 +83,13 @@ _ROUTER_EXECUTION_LIMIT_REVIEW_REASON = (
 _MALFORMED_ROUTER_REVIEW_REASON = (
     "Intent classification returned malformed structured output; human review is required."
 )
+_MALFORMED_ROUTER_REPAIR_INSTRUCTION = """
+The previous route_concerns output was malformed. Retry with exactly one valid
+route_concerns call and no prose. Supply an object whose concerns field is a
+JSON array of one to six objects. Every concern object must include summary,
+source_text, answer_obligations, intent_name (an exact available intent name or
+null), confidence, and reason.
+""".strip()
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _PROCESSING_SECURITY_BOUNDARY = (_PROMPTS_DIR / "processing_security_boundary.md").read_text(encoding="utf-8").strip()
@@ -791,6 +798,21 @@ def _route_concerns_call_is_invalid(messages: list[Any]) -> bool:
     for raw_concern in raw_concerns:
         if not isinstance(raw_concern, dict):
             return True
+        required_fields = {
+            "summary",
+            "source_text",
+            "answer_obligations",
+            "intent_name",
+            "confidence",
+            "reason",
+        }
+        if not required_fields.issubset(raw_concern):
+            return True
+        raw_obligations = raw_concern.get("answer_obligations")
+        if not isinstance(raw_obligations, list) or not any(
+            str(obligation or "").strip() for obligation in raw_obligations
+        ):
+            return True
         try:
             concern = ConcernRoute.model_validate(raw_concern)
         except Exception:
@@ -868,12 +890,16 @@ def _run_intent_router_agent(
             ],
         )
 
+        base_prompt = _classification_user_prompt(email, parsed_attachments)
         with use_intents_dir(intents_dir), llm_stage("intent"):
             for attempt in range(_ROUTER_MALFORMED_OUTPUT_MAX_ATTEMPTS):
+                active_prompt = base_prompt
+                if attempt:
+                    active_prompt = f"{base_prompt}\n\n{_MALFORMED_ROUTER_REPAIR_INSTRUCTION}"
                 try:
                     raw_result = _invoke_agent(
                         agent,
-                        _classification_user_prompt(email, parsed_attachments),
+                        active_prompt,
                         parsed_attachments=parsed_attachments,
                         usage_context=usage_context,
                         run_name="intent_router_agent",

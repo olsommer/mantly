@@ -1642,6 +1642,76 @@ def test_explicit_negative_action_state_requires_a_safe_terminal_tail(
 @pytest.mark.parametrize(
     "answer",
     [
+        (
+            "An investigation is pending human review to determine the discrepancy "
+            "and to process a credit for the difference."
+        ),
+        "The review remains pending to issue a refund.",
+        "The request is awaiting approval to apply the waiver.",
+        "The case is pending to process credits.",
+        "The review remains pending to process a CHF 200 credit.",
+        "The review is pending to process an account credit.",
+        "The review is pending to apply a service credit.",
+        "The review is pending for processing a refund.",
+        "The review is pending for the processing of a refund.",
+        "The review is pending to process a partial CHF 200 credit.",
+        (
+            "The review is pending to issue a refund, but it has not been approved "
+            "for the address change."
+        ),
+    ],
+)
+def test_pending_action_guard_blocks_pending_financial_outcome_purpose(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The requested credit is pending human review and has not been approved.",
+        "The investigation is pending human review to assess whether a credit is eligible.",
+        "To process a refund, human approval is required.",
+        "The review is pending before any credit can be approved.",
+        "The request to issue a refund is pending human review and has not been approved.",
+        "The review is pending to determine whether to issue a refund.",
+        "The review is pending to issue a refund, but the refund has not been approved.",
+        "The review is pending to process a credit if it is approved.",
+        "The review is pending to process billing details and discuss a credit request.",
+    ],
+)
+def test_pending_action_guard_allows_unverified_financial_outcome_language(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(answer=answer, runbook_actions=_actions())
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+def test_pending_financial_outcome_repair_preserves_prior_verified_facts() -> None:
+    verified = "Invoice INV-9012 is open and due on 2026-08-15."
+    unsafe = (
+        "An investigation is pending human review to determine the discrepancy "
+        "and to process a credit for the difference."
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=f"{verified} {unsafe}",
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == f"{verified}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+    assert "process a credit" not in repaired
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "We changed the address and the ticket is not confirmed.",
         "We have changed the address and the request is not approved.",
         "We opened the escalation and the address change remains pending.",

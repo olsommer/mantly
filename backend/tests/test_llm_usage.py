@@ -16,6 +16,22 @@ def test_create_llm_does_not_pass_invalid_callback_list():
     assert getattr(llm, "_mantly_usage_context")["provider"] == "gemini"
 
 
+def test_create_llm_applies_optional_gemini_thinking_budget():
+    from automail.core.config import AdminConfig
+    from automail.llm.factory import create_llm
+
+    llm = create_llm(
+        AdminConfig(
+            llm_api_key="dummy",
+            llm_provider="gemini",
+            llm_model="gemini-2.5-flash",
+        ),
+        thinking_budget=1024,
+    )
+
+    assert llm.thinking_budget == 1024
+
+
 def test_record_usage_from_agent_result_metadata():
     from automail.llm.usage import collect_llm_usage, llm_stage, record_usage_from_result
 

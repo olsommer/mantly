@@ -408,6 +408,16 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert saas_runbooks["saas-invoice-dispute"].required_guidance == [
         "State the invoice status only from the successful invoice lookup.",
         "State the exact invoice due date only from the successful invoice lookup.",
+        (
+            "State that credit eligibility and any amount remain unverified unless "
+            "successful action evidence explicitly proves approval."
+        ),
+    ]
+    assert saas_runbooks["saas-privacy-export"].required_read_only_tools == [
+        "fixture_saas_account_acme_4421"
+    ]
+    assert saas_runbooks["saas-workspace-deletion"].required_read_only_tools == [
+        "fixture_saas_account_acme_4421"
     ]
     assert saas_cases["S10"].expected.tool_fixture_ids == []
     assert any(case.follow_ups for case in saas_cases.values())

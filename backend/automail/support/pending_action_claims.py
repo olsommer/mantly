@@ -1268,8 +1268,31 @@ _MARKDOWN_TABLE_ACTION_PATTERN = re.compile(
     rf"(?:been\s+|being\s+)?(?:{'|'.join((*_COMPLETED_ACTIONS, *_PROGRESSIVE_ACTIONS))})\b",
     re.IGNORECASE,
 )
+_PENDING_FINANCIAL_OUTCOME_PURPOSE_PATTERN = re.compile(
+    r"\b(?:investigation|review|request|case|action)\b"
+    r"[^.!?\n]{0,100}\b(?:pending|awaiting)\b"
+    r"(?![^.!?\n]{0,180}\bwhether\b)"
+    r"[^.!?\n]{0,180}\b(?:"
+    r"(?:and\s+)?to\s+(?:process|issue|approve|apply|provide|grant)|"
+    r"for\s+(?:the\s+)?(?:processing|issuance|approval|application|provision|granting)"
+    r"(?:\s+of)?"
+    r")\s+"
+    r"(?:(?:an?|the|your)\s+)?"
+    r"(?:(?!(?:and|but|for|if|or|to|unless|whether|with|without)\b)"
+    r"(?:\d[\d,.]*|[A-Za-z$€£][A-Za-z0-9$€£.-]{0,30})\s+){0,4}"
+    r"(?:credit|refund|waiver)s?\b",
+    re.IGNORECASE,
+)
+_PENDING_FINANCIAL_OUTCOME_NONAPPROVAL_PATTERN = re.compile(
+    r"^\s*,?\s*(?:(?:and|but)\s+)?"
+    r"(?:(?:the|this|that|requested)\s+)?(?:credit|refund|waiver)s?\b"
+    r"[^.!?\n]{0,100}\b(?:is|are|has|have)\s+(?:not|never)\s+"
+    r"(?:been\s+)?(?:approved|confirmed|guaranteed)\b\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _ANSWER_UNIT_PATTERN = re.compile(r"[^.!?\n]+(?:[.!?]+(?:[*_`~\]\)]|</[A-Za-z][^>\n]{0,60}>)*|(?=\n)|$)")
 _CLAIM_PATTERNS = (
+    _PENDING_FINANCIAL_OUTCOME_PURPOSE_PATTERN,
     _PROGRESSIVE_ACTION_PATTERN,
     _PRE_AUX_PROGRESSIVE_ACTION_PATTERN,
     _COORDINATED_PROGRESSIVE_ACTION_PATTERN,
@@ -4077,6 +4100,17 @@ def _has_unsafe_claim(
     shadow = _action_claim_shadow(unit)
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(shadow):
+            if (
+                pattern is _PENDING_FINANCIAL_OUTCOME_PURPOSE_PATTERN
+                and (
+                    _PENDING_FINANCIAL_OUTCOME_NONAPPROVAL_PATTERN.fullmatch(shadow[match.end() :])
+                    or _has_scoped_future_contingency(
+                        prefix=shadow[: match.start()],
+                        suffix=shadow[match.end() :],
+                    )
+                )
+            ):
+                continue
             if _FUTURE_CONDITION_PREFIX_PATTERN.search(shadow[: match.start()]):
                 continue
             if _is_scoped_negative_epistemic_claim(

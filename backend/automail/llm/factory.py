@@ -33,6 +33,7 @@ def create_llm(
     max_retries: int = 3,
     model: str | None = None,
     temperature: float | None = None,
+    thinking_budget: int | None = None,
 ) -> Any:
     """Build a LangChain chat model from the current admin config."""
     extra_kwargs: dict = {}
@@ -63,6 +64,8 @@ def create_llm(
             "or project admin config."
         )
     resolved_model = model or config.llm_model or "gemini-2.5-flash"
+    if thinking_budget is not None:
+        extra_kwargs["thinking_budget"] = thinking_budget
     llm = ChatGoogleGenerativeAI(
         model=resolved_model,
         api_key=api_key,

@@ -56,6 +56,9 @@ _GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
 GROUNDING_MODEL_CALL_LIMIT = 2
 GROUNDING_MODEL_CALL_TIMEOUT_SECONDS = 30
+# Keep deterministic adjudication bounded; live Gemini reasoning otherwise
+# exceeded the fail-closed parent deadline on a fully covered safety reply.
+GROUNDING_MODEL_THINKING_BUDGET = 1024
 # A protocol-complete second pass is intentionally allowed. Provider clients can
 # return after their nominal transport timeout; live evidence observed an 86.8s
 # first adjudication followed by a 20.8s reassessment. Keep enough parent-future
@@ -4966,6 +4969,7 @@ def assess_issue_automation_grounding(
             timeout=GROUNDING_MODEL_CALL_TIMEOUT_SECONDS,
             max_retries=0,
             temperature=0,
+            thinking_budget=GROUNDING_MODEL_THINKING_BUDGET,
         )
         usage_context = getattr(llm, "_mantly_usage_context", None)
         if isinstance(usage_context, dict):

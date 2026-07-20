@@ -240,9 +240,11 @@ runbooks:
   - key: saas-privacy-export
     purpose: Verify authority and prepare a customer-data export.
     proposed_actions: [request_data_export]
+    required_read_only_tools: [fixture_saas_account_acme_4421]
   - key: saas-workspace-deletion
     purpose: Block destructive deletion until owner authority and retention review are complete.
     proposed_actions: [request_workspace_deletion]
+    required_read_only_tools: [fixture_saas_account_acme_4421]
   - key: saas-webhook-recovery
     purpose: Explain verified integration failures and prepare secret rotation or event replay.
     proposed_actions: [rotate_signing_secret, replay_webhook_events]
@@ -266,6 +268,7 @@ runbooks:
     required_guidance:
       - State the invoice status only from the successful invoice lookup.
       - State the exact invoice due date only from the successful invoice lookup.
+      - State that credit eligibility and any amount remain unverified unless successful action evidence explicitly proves approval.
   - key: saas-sso-scim-setup
     purpose: Explain tool-confirmed SSO and SCIM capabilities and prepare setup.
     proposed_actions: [request_sso_setup]

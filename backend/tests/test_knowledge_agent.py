@@ -686,6 +686,8 @@ def test_knowledge_agent_contract_keeps_saas_incident_unknowns_explicit() -> Non
     assert "permission to request a review does not establish" in prompt
     assert "requested eligibility, approval, cause, date, amount" in prompt
     assert "Do not merge several missing items" in prompt
+    assert "Do not describe an entire requested item as unavailable" in prompt
+    assert "include the complete prerequisite set" in prompt
     assert "Every item must have its own evidence-backed answer" in prompt
     assert "request_item_assessments" in answer_schema["required"]
     assert "explicitly resolves every independent item in the agent request" in answer_description
@@ -705,11 +707,17 @@ _SAAS_K01_QUESTION = (
     "request an SLA-credit review, and is incident eligibility or any credit "
     "approved or quantified?"
 )
+_FULFILLMENT_K01_REQUEST = (
+    "Based only on reviewed knowledge and verified shipment facts, explain the "
+    "current state of ZF-20991, whether it may be returned today, and who "
+    "controls refund timing."
+)
 
 
-def test_knowledge_request_items_extract_exact_lawyer_and_saas_k01_questions() -> None:
+def test_knowledge_request_items_extract_exact_persona_k01_requests() -> None:
     lawyer_items = issue_agent._knowledge_request_items(_LAWYER_K01_QUESTION)
     saas_items = issue_agent._knowledge_request_items(_SAAS_K01_QUESTION)
+    fulfillment_items = issue_agent._knowledge_request_items(_FULFILLMENT_K01_REQUEST)
 
     assert [item["question"] for item in lawyer_items] == [
         "What are the standard consultation fee and retainer?",
@@ -725,6 +733,193 @@ def test_knowledge_request_items_extract_exact_lawyer_and_saas_k01_questions() -
         "May Acme Analytics AG's Enterprise plan request an SLA-credit review?",
         "Is incident eligibility or any credit approved or quantified?",
     ]
+    assert [item["question"] for item in fulfillment_items] == [
+        "Explain the current state of ZF-20991?",
+        "Whether it may be returned today?",
+        "Who controls refund timing?",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("agent_request", "expected"),
+    [
+        (
+            "Explain the carrier, last confirmed event, location, and ETA for ZF-20991.",
+            ["Explain the carrier, last confirmed event, location, and ETA for ZF-20991?"],
+        ),
+        (
+            "Provide status and whether an SLA credit is approved.",
+            ["Provide status?", "Whether an SLA credit is approved?"],
+        ),
+        (
+            "Current state, return permission, and refund owner.",
+            ["Current state, return permission, and refund owner?"],
+        ),
+        (
+            "Explain the current shipment state. Who controls refund timing?",
+            [
+                "Explain the current shipment state?",
+                "Who controls refund timing?",
+            ],
+        ),
+        (
+            "Who controls refund timing? Explain the current shipment state.",
+            [
+                "Who controls refund timing?",
+                "Explain the current shipment state?",
+            ],
+        ),
+        (
+            "Explain the current shipment state. Provide the return conditions.",
+            [
+                "Explain the current shipment state?",
+                "Provide the return conditions?",
+            ],
+        ),
+        (
+            "Explain the status for Example Inc. and provide the ETA.",
+            ["Explain the status for Example Inc. and provide the ETA?"],
+        ),
+        (
+            "Explain the current state; provide the return conditions; and state who owns the refund.",
+            [
+                "Explain the current state?",
+                "Provide the return conditions?",
+                "State who owns the refund?",
+            ],
+        ),
+        (
+            "Tell me: What is status?",
+            ["What is status?"],
+        ),
+        (
+            "Please provide: what is the SLA? And who approves credits?",
+            ["What is the SLA?", "Who approves credits?"],
+        ),
+        (
+            "Explain the shipment status: What is the ETA?",
+            ["Explain the shipment status?", "What is the ETA?"],
+        ),
+        (
+            "Please explain briefly: What is current shipment status?",
+            ["What is current shipment status?"],
+        ),
+        (
+            "Please provide the following: What is SLA? And who approves?",
+            ["What is SLA?", "Who approves?"],
+        ),
+        (
+            "Tell me specifically: What is status?",
+            ["What is status?"],
+        ),
+        (
+            "Please provide the following details: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Please explain in plain language: What is current shipment status?",
+            ["What is current shipment status?"],
+        ),
+        (
+            "Tell me in simple terms: What is status?",
+            ["What is status?"],
+        ),
+        (
+            "Provide a quick answer: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "List in bullet points: What is the SLA? And who approves credits?",
+            ["What is the SLA?", "Who approves credits?"],
+        ),
+        (
+            "Explain shipment status in simple terms: What is the ETA?",
+            [
+                "Explain shipment status in simple terms?",
+                "What is the ETA?",
+            ],
+        ),
+        (
+            "Explain our account status: What is the SLA?",
+            ["Explain our account status?", "What is the SLA?"],
+        ),
+        (
+            "Provide details: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "List in a table: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Explain with examples: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Explain clearly and concisely: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Explain clearly, directly, and concisely: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Summarize in one sentence: What is the SLA?",
+            ["What is the SLA?"],
+        ),
+        (
+            "Explain with order ZF-1: What is the shipment status?",
+            ["Explain with order ZF-1?", "What is the shipment status?"],
+        ),
+        (
+            "Explain invoice status with examples: What is the ETA?",
+            ["Explain invoice status with examples?", "What is the ETA?"],
+        ),
+    ],
+)
+def test_knowledge_request_items_extract_imperatives_without_splitting_noun_lists(
+    agent_request: str,
+    expected: list[str],
+) -> None:
+    items = issue_agent._knowledge_request_items(agent_request)
+
+    assert [item["question"] for item in items] == expected
+
+
+@pytest.mark.parametrize("agent_request", ["", "   ", "?", "...", "; ?"])
+def test_knowledge_request_items_ignore_empty_or_punctuation_only_input(
+    agent_request: str,
+) -> None:
+    assert issue_agent._knowledge_request_items(agent_request) == ()
+
+
+def test_fulfillment_imperative_k01_omission_gets_item_specific_repair() -> None:
+    items = issue_agent._knowledge_request_items(_FULFILLMENT_K01_REQUEST)
+    answer = (
+        "Shipment ZF-20991 is in transit with UPS. "
+        "The merchant and payment provider control refund approval and posting time."
+    )
+
+    repaired, uncovered = issue_agent._repair_knowledge_request_item_coverage(
+        answer=answer,
+        question=_FULFILLMENT_K01_REQUEST,
+        items=items,
+        assessments=[
+            _knowledge_request_assessment(
+                "Shipment ZF-20991 is in transit with UPS.",
+                item_id=items[0]["id"],
+            ),
+            _knowledge_request_assessment(
+                "The merchant and payment provider control refund approval and posting time.",
+                item_id=items[2]["id"],
+            ),
+        ],
+    )
+
+    assert uncovered == (items[1],)
+    assert repaired.endswith(
+        'Available evidence does not establish this requested item: "Whether it may be returned today?"'
+    )
 
 
 @pytest.mark.parametrize(
@@ -3538,6 +3733,95 @@ def _assess_with_grounding_outputs(
     return result, prompts
 
 
+@pytest.mark.parametrize("second_attempt_grounded", [True, False])
+def test_grounding_retries_internally_inconsistent_not_grounded_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    second_attempt_grounded: bool,
+) -> None:
+    issue = _issue_with_grounding_obligations(
+        concern_id="delivery",
+        questions=[("delivery:status", "What is the current delivery status?")],
+    )
+    answer = "The delivery is pending carrier confirmation."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+
+    def output(verdict: str) -> AutomationGroundingOutput:
+        return AutomationGroundingOutput(
+            verdict=verdict,
+            answer_sha256=issue_agent.grounding_text_sha256(answer),
+            unit_assessments=[
+                AutomationGroundingUnitAssessment(
+                    unit_id=unit["id"],
+                    unit_sha256=unit["sha256"],
+                    supported=True,
+                    evidence_ids=["ticket"],
+                )
+            ],
+            obligation_assessments=[
+                AutomationGroundingObligationAssessment(
+                    obligation_id="delivery:status",
+                    resolution="pending_or_unavailable",
+                    answer_unit_ids=[unit["id"]],
+                    evidence_ids=["ticket"],
+                )
+            ],
+        )
+
+    inconsistent = output("not_grounded")
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[
+            inconsistent,
+            output("grounded") if second_attempt_grounded else inconsistent,
+        ],
+    )
+
+    assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert prompts[0] != prompts[1]
+    assert "## Required Protocol Correction" in prompts[1]
+    assert "verdict contradicts exhaustive grounded assessments" in prompts[1]
+    assert result.verified is second_attempt_grounded
+    if second_attempt_grounded:
+        assert result.status == "passed"
+    else:
+        assert result.status == "failed"
+        assert result.reason_code == "ungrounded_answer"
+
+
+def test_grounding_does_not_retry_genuine_unsupported_not_grounded_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = "A refund has already been issued."
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    unsupported = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=False,
+                evidence_ids=[],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue={"id": "issue-1", "subject": "Refund status"},
+        answer=answer,
+        outputs=[unsupported],
+    )
+
+    assert len(prompts) == 1
+    assert result.verified is False
+    assert result.status == "failed"
+    assert result.reason_code == "ungrounded_answer"
+    assert result.unsupported_claims == (answer,)
+
+
 def test_repaired_e09_notice_is_hashed_and_grounded_to_its_concern(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4201,6 +4485,10 @@ def test_grounding_does_not_override_not_covered_fixture_tool_timestamp(
             "The incident is currently investigating, affecting the authentication service "
             "in the EU, and started on 2026-07-19T07:40:00Z."
         ),
+        (
+            "This incident is currently under investigation, affecting the EU authentication "
+            "service, and started at 2026-07-19T07:40:00Z."
+        ),
     ],
 )
 def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
@@ -4312,6 +4600,22 @@ def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
         "The authentication service is starting at 2026-07-19T07:40:00Z.",
         "The EU service began at 2026-07-19T07:40:00Z.",
         "The issue is current and the authentication service started at 2026-07-19T07:40:00Z.",
+        (
+            "This incident is currently under investigation, affecting the EU authentication "
+            "service and account deletion, and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the EU authentication "
+            "service, and the service started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the EU authentication "
+            "service, and started at 2026-07-19T07:40:00Z, while account deletion is underway."
+        ),
+        (
+            "This incident is currently under review, affecting the EU authentication service, "
+            "and started at 2026-07-19T07:40:00Z."
+        ),
     ],
 )
 @pytest.mark.parametrize("resolution", ["answered", "not_covered"])

@@ -449,6 +449,44 @@ _SAFE_CREDENTIAL_EXPOSURE_EMAIL_TOKENS = _SAFE_CREDENTIAL_SOURCE_TOKENS | frozen
         "were",
     }
 )
+_PROMPT_OVERRIDE_REQUEST_PATTERN = re.compile(
+    r"\b(?:disregard|ignore|override)\b[^.!?\n]{0,120}\b"
+    r"(?:developer|instructions?|previous|prior|routing|rules?|system|tools?)\b",
+    re.IGNORECASE,
+)
+_IDENTITY_BYPASS_REQUEST_PATTERN = re.compile(
+    r"\b(?:bypass|do\s+not|don't|skip|without)\b[^.!?\n]{0,100}\b"
+    r"(?:authori[sz]ation|identity|verification|verify)\b",
+    re.IGNORECASE,
+)
+_PROTECTED_DATA_EXFILTRATION_PATTERN = re.compile(
+    r"\b(?:email|export|give|list|provide|retrieve|reveal|send|show)\b"
+    r"[^.!?\n]{0,260}\b(?:all\s+customers?|credentials?|customer\s+data|"
+    r"internal\s+prompts?|api[-\s]?tokens?|secrets?|security\s+logs?)\b",
+    re.IGNORECASE,
+)
+_AUDIT_DESTRUCTION_REQUEST_PATTERN = re.compile(
+    r"\b(?:delete|erase|remove|wipe)\b[^.!?\n]{0,100}\b"
+    r"(?:audit\s+(?:logs?|trail)|security\s+logs?)\b",
+    re.IGNORECASE,
+)
+_AUDIT_BUSINESS_REQUEST_PATTERN = re.compile(
+    r"\baudit\s+(?:data|events?|exports?|logs?|reports?)\b",
+    re.IGNORECASE,
+)
+_AUDIT_BUSINESS_SUBJECT_CONTEXT_PATTERN = re.compile(
+    r"\b(?:accounts?|admins?|api|available|csv|current|daily|formats?|"
+    r"scheduled|supported|workspace)\b|\bby\s+email\b|"
+    r"^\s*(?:please\s+)?(?:can|could|would|will)?\s*"
+    r"(?:email|export|provide|send)\b",
+    re.IGNORECASE,
+)
+_AUTHORITY_PRETEXT_SENTENCE_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:admin(?:istrator)?|ceo|cfo|coo|cto|director|executive|"
+    r"owner|president)\s+(?:has\s+)?(?:approv(?:e|ed|es)|authori[sz](?:e|ed|es))\s+"
+    r"(?:this|the)\s+(?:action|export|request)\.?$",
+    re.IGNORECASE,
+)
 
 
 def _action_is_enabled(raw: dict[str, Any]) -> bool:
@@ -2554,6 +2592,126 @@ def _merge_subsumed_route(
     )
 
 
+def _apply_prompt_injection_pretext_precedence(
+    email: Email,
+    routes: list[ConcernRoute],
+) -> list[ConcernRoute]:
+    """Drop only an audit route proven to be a hostile-request pretext."""
+    if len(routes) < 2:
+        return routes
+
+    def normalized(value: str) -> str:
+        return " ".join(str(value or "").split()).strip()
+
+    def intent_terms(route: ConcernRoute) -> frozenset[str]:
+        return frozenset(
+            re.findall(r"[a-z0-9]+", str(route.intent_name or "").casefold())
+        )
+
+    prompt_indices = [
+        index
+        for index, route in enumerate(routes)
+        if {"prompt", "injection"} <= intent_terms(route)
+    ]
+    if len(prompt_indices) != 1:
+        return routes
+
+    prompt_index = prompt_indices[0]
+    prompt_route = routes[prompt_index]
+    prompt_source = normalized(prompt_route.source_text)
+    if not prompt_source or not all(
+        pattern.search(prompt_source)
+        for pattern in (
+            _PROMPT_OVERRIDE_REQUEST_PATTERN,
+            _IDENTITY_BYPASS_REQUEST_PATTERN,
+            _PROTECTED_DATA_EXFILTRATION_PATTERN,
+            _AUDIT_DESTRUCTION_REQUEST_PATTERN,
+        )
+    ):
+        return routes
+
+    subject = normalized(email.subject)
+    if (
+        _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(subject) is None
+        and (
+            ("?" in subject and re.search(r"\baudit\b", subject, re.IGNORECASE))
+            or (
+                _AUDIT_BUSINESS_REQUEST_PATTERN.search(subject) is not None
+                and _AUDIT_BUSINESS_SUBJECT_CONTEXT_PATTERN.search(subject) is not None
+            )
+        )
+    ):
+        # Subject is customer content too. A complete audit question there is
+        # an independent concern even when the body is entirely hostile.
+        return routes
+
+    def source_is_subject_authority_pretext(route: ConcernRoute) -> bool:
+        source = normalized(route.source_text)
+        if not subject or not source:
+            return False
+        match = re.fullmatch(
+            rf"{re.escape(subject)}\s+(?P<remainder>.+)",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return False
+        pretext_sentences = [
+            item.strip()
+            for item in re.split(
+                r"(?<=[.!?])\s+|;\s*",
+                match.group("remainder"),
+            )
+            if item.strip()
+        ]
+        return bool(pretext_sentences) and all(
+            _AUTHORITY_PRETEXT_SENTENCE_PATTERN.fullmatch(item) is not None
+            for item in pretext_sentences
+        )
+
+    prompt_source_folded = prompt_source.casefold()
+    prompt_sentence_count = 0
+    for sentence in _CUSTOMER_TEXT_SENTENCE_SPLIT_PATTERN.split(email.body):
+        item = normalized(sentence)
+        if not item:
+            continue
+        if _AUTHORITY_PRETEXT_SENTENCE_PATTERN.fullmatch(item) is not None:
+            continue
+        if (
+            _AUDIT_BUSINESS_REQUEST_PATTERN.search(item) is not None
+            and _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(item) is None
+        ):
+            # Preserve an explicit audit operation even when the prompt route's
+            # excerpt is overly broad and happens to contain that sentence.
+            return routes
+        if item.casefold() not in prompt_source_folded:
+            # Any independent body sentence may be a real second concern. Keep
+            # every route rather than trying to infer its meaning here.
+            return routes
+        prompt_sentence_count += 1
+    if prompt_sentence_count == 0:
+        return routes
+
+    suppressed: set[int] = set()
+    for index, route in enumerate(routes):
+        terms = intent_terms(route)
+        if (
+            index != prompt_index
+            and "audit" in terms
+            and terms.intersection({"export", "report", "reporting"})
+            and source_is_subject_authority_pretext(route)
+        ):
+            suppressed.add(index)
+            logger.warning(
+                "Suppressing audit route '%s' sourced only from a hostile authority pretext",
+                route.intent_name,
+            )
+
+    if not suppressed:
+        return routes
+    return [route for index, route in enumerate(routes) if index not in suppressed]
+
+
 def _apply_credential_exposure_precedence(
     email: Email,
     routes: list[ConcernRoute],
@@ -2994,6 +3152,7 @@ def run_intent_agent(
     routes = _apply_safety_intent_precedence(routes, known_intents)
     routes = _apply_credential_exposure_precedence(email, routes)
     routes = _dedupe_concern_routes(routes)
+    routes = _apply_prompt_injection_pretext_precedence(email, routes)
     routes = _apply_runbook_subsumption(email, routes, intents_dir)
     if not routes:
         reason = router_error or "No configured intent matches this email."

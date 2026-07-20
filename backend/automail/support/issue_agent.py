@@ -424,6 +424,36 @@ def _grounding_retryable_protocol_errors(
                 "Answer obligation uses unknown evidence IDs: "
                 + ", ".join(unknown_evidence_ids[:5])
             )
+    all_units_supported = bool(structured.unit_assessments) and all(
+        assessment.supported
+        and bool(
+            {
+                evidence_id
+                for value in assessment.evidence_ids
+                if (evidence_id := _string_from(value))
+            }
+        )
+        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
+    )
+    all_obligations_addressed = all(
+        assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+        and bool(
+            {
+                unit_id
+                for value in assessment.answer_unit_ids
+                if (unit_id := _string_from(value))
+            }
+        )
+        for assessment in structured.obligation_assessments[:100]
+    )
+    if (
+        not errors
+        and structured.verdict == "not_grounded"
+        and all_units_supported
+        and all_obligations_addressed
+        and not any(_string_from(value) for value in structured.contradictions)
+    ):
+        errors.append("Evaluator verdict contradicts exhaustive grounded assessments")
     return tuple(dict.fromkeys(errors))
 
 
@@ -1468,6 +1498,28 @@ _KNOWLEDGE_RESTARTED_QUESTION_PATTERN = re.compile(
     r"will|would|do|does|did|should|must)\b)",
     re.IGNORECASE,
 )
+_KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN = re.compile(
+    r"(?:^|[,:;?]\s+(?:(?:and|or)\s+)?|[.]\s+)"
+    r"(?P<request>(?:please\s+)?(?:explain|describe|provide|give|"
+    r"tell|state|identify|list|summarize|confirm|compare|clarify)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_IMPERATIVE_ITEM_PATTERN = re.compile(
+    r"\s*,\s*(?:and\s+|or\s+)?(?="
+    r"(?:whether|what|when|where|which|who|whom|whose|why|how)\b)|"
+    r"\s+(?:and|or)\s+(?="
+    r"(?:whether|what|when|where|which|who|whom|whose|why|how)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_REQUEST_SENTENCE_PATTERN = re.compile(
+    r"(?:[!?;]\s+(?:(?:and|or)\s+)?|[.]\s+)"
+    r"(?=(?:please\s+)?"
+    r"(?:explain|describe|provide|give|tell|state|"
+    r"identify|list|summarize|confirm|compare|clarify|what|when|where|which|who|"
+    r"whom|whose|why|how|is|are|was|were|has|have|had|can|could|may|might|will|"
+    r"would|do|does|did|should|must)\b)",
+    re.IGNORECASE,
+)
 _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
     {
         "a",
@@ -1485,22 +1537,31 @@ _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
         "by",
         "can",
         "could",
+        "clarify",
+        "compare",
+        "confirm",
+        "describe",
         "did",
         "do",
         "does",
+        "explain",
         "exact",
         "for",
         "from",
+        "give",
         "had",
         "has",
         "have",
         "how",
         "i",
+        "identify",
         "in",
         "is",
         "it",
         "known",
+        "list",
         "may",
+        "me",
         "might",
         "must",
         "of",
@@ -1509,9 +1570,12 @@ _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
         "or",
         "our",
         "please",
+        "provide",
         "request",
         "requested",
         "should",
+        "state",
+        "summarize",
         "tell",
         "that",
         "the",
@@ -1520,6 +1584,7 @@ _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
         "this",
         "to",
         "using",
+        "us",
         "verified",
         "was",
         "we",
@@ -1557,42 +1622,160 @@ _KNOWLEDGE_REQUEST_GENERIC_STATE_TOKENS = frozenset(
         "quantifi",
     }
 )
+_KNOWLEDGE_FRAMING_MANNER_ADVERB = r"[a-z]+(?:-[a-z]+)*ly"
+_KNOWLEDGE_FRAMING_MANNER_PATTERN = re.compile(
+    rf"{_KNOWLEDGE_FRAMING_MANNER_ADVERB}"
+    rf"(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    rf"{_KNOWLEDGE_FRAMING_MANNER_ADVERB})*",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_FRAMING_FORMAT_PATTERN = re.compile(
+    r"(?:in|using|with|as)\s+(?:(?:a|an|the)\s+)?"
+    r"(?:[a-z0-9][a-z0-9'-]*\s+){0,5}"
+    r"(?:bullet\s+points?|examples?|formats?|json|language|markdown|"
+    r"paragraphs?|prose|sentences?|styles?|tables?|terms|words)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_FRAMING_NOUN_PHRASE_PATTERN = re.compile(
+    r"(?:(?:a|an|the|this|that|these|those|some|any)\s+"
+    r"(?:[a-z][a-z'-]*\s+){0,5})?"
+    r"(?:answers?|details?|following|overviews?|responses?|summar(?:y|ies))",
+    re.IGNORECASE,
+)
+
+
+def _knowledge_imperative_prefix_is_framing_only(value: str) -> bool:
+    """Recognize a topic-free command that only frames introduced questions."""
+
+    match = _KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN.match(value.strip())
+    if match is None or match.start("request") != 0:
+        return False
+    remainder = value.strip()[match.end("request") :].strip(" ,:\t\r\n")
+    recipient = re.match(r"(?:me|us)\b[\s,]*", remainder, flags=re.IGNORECASE)
+    if recipient is not None:
+        remainder = remainder[recipient.end() :].strip()
+    if not remainder:
+        return True
+    return bool(
+        _KNOWLEDGE_FRAMING_MANNER_PATTERN.fullmatch(remainder)
+        or _KNOWLEDGE_FRAMING_FORMAT_PATTERN.fullmatch(remainder)
+        or _KNOWLEDGE_FRAMING_NOUN_PHRASE_PATTERN.fullmatch(remainder)
+    )
 
 
 def _knowledge_request_items(question: str) -> tuple[dict[str, str], ...]:
-    """Extract bounded direct question clauses without splitting noun conjunctions."""
+    """Extract bounded question or imperative clauses without splitting noun conjunctions."""
     normalized = re.sub(r"\s+", " ", str(question or "")).strip()
     if not normalized:
         return ()
-    raw_questions = re.findall(r"[^?]*\?", normalized)
+    raw_questions = list(re.finditer(r"[^?]*\?", normalized))
     if len(raw_questions) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
         raise ValueError("Knowledge agent request contains too many direct questions")
 
-    items: list[str] = []
-    seen: set[str] = set()
-    for raw_question in raw_questions:
+    positioned_items: list[tuple[int, str]] = []
+    direct_question_starts: list[int] = []
+
+    def trim_leading_conjunction(value: str) -> tuple[str, int]:
+        match = re.match(r"\s*(?:(?:and|or)\s+)?", value, flags=re.IGNORECASE)
+        offset = match.end() if match is not None else 0
+        return value[offset:].strip(), offset
+
+    def collect_clauses(
+        value: str,
+        *,
+        start: int,
+        separator: re.Pattern[str],
+    ) -> None:
+        cursor = 0
+        for clause in separator.split(value):
+            item = clause.strip(" ,:.;?\t\r\n")
+            if not item:
+                continue
+            relative_start = value.find(item, cursor)
+            if relative_start < 0:
+                relative_start = cursor
+            positioned_items.append((start + relative_start, item))
+            cursor = relative_start + len(item)
+
+    for raw_match in raw_questions:
+        raw_question = raw_match.group(0)
         candidate = raw_question.strip(" .;\t\r\n")
+        candidate_start = raw_match.start() + len(raw_question) - len(
+            raw_question.lstrip(" .;\t\r\n")
+        )
+        candidate, conjunction_offset = trim_leading_conjunction(candidate)
+        candidate_start += conjunction_offset
         for separator in (":", ".", ";"):
-            tail = candidate.rsplit(separator, 1)[-1].strip()
+            separator_index = candidate.rfind(separator)
+            if separator_index < 0:
+                continue
+            raw_tail = candidate[separator_index + 1 :]
+            tail, tail_offset = trim_leading_conjunction(raw_tail)
             if _KNOWLEDGE_QUESTION_START_PATTERN.match(tail):
+                candidate_start += separator_index + 1 + tail_offset
                 candidate = tail
-                break
         candidate = candidate.rstrip("?").strip()
         if not _KNOWLEDGE_QUESTION_START_PATTERN.match(candidate):
             continue
-        clauses = _KNOWLEDGE_RESTARTED_QUESTION_PATTERN.split(candidate)
-        for clause in clauses:
-            item = clause.strip(" ,;\t\r\n")
-            if not item:
-                continue
-            item = item[0].upper() + item[1:] + "?"
-            normalized_item = " ".join(item.casefold().split())
-            if normalized_item in seen:
-                continue
-            seen.add(normalized_item)
-            items.append(item[:1_000])
-            if len(items) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
-                raise ValueError("Knowledge agent request contains too many direct question items")
+        direct_question_starts.append(candidate_start)
+        collect_clauses(
+            candidate,
+            start=candidate_start,
+            separator=_KNOWLEDGE_RESTARTED_QUESTION_PATTERN,
+        )
+
+    for imperative_match in _KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN.finditer(normalized):
+        imperative_start = imperative_match.start("request")
+        boundary = _KNOWLEDGE_RESTARTED_REQUEST_SENTENCE_PATTERN.search(
+            normalized[imperative_start:]
+        )
+        imperative_end = (
+            imperative_start + boundary.start()
+            if boundary is not None
+            else len(normalized)
+        )
+        introduced_question_starts = [
+            start
+            for start in direct_question_starts
+            if start > imperative_start
+            and normalized[imperative_start:start].rstrip().endswith(":")
+            and re.search(
+                r"[.!?;]",
+                normalized[imperative_start:start],
+            )
+            is None
+        ]
+        if introduced_question_starts:
+            imperative_end = min(imperative_end, min(introduced_question_starts))
+        imperative = normalized[imperative_start:imperative_end].strip()
+        introduced_question_prefix = bool(introduced_question_starts)
+        if imperative and (
+            not introduced_question_prefix
+            or not _knowledge_imperative_prefix_is_framing_only(imperative)
+        ):
+            collect_clauses(
+                imperative,
+                start=imperative_start,
+                separator=_KNOWLEDGE_RESTARTED_IMPERATIVE_ITEM_PATTERN,
+            )
+
+    if not positioned_items:
+        fallback = normalized.strip(" .?;\t\r\n")
+        if not fallback:
+            return ()
+        positioned_items.append((0, fallback))
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for _position, raw_item in sorted(positioned_items, key=lambda item: item[0]):
+        item = raw_item[0].upper() + raw_item[1:] + "?"
+        normalized_item = " ".join(item.casefold().split())
+        if normalized_item in seen:
+            continue
+        seen.add(normalized_item)
+        items.append(item[:1_000])
+        if len(items) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
+            raise ValueError("Knowledge agent request contains too many direct request items")
     return tuple(
         {"id": f"request:item-{index}", "question": item}
         for index, item in enumerate(items, start=1)
@@ -3238,6 +3421,12 @@ def _is_isolated_service_incident_temporal_answer(
                     rf"(?:the\s+)?{escaped_region}(?:\s+region)?,\s+and\s+{start_clause}\.?",
                 )
             )
+            if status.casefold() == "investigating":
+                patterns.append(
+                    rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
+                    rf"affecting\s+the\s+{escaped_region}\s+{escaped_service}\s+service,\s+"
+                    rf"and\s+started\s+at\s+{timestamp}\.?"
+                )
         if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
             return True
     return False

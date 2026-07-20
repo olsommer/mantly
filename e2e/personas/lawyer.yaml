@@ -164,6 +164,10 @@ runbooks:
   - key: law-gmbh-formation
     purpose: Give reviewed general formation information and offer consultation intake.
     proposed_actions: [request_formation_consultation]
+    required_guidance:
+      - >-
+        State explicitly that the formation consultation request is pending human
+        review and is not confirmed.
   - key: law-matter-status
     purpose: Retrieve approved matter facts for an authenticated existing client.
     proposed_actions: []

@@ -294,6 +294,12 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     }
 
     assert "law-gmbh-formation" in lawyer_cases["L06"].expected.knowledge_ids
+    assert lawyer_runbooks["law-gmbh-formation"].required_guidance == [
+        (
+            "State explicitly that the formation consultation request is pending "
+            "human review and is not confirmed."
+        )
+    ]
     conflict_intake_purpose = lawyer_runbooks["law-conflict-intake"].purpose
     existing_conflict_purpose = lawyer_runbooks["law-potential-conflict"].purpose
     assert "prospective-client or pre-engagement" in conflict_intake_purpose
@@ -557,6 +563,28 @@ def test_fulfillment_reply_quality_constraints_reach_runtime_runbooks() -> None:
         "fulfillment-b2b-sla"
     ].required_guidance
     assert len(b2b_sla["response"]["required_guidance"]) == 3
+
+
+def test_l06_consultation_guidance_reaches_runtime_runbook() -> None:
+    persona = next(item for item in load_personas(PERSONA_DIR) if item.id == "lawyer")
+    runbooks = {runbook.key: runbook for runbook in persona.runbooks}
+    formation = yaml.safe_load(
+        build_intent_content(
+            persona,
+            "law-gmbh-formation",
+            "https://api.mantly.io",
+        ).split("---", 2)[1]
+    )
+
+    assert formation["response"]["required_guidance"] == runbooks[
+        "law-gmbh-formation"
+    ].required_guidance
+    assert formation["response"]["required_guidance"] == [
+        (
+            "State explicitly that the formation consultation request is pending "
+            "human review and is not confirmed."
+        )
+    ]
 
 
 def test_pending_actions_must_belong_to_a_matched_runbook() -> None:

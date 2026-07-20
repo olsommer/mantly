@@ -831,6 +831,17 @@ _SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+_SECRET_REPETITION_PROHIBITION_PATTERN = re.compile(
+    rf"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+    rf"(?:repeat|copy|display|reveal)\s+"
+    rf"(?:(?:a|an|the|any|new|your)\s+){{0,3}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+    re.IGNORECASE,
+)
+_SECURE_SECRET_DELIVERY_NOTICE = (
+    "For security, never repeat the secret or credential. "
+    "Never email the secret or credential, or any replacement. "
+    "Use only the approved secure channel for any replacement credential."
+)
 
 
 def _knowledge_backed_secure_secret_delivery_answers_obligation(
@@ -2836,6 +2847,288 @@ def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, 
     return tuple(record for _concern_id, record in _automatic_tool_evidence_records_with_scope(ticket))
 
 
+_TEMPORAL_FACT_TOKEN_ALIASES = {
+    "began": "start",
+    "begin": "start",
+    "beginning": "start",
+    "datetime": "time",
+    "started": "start",
+    "starting": "start",
+    "timestamp": "time",
+}
+_TEMPORAL_FACT_STOP_WORDS = frozenset(
+    {
+        "at",
+        "confirm",
+        "confirmed",
+        "exact",
+        "from",
+        "invoice",
+        "of",
+        "on",
+        "recorded",
+        "state",
+        "the",
+    }
+)
+_TEMPORAL_FACT_TOKENS = frozenset({"date", "due", "eta", "start", "time"})
+_READ_ONLY_TEMPORAL_QUESTION_LEAD_RE = re.compile(
+    r"^(?:state|report|provide|what(?:['’]s|\s+is|\s+was)|when\b|"
+    r"confirm\s+(?:(?:the|a|an)\s+)?(?:recorded|current|tool[-\s]?recorded|verified)\b)",
+    re.IGNORECASE,
+)
+_TEMPORAL_APPROVAL_OR_MUTATION_RE = re.compile(
+    r"\b(?:approv(?:e|ed|al)|authori[sz](?:e|ed|ation)|waiv(?:e|ed|er)|"
+    r"reschedul(?:e|ed|ing)|postpon(?:e|ed|ing)|extend(?:ed|ing)?|"
+    r"chang(?:e|ed|ing)|updat(?:e|ed|ing)|modify|modified|modifying|adjust(?:ed|ing)?|"
+    r"set|setting|move|moving|eligib(?:le|ility)|completed?|executed?)\b",
+    re.IGNORECASE,
+)
+_RECORDED_CHANGED_DUE_DATE_CONTRAST_RE = re.compile(
+    r"\bdistinguish\b[^.;!?]{0,120}\bfrom\s+(?:(?:a|the)\s+)?changed\s+(?:due\s+)?date\b",
+    re.IGNORECASE,
+)
+_ISO_DATE_OR_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$"
+)
+
+
+def _tool_fact_scalar_entries(value: Any, *, path: str = "") -> tuple[tuple[str, str], ...]:
+    """Flatten bounded scalar tool facts while retaining their semantic path."""
+
+    entries: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        explicit_path = _string_from(value.get("path"))
+        if explicit_path and "value" in value and not isinstance(value.get("value"), (dict, list)):
+            scalar = _string_from(value.get("value"))
+            if scalar:
+                entries.append((explicit_path[:240], scalar[:500]))
+            return tuple(entries)
+        for raw_key, child in list(value.items())[:100]:
+            key = _string_from(raw_key)
+            if not key:
+                continue
+            child_path = f"{path}.{key}" if path else key
+            entries.extend(_tool_fact_scalar_entries(child, path=child_path))
+    elif isinstance(value, list):
+        for child in value[:100]:
+            entries.extend(_tool_fact_scalar_entries(child, path=path))
+    elif path:
+        scalar = _string_from(value)
+        if scalar:
+            entries.append((path[:240], scalar[:500]))
+    return tuple(entries)
+
+
+def _temporal_fact_tokens(value: str) -> frozenset[str]:
+    normalized: set[str] = set()
+    for token in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE):
+        if token in _TEMPORAL_FACT_STOP_WORDS:
+            continue
+        alias = _TEMPORAL_FACT_TOKEN_ALIASES.get(token)
+        normalized.add(alias if alias is not None else token)
+    return frozenset(normalized)
+
+
+def _temporal_scalar_answer_variants(value: str) -> tuple[str, ...]:
+    """Return conservative renderings of one exact ISO tool-backed scalar."""
+
+    if _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(value) is None:
+        return ()
+    variants = [value]
+    if "T" in value:
+        date_part, time_part = value.split("T", 1)
+        variants.extend((f"{date_part} at {time_part}", f"{date_part} {time_part}"))
+    else:
+        try:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            pass
+        else:
+            variants.extend(
+                (
+                    parsed_date.strftime("%B %d, %Y").replace(" 0", " "),
+                    parsed_date.strftime("%b %d, %Y").replace(" 0", " "),
+                )
+            )
+    return tuple(dict.fromkeys(variants))
+
+
+def _answer_contains_temporal_scalar(answer: str, value: str) -> bool:
+    folded_answer = answer.casefold()
+    return any(variant.casefold() in folded_answer for variant in _temporal_scalar_answer_variants(value))
+
+
+def _is_atomic_read_only_temporal_question(question: str) -> bool:
+    """Reject mutations and multi-fact clauses before deterministic resolution."""
+
+    clean_question = question.strip()
+    mutation_scan = _RECORDED_CHANGED_DUE_DATE_CONTRAST_RE.sub("", clean_question)
+    if (
+        _READ_ONLY_TEMPORAL_QUESTION_LEAD_RE.search(clean_question) is None
+        or _TEMPORAL_APPROVAL_OR_MUTATION_RE.search(mutation_scan)
+    ):
+        return False
+    clauses = [
+        clause
+        for clause in re.split(
+            r"\s*(?:;|\b(?:and|or|plus|also)\b)\s*",
+            clean_question,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    ]
+    if len(clauses) > 1 and _RECORDED_CHANGED_DUE_DATE_CONTRAST_RE.search(clean_question) is None:
+        return False
+    clause_topics: list[frozenset[str]] = []
+    for clause in clauses:
+        temporal_tokens = _temporal_fact_tokens(clause).intersection(_TEMPORAL_FACT_TOKENS)
+        specific_tokens = temporal_tokens.intersection({"due", "eta", "start"})
+        topics = specific_tokens or temporal_tokens.intersection({"date", "time"})
+        if not topics:
+            return False
+        clause_topics.append(frozenset(topics))
+    return bool(clause_topics and len(set(clause_topics)) == 1)
+
+
+def _same_concern_tool_temporal_fact_matches(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer: str,
+    allowed_evidence_ids: frozenset[str] | None = None,
+) -> bool:
+    """Recognize only same-concern, successful, exact temporal tool facts."""
+
+    if not _is_atomic_read_only_temporal_question(question):
+        return False
+    question_tokens = _temporal_fact_tokens(question)
+    specific_question_tokens = question_tokens.intersection({"due", "eta", "start"})
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or (allowed_evidence_ids is not None and evidence_id not in allowed_evidence_ids):
+            continue
+        for path, scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+            path_tokens = _temporal_fact_tokens(path).intersection(_TEMPORAL_FACT_TOKENS)
+            if (
+                path_tokens
+                and path_tokens.intersection(question_tokens)
+                and (
+                    not specific_question_tokens
+                    or path_tokens.intersection(specific_question_tokens)
+                )
+                and _answer_contains_temporal_scalar(answer, scalar)
+            ):
+                return True
+    return False
+
+
+def _canonicalize_tool_backed_timestamps(ticket: dict[str, Any], answer: str) -> str:
+    """Restore exact trusted ISO timestamp separators before grounding."""
+
+    canonical = answer
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if not _valid_tool_evidence_id(record, concern_id=concern_id):
+            continue
+        for _path, scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+            if "T" not in scalar or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(scalar) is None:
+                continue
+            for variant in _temporal_scalar_answer_variants(scalar)[1:]:
+                canonical = re.sub(re.escape(variant), scalar, canonical, flags=re.IGNORECASE)
+    return canonical
+
+
+def _tool_backed_temporal_scalar_answers_obligation(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Resolve a semantic miss only from a linked exact same-concern tool fact."""
+
+    if not concern_id or not answer_unit_ids:
+        return False
+    linked_text = " ".join(
+        text
+        for unit_id in answer_unit_ids
+        if (text := _string_from(expected_units.get(unit_id, {}).get("text")))
+    )
+    linked_evidence_ids = frozenset(
+        evidence_id
+        for unit_id in answer_unit_ids
+        for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+    )
+    return bool(
+        linked_text
+        and linked_evidence_ids
+        and _same_concern_tool_temporal_fact_matches(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=question,
+            answer=linked_text,
+            allowed_evidence_ids=linked_evidence_ids,
+        )
+    )
+
+
+def _required_secret_delivery_guidance(ticket: dict[str, Any]) -> bool:
+    """Require all secret-delivery constraints from one matched concern only."""
+
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        if concern.get("matched") is not True:
+            continue
+        raw_guidance = concern.get("requiredGuidance")
+        if not isinstance(raw_guidance, list):
+            continue
+        guidance = " ".join(_string_from(item) for item in raw_guidance if _string_from(item))
+        if (
+            _SECRET_DELIVERY_OBJECT_PATTERN.search(guidance)
+            and re.search(r"\b(?:never|do\s+not|don['’]t|must\s+not|should\s+not)\b", guidance, re.IGNORECASE)
+            and re.search(r"\be-?mail(?:ed|ing)?\b", guidance, re.IGNORECASE)
+            and re.search(r"\b(?:approved|trusted)\s+secure\s+channel\b", guidance, re.IGNORECASE)
+        ):
+            return True
+    return False
+
+
+def _answer_has_complete_secret_delivery_guidance(answer: str) -> bool:
+    if _SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN.search(answer):
+        return False
+    if any(pattern.search(answer) for pattern in _SECRET_EMAIL_ALLOWANCE_PATTERNS):
+        return False
+    return bool(
+        _SECRET_REPETITION_PROHIBITION_PATTERN.search(answer)
+        and any(pattern.search(answer) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+        and any(pattern.search(answer) for pattern in _SECRET_SECURE_DELIVERY_PATTERNS)
+    )
+
+
+def _append_required_secret_delivery_guidance(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> str:
+    """Deterministically preserve mandatory English secret-delivery safety."""
+
+    if (
+        language != "en"
+        or not _required_secret_delivery_guidance(ticket)
+        or _answer_has_complete_secret_delivery_guidance(answer)
+    ):
+        return answer
+    return "\n\n".join((answer.rstrip(), _SECURE_SECRET_DELIVERY_NOTICE)).strip()
+
+
 def _action_state_obligation_subject(
     question: str,
     *,
@@ -3093,6 +3386,7 @@ def _pending_action_obligation_notices(
     def append_notice_for_question(
         question: str,
         concern_actions: list[dict[str, Any]],
+        concern_id: str,
     ) -> None:
         remaining_question = remaining_action_obligation_text(
             runbook_actions=concern_actions,
@@ -3104,6 +3398,13 @@ def _pending_action_obligation_notices(
             answer=answer,
             runbook_actions=concern_actions,
             expected_action_text=remaining_question,
+        ):
+            return
+        if _same_concern_tool_temporal_fact_matches(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=remaining_question,
+            answer=answer,
         ):
             return
         result_notice = (
@@ -3164,7 +3465,7 @@ def _pending_action_obligation_notices(
                 if _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
             ]
             for action_question in action_obligation_parts(question):
-                append_notice_for_question(action_question, concern_actions)
+                append_notice_for_question(action_question, concern_actions, concern_id)
     return tuple(notices)
 
 
@@ -3473,6 +3774,7 @@ def repair_issue_automation_answer_action_state(
     """Repair action claims and omitted action-state answers from durable state."""
     ticket = _automatic_ticket_context(issue)
     language = _latest_customer_language(messages)
+    answer = _canonicalize_tool_backed_timestamps(ticket, answer)
     message_context = _automatic_message_context(messages, limit=1)
     customer_request = message_context[-1]["body"] if message_context else ""
     raw_actions = ticket.get("runbookActions")
@@ -3515,6 +3817,11 @@ def repair_issue_automation_answer_action_state(
         ),
     )
     repaired = _clean_action_repair_artifacts(repaired, language=language)
+    repaired = _append_required_secret_delivery_guidance(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    )
     notices = (*_pending_action_obligation_notices(
         ticket=ticket,
         answer=repaired,
@@ -4241,6 +4548,16 @@ def draft_issue_automation_answer(
                     correction_reasons.append(
                         "Add every required immediate damaged-lithium-battery safety instruction. "
                         "Missing policy elements: " + ", ".join(missing_safety) + "."
+                    )
+                if (
+                    first_answer
+                    and _required_secret_delivery_guidance(ticket_context)
+                    and not _answer_has_complete_secret_delivery_guidance(first_answer)
+                ):
+                    correction_reasons.append(
+                        "State all mandatory secret-delivery constraints explicitly: never repeat the secret, "
+                        "never email the secret or its replacement, and use only the approved secure channel "
+                        "for any replacement."
                     )
                 if correction_reasons:
                     correction_prompt = (
@@ -4973,6 +5290,21 @@ def assess_issue_automation_grounding(
                     expected_units=expected_units,
                     supported_unit_evidence_ids=supported_unit_evidence_ids,
                     citation_ids=frozenset(citation_ids),
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _tool_backed_temporal_scalar_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
                 )
             ):
                 resolution = "answered"

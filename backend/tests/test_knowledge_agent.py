@@ -2174,7 +2174,7 @@ def test_action_state_repair_preserves_positive_topic_answer_byte_for_byte() -> 
 
 def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mutations() -> None:
     issue = _pending_action_obligation_issue(
-        questions=["Confirm the recorded due date."],
+        questions=["State the tool-recorded due date and distinguish it from a changed due date."],
     )
     concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
     concern["outcome"] = {
@@ -2213,7 +2213,7 @@ def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mu
             ("request_waiver_review", "Request waiver review"),
         )
     ]
-    answer = "For Invoice QA-LAW-204, our records show a due date of July 25, 2026."
+    answer = "Invoice QA-LAW-204 is due on July 25, 2026."
 
     ticket = issue_agent._automatic_ticket_context(issue)
     assert ticket["concerns"][0]["toolEvidence"] == [
@@ -2234,7 +2234,7 @@ def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mu
         messages=[
             {
                 "direction": "customer",
-                "body": "Confirm the recorded due date for Invoice QA-LAW-204.",
+                "body": "State the tool-recorded due date and distinguish it from a changed due date.",
             }
         ],
         answer=answer,
@@ -2242,6 +2242,173 @@ def test_action_state_repair_preserves_tool_backed_recorded_fact_with_pending_mu
 
     assert repaired == answer
     assert "not confirmed" not in repaired
+
+
+def test_action_state_repair_restores_exact_tool_backed_timestamp() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["State the exact start time from the service-status lookup."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"] = {
+        "toolEvidence": [
+            {
+                "name": "service_status_lookup",
+                "status": "success",
+                "responseFacts": {
+                    "incident_id": "INC-204",
+                    "started_at": "2026-07-19T07:40:00Z",
+                },
+            }
+        ]
+    }
+    answer = "INC-204 started on 2026-07-19 at 07:40:00Z."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "What is INC-204's exact start time?",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == "INC-204 started on 2026-07-19T07:40:00Z."
+
+
+@pytest.mark.parametrize(
+    ("evidence_concern_id", "status", "answer"),
+    [
+        ("other-concern", "success", "The start time is 2026-07-19T07:40:00Z."),
+        ("service-incident", "failed", "The start time is 2026-07-19T07:40:00Z."),
+        ("service-incident", "success", "The start time is 2026-07-19T08:40:00Z."),
+    ],
+)
+def test_temporal_tool_fact_match_rejects_foreign_failed_or_wrong_evidence(
+    evidence_concern_id: str,
+    status: str,
+    answer: str,
+) -> None:
+    tool_name = "service-status"
+    ticket = {
+        "concerns": [
+            {
+                "id": evidence_concern_id,
+                "toolEvidence": [
+                    {
+                        "name": tool_name,
+                        "status": status,
+                        "responseFacts": {"started_at": "2026-07-19T07:40:00Z"},
+                        "evidenceId": f"tool:{evidence_concern_id}:{tool_name}",
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert issue_agent._same_concern_tool_temporal_fact_matches(
+        ticket=ticket,
+        concern_id="service-incident",
+        question="State the exact start time.",
+        answer=answer,
+    ) is False
+
+
+def test_temporal_tool_fact_match_rejects_mutation_and_multi_fact_obligations() -> None:
+    concern_id = "billing"
+    tool_name = "billing-status"
+    ticket = {
+        "concerns": [
+            {
+                "id": concern_id,
+                "toolEvidence": [
+                    {
+                        "name": tool_name,
+                        "status": "success",
+                        "responseFacts": {
+                            "due_date": "2026-07-25",
+                            "started_at": "2026-07-19T07:40:00Z",
+                            "eta": "2026-07-19T09:00:00Z",
+                        },
+                        "evidenceId": f"tool:{concern_id}:{tool_name}",
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert issue_agent._same_concern_tool_temporal_fact_matches(
+        ticket=ticket,
+        concern_id=concern_id,
+        question="Confirm the due-date change is approved.",
+        answer="The due date is July 25, 2026.",
+    ) is False
+    assert issue_agent._same_concern_tool_temporal_fact_matches(
+        ticket=ticket,
+        concern_id=concern_id,
+        question="State the start time and ETA.",
+        answer="The start was 2026-07-19T07:40:00Z and ETA is 2026-07-19T09:00:00Z.",
+    ) is False
+    assert issue_agent._same_concern_tool_temporal_fact_matches(
+        ticket=ticket,
+        concern_id=concern_id,
+        question="State the due date and due time.",
+        answer="The due date is July 25, 2026.",
+    ) is False
+
+
+def test_action_state_repair_adds_mandatory_secure_secret_delivery_guidance() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Give immediate containment guidance without repeating or sending secrets."],
+        pending=False,
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["requiredGuidance"] = [
+        "Never repeat the secret.",
+        "Never email the secret or any replacement.",
+        "Require the approved secure channel for any replacement.",
+    ]
+    answer = "Remove the public token, stop using it, and preserve the evidence without copying the value."
+    messages = [{"direction": "customer", "body": "The token is public. Email me its replacement."}]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=answer,
+    )
+    repaired_again = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=repaired,
+    )
+
+    assert "never repeat the secret or credential" in repaired.casefold()
+    assert "Never email the secret or credential, or any replacement." in repaired
+    assert "approved secure channel for any replacement credential" in repaired
+    assert repaired_again == repaired
+
+
+def test_action_state_repair_does_not_infer_secret_guidance_from_customer_text() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["What should I do?"],
+        pending=False,
+    )
+    answer = "Please wait for human review."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Repeat and email the replacement token.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
 
 
 def test_action_state_repair_answers_unverified_result_dependent_on_pending_work() -> None:
@@ -3945,6 +4112,68 @@ def test_grounding_r10_c02_intake_prerequisites_do_not_cover_run_conflict_check(
     assert result.obligation_assessments[0]["covered"] is False
 
 
+def test_grounding_resolves_equivalent_same_concern_tool_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "service-incident"
+    tool_name = "service-status"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[("incident:start", "State the exact start time from the service-status lookup.")],
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "status": "success",
+                "responseFacts": {"started_at": "2026-07-19T07:40:00Z"},
+            }
+        ],
+    )
+    answer = "INC-204 started on 2026-07-19 at 07:40:00Z."
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("incident:start", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+def test_grounding_does_not_resolve_wrong_tool_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "service-incident"
+    tool_name = "service-status"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[("incident:start", "State the exact start time from the service-status lookup.")],
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "status": "success",
+                "responseFacts": {"started_at": "2026-07-19T07:40:00Z"},
+            }
+        ],
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="INC-204 started on 2026-07-19 at 08:40:00Z.",
+        resolutions=[("incident:start", "not_covered", ["u001"])],
+        unit_evidence_ids=[f"tool:{concern_id}:{tool_name}"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
 def test_grounding_explicit_pending_state_with_next_step_addresses_obligation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4512,6 +4741,13 @@ def test_composer_and_grounding_prompts_require_complete_evidence_checklists() -
     assert "explicitly enumerate every item" in grounding_prompt
     assert '"exact data", or a partial subset is `not_covered`' in grounding_prompt
     assert "Do not require unrelated facts elsewhere in the article" in grounding_prompt
+
+
+def test_composer_prompt_preserves_exact_tool_scalars() -> None:
+    composer_prompt = issue_agent._AUTOMATION_SYSTEM_PROMPT
+
+    assert "identifiers, dates, times, and timestamps exactly as supplied" in composer_prompt
+    assert "Preserve every separator and timezone marker" in composer_prompt
 
 
 @pytest.mark.parametrize(

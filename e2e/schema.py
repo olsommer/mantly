@@ -183,6 +183,7 @@ class PersonaCase(StrictModel):
 
 class KnowledgeCheck(StrictModel):
     id: str = Field(pattern=r"^K[0-9]{2}$")
+    source_case_id: str = Field(pattern=r"^[A-Z][0-9]{2}$")
     question: str = Field(min_length=1)
     expected_citation_ids: list[str] = Field(min_length=1)
     must_cover: list[str] = Field(min_length=1)
@@ -237,6 +238,7 @@ class E2EPersona(StrictModel):
         }
         knowledge_id_set = set(knowledge_ids)
         tool_fixture_id_set = set(tool_fixture_ids)
+        case_id_set = set(case_ids)
 
         for runbook in self.runbooks:
             unknown_required_tools = (
@@ -317,6 +319,11 @@ class E2EPersona(StrictModel):
                 )
 
         for check in self.knowledge_checks:
+            if check.source_case_id not in case_id_set:
+                raise ValueError(
+                    f"knowledge check {check.id} references unknown source case: "
+                    f"{check.source_case_id}"
+                )
             unknown_citations = set(check.expected_citation_ids) - knowledge_id_set
             if unknown_citations:
                 raise ValueError(

@@ -21,6 +21,11 @@ Call `route_concerns` exactly once with between one and six concerns.
   or review are not enough to infer a domain like employment, billing,
   insurance, or returns. Prefer a matching general intent, or leave the
   concern unmatched, when the specialized domain itself is not stated.
+- Require affirmative customer-message evidence for lifecycle prerequisites in
+  an intent description, such as prospective intake versus the requester's own
+  existing or open matter, order, contract, or account. Do not infer an existing
+  customer record from a possible prior relationship involving the organization
+  or another party.
 - A request to export, list, reveal, retrieve, or send credentials or secrets
   does not prove that a credential-exposure incident occurred. Match a
   credential-exposure intent only when the customer affirmatively states that

@@ -257,7 +257,9 @@ runbooks:
       - Tell the customer to remove the exposed token from public access immediately.
       - Tell the customer to stop using the exposed token immediately.
       - Preserve repository and access evidence without copying the secret.
-      - Never repeat or email the secret; require the approved secure channel for any replacement.
+      - Never repeat the secret.
+      - Never email the secret or any replacement.
+      - Require the approved secure channel for any replacement.
   - key: saas-invoice-dispute
     purpose: State invoice facts and prepare investigation and billing-profile changes.
     proposed_actions: [open_invoice_investigation, update_billing_profile]
@@ -281,6 +283,7 @@ runbooks:
     proposed_actions: [open_security_incident]
 knowledge_checks:
   - id: K01
+    source_case_id: S02
     question: >-
       Using only reviewed knowledge and verified status facts: What is incident
       INC-204's status, affected service and region, and exact start time? Is an

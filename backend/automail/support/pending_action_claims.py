@@ -725,12 +725,19 @@ _PENDING_CONFIRMATION_REVERSAL_PATTERN = re.compile(
 )
 _EXPLICIT_NONCOMPLETION_TAIL_PATTERN = re.compile(
     r"^(?P<scope>[^;:.!?\n]{0,180})\b(?:is|are|remain|remains)\s+"
-    r"(?:(?:still|currently)\s+)*(?:"
+    r"(?:(?:all|both|still|currently)\s+)*(?:"
     r"not\s+(?:confirmed|approved|started|completed|done)|"
     r"unconfirmed|unapproved|"
     r"pending(?:\s+(?:(?:human|manual)\s+)?(?:approval|review|confirmation))?|"
     r"awaiting\s+(?:(?:human|manual)\s+)?(?:approval|review|confirmation)"
     r")\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_APPROVAL_REQUIREMENT_TAIL_PATTERN = re.compile(
+    r"^(?P<scope>[^;:.!?\n]{0,180})\b(?:requires?|needs?)\s+"
+    r"(?:(?:final|human|manual|prior|required)\s+)*"
+    r"(?:approval|authorization|confirmation|review)\b"
+    r"(?:\s+before\b[^;:.!?\n]{0,100})?\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _NONCOMPLETION_SCOPE_BREAK_PATTERN = re.compile(
@@ -3870,7 +3877,9 @@ def _claim_is_explicitly_not_completed(
     """
 
     tail = unit[match.end() :]
-    pending_match = _EXPLICIT_NONCOMPLETION_TAIL_PATTERN.match(tail)
+    pending_match = _EXPLICIT_NONCOMPLETION_TAIL_PATTERN.match(
+        tail
+    ) or _EXPLICIT_APPROVAL_REQUIREMENT_TAIL_PATTERN.match(tail)
     if pending_match is None or _NONCOMPLETION_SCOPE_BREAK_PATTERN.search(pending_match.group("scope")):
         return False
     remainder = tail[pending_match.end() :]
@@ -3982,6 +3991,22 @@ def _has_unsafe_dynamic_subject_claim(
                     re.IGNORECASE,
                 ),
             )
+        action_first_completed_pattern = re.compile(
+            rf"(?:^|[;:—–]\s*)\s*(?:(?:already|successfully|now)\s+)*"
+            rf"(?:{subject_completed})\b(?:\s*[:—–|\-]\s*|\s+)"
+            rf"(?:(?:a|an|the|this|your|our)\s+)?"
+            rf"(?:[a-z][a-z0-9-]*\s+){{0,3}}"
+            rf"{subject_pattern}\b",
+            re.IGNORECASE,
+        )
+        action_first_progressive_pattern = re.compile(
+            rf"(?:^|[;:—–]\s*)\s*(?:(?:already|successfully|now)\s+)*"
+            rf"(?:{subject_progressive})\b(?:\s*[:—–|\-]\s*|\s+)"
+            rf"(?:(?:a|an|the|this|your|our)\s+)?"
+            rf"(?:[a-z][a-z0-9-]*\s+){{0,3}}"
+            rf"{subject_pattern}\b",
+            re.IGNORECASE,
+        )
         patterns = (
             re.compile(
                 rf"\b{subject_pattern}\b[^.!?\n]{{0,100}}?\b(?:"
@@ -3993,48 +4018,51 @@ def _has_unsafe_dynamic_subject_claim(
                 rf")\b",
                 re.IGNORECASE,
             ),
-            re.compile(
-                rf"(?:^|[;:—–]\s*)\s*(?:(?:already|successfully|now)\s+)*"
-                rf"(?:{subject_completed}|{subject_progressive})\b(?:\s*[:—–|\-]\s*|\s+)"
-                rf"{subject_pattern}\b",
-                re.IGNORECASE,
-            ),
+            action_first_completed_pattern,
+            action_first_progressive_pattern,
             *actor_patterns,
         )
-        for match in (match for pattern in patterns for match in pattern.finditer(shadow)):
-            if _FUTURE_CONDITION_PREFIX_PATTERN.search(shadow[: match.start()]) or _has_scoped_future_contingency(
-                prefix=shadow[max(0, match.start() - 180) : match.start()],
-                suffix=shadow[match.end() : match.end() + 180],
-            ):
-                continue
-            immediate_tail = unit[match.end() : match.end() + 140].lstrip(" ,\t")
-            attribution = _EXTERNAL_STATE_ATTRIBUTION_PATTERN.match(immediate_tail)
-            if (
-                attribution is not None
-                and re.match(
-                    r"by\s+(?:the\s+)?customer\s+service\s+team\b",
-                    immediate_tail,
-                    re.IGNORECASE,
-                )
-                is None
-            ):
-                continue
-            claimed_actions = [
-                canonical for token in _text_tokens(match.group(0)) if (canonical := _canonical_action_token(token))
-            ]
-            if (
-                claimed_actions
-                and claimed_actions[-1] in {"approve", "archive", "delete"}
-                and claimed_actions[-1] != pending_action_token
-            ):
-                continue
-            if claimed_actions and _successful_action_backs_scope(
-                claimed_action=claimed_actions[-1],
-                claim_scope=unit[match.start() :],
-                successful_actions=successful_actions,
-            ):
-                continue
-            return True
+        for pattern in patterns:
+            for match in pattern.finditer(shadow):
+                if _FUTURE_CONDITION_PREFIX_PATTERN.search(
+                    shadow[: match.start()]
+                ) or _has_scoped_future_contingency(
+                    prefix=shadow[max(0, match.start() - 180) : match.start()],
+                    suffix=shadow[match.end() : match.end() + 180],
+                ):
+                    continue
+                if pattern is action_first_progressive_pattern and _claim_is_explicitly_not_completed(unit, match):
+                    continue
+                immediate_tail = unit[match.end() : match.end() + 140].lstrip(" ,\t")
+                attribution = _EXTERNAL_STATE_ATTRIBUTION_PATTERN.match(immediate_tail)
+                if (
+                    attribution is not None
+                    and re.match(
+                        r"by\s+(?:the\s+)?customer\s+service\s+team\b",
+                        immediate_tail,
+                        re.IGNORECASE,
+                    )
+                    is None
+                ):
+                    continue
+                claimed_actions = [
+                    canonical
+                    for token in _text_tokens(match.group(0))
+                    if (canonical := _canonical_action_token(token))
+                ]
+                if (
+                    claimed_actions
+                    and claimed_actions[-1] in {"approve", "archive", "delete"}
+                    and claimed_actions[-1] != pending_action_token
+                ):
+                    continue
+                if claimed_actions and _successful_action_backs_scope(
+                    claimed_action=claimed_actions[-1],
+                    claim_scope=unit[match.start() :],
+                    successful_actions=successful_actions,
+                ):
+                    continue
+                return True
     return False
 
 

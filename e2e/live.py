@@ -1860,13 +1860,6 @@ def run_case(
     return result
 
 
-def _best_case_for_knowledge_check(persona: E2EPersona, expected_ids: set[str]) -> PersonaCase:
-    return max(
-        persona.cases,
-        key=lambda case: len(expected_ids.intersection(case.expected.knowledge_ids)),
-    )
-
-
 def run_knowledge_checks(
     api: AdminApi,
     target: Target,
@@ -1882,8 +1875,8 @@ def run_knowledge_checks(
     results: list[dict[str, Any]] = []
     for check in persona.knowledge_checks:
         recorder = AssertionRecorder()
-        source_case = _best_case_for_knowledge_check(
-            persona, set(check.expected_citation_ids)
+        source_case = next(
+            case for case in persona.cases if case.id == check.source_case_id
         )
         issue_id = issue_by_case.get(source_case.id, "")
         result: dict[str, Any] = {

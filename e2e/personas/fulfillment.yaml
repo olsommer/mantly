@@ -215,6 +215,7 @@ runbooks:
     proposed_actions: [request_return_authorization, request_refund]
 knowledge_checks:
   - id: K01
+    source_case_id: E05
     question: >-
       Based only on reviewed knowledge and verified shipment facts, explain the
       current state of ZF-20991, whether it may be returned today, and who

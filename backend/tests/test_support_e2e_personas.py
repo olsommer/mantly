@@ -30,6 +30,7 @@ from e2e.live import (
     _wait_for_issue,
     build_intent_content,
     parse_target,
+    run_knowledge_checks,
     seed_persona,
 )
 from e2e.schema import E2EPersona, REQUIRED_PROCESSING_STAGES, load_personas
@@ -58,6 +59,66 @@ def test_builtin_e2e_personas_are_strictly_valid() -> None:
         assert all(case.expected.queued_count == 0 for case in persona.cases)
         assert all(case.expected.idempotency.state_unchanged for case in persona.cases)
         assert all(check.create_draft is False for check in persona.knowledge_checks)
+        assert all(
+            check.source_case_id in {case.id for case in persona.cases}
+            for check in persona.knowledge_checks
+        )
+
+
+def test_knowledge_check_rejects_unknown_source_case() -> None:
+    raw = yaml.safe_load((PERSONA_DIR / "lawyer.yaml").read_text(encoding="utf-8"))
+    raw["knowledge_checks"][0]["source_case_id"] = "L99"
+
+    with pytest.raises(ValidationError, match="unknown source case"):
+        E2EPersona.model_validate(raw)
+
+
+def test_knowledge_check_uses_its_explicit_source_case() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "lawyer"
+    )
+    target = parse_target("lawyer=project123:channel456")
+    expected_article_id = "article-law-fees-retainer"
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.answer_paths: list[str] = []
+
+        def get(self, path: str) -> dict:
+            assert path == "/api/admin/projects/project123/issues/issue-l05"
+            return {"id": "issue-l05", "outboundMessages": []}
+
+        def post(self, path: str, _payload: dict) -> dict:
+            if path.endswith("/eval/e2e-response-judge"):
+                return {"passed": True, "score": 100, "threshold": 90}
+            self.answer_paths.append(path)
+            assert path == (
+                "/api/admin/projects/project123/issues/issue-l05/agent-answer"
+            )
+            return {
+                "answer": "Verified synthetic billing facts with exceptions unapproved.",
+                "reply": None,
+                "autoSend": False,
+                "knowledgeAccessedArticleIds": [expected_article_id],
+            }
+
+    api = FakeApi()
+    results = run_knowledge_checks(
+        api,  # type: ignore[arg-type]
+        target,
+        persona,
+        {"law-fees-retainer": expected_article_id},
+        [
+            {"id": "L01", "issueId": "issue-l01"},
+            {"id": "L05", "issueId": "issue-l05"},
+        ],
+    )
+
+    assert results[0]["sourceCaseId"] == "L05"
+    assert results[0]["issueId"] == "issue-l05"
+    assert api.answer_paths == [
+        "/api/admin/projects/project123/issues/issue-l05/agent-answer"
+    ]
 
 
 def test_personas_use_only_synthetic_portable_state() -> None:
@@ -214,6 +275,9 @@ def test_live_runner_business_fingerprint_detects_material_ticket_change() -> No
 def test_personas_preserve_the_high_value_regression_cases() -> None:
     personas = {persona.id: persona for persona in load_personas(PERSONA_DIR)}
     lawyer_cases = {case.id: case for case in personas["lawyer"].cases}
+    lawyer_runbooks = {
+        runbook.key: runbook for runbook in personas["lawyer"].runbooks
+    }
     fulfillment_cases = {case.id: case for case in personas["fulfillment"].cases}
     fulfillment_runbooks = {
         runbook.key: runbook for runbook in personas["fulfillment"].runbooks
@@ -222,8 +286,20 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     lawyer_knowledge_checks = {
         check.id: check for check in personas["lawyer"].knowledge_checks
     }
+    fulfillment_knowledge_checks = {
+        check.id: check for check in personas["fulfillment"].knowledge_checks
+    }
+    saas_knowledge_checks = {
+        check.id: check for check in personas["saas-support"].knowledge_checks
+    }
 
     assert "law-gmbh-formation" in lawyer_cases["L06"].expected.knowledge_ids
+    conflict_intake_purpose = lawyer_runbooks["law-conflict-intake"].purpose
+    existing_conflict_purpose = lawyer_runbooks["law-potential-conflict"].purpose
+    assert "prospective-client or pre-engagement" in conflict_intake_purpose
+    assert "no existing customer matter is required" in conflict_intake_purpose
+    assert "their own existing or open firm matter" in existing_conflict_purpose
+    assert "Never use this runbook for prospective-client" in existing_conflict_purpose
     assert [
         concern.runbook_key for concern in lawyer_cases["L08"].concerns
     ] == ["law-potential-conflict"]
@@ -246,6 +322,9 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "payment plan" in requirement
         for requirement in lawyer_knowledge_checks["K01"].must_mark_unverified
     )
+    assert lawyer_knowledge_checks["K01"].source_case_id == "L05"
+    assert fulfillment_knowledge_checks["K01"].source_case_id == "E05"
+    assert saas_knowledge_checks["K01"].source_case_id == "S02"
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
     assert fulfillment_cases["E06"].expected.knowledge_ids == []
     assert set(fulfillment_cases["E06"].expected.knowledge_any_of) == {
@@ -291,6 +370,10 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "remove the exposed token" in rule
         for rule in saas_runbooks["saas-token-exposure"].required_guidance
     )
+    token_guidance = saas_runbooks["saas-token-exposure"].required_guidance
+    assert "Never repeat the secret." in token_guidance
+    assert "Never email the secret or any replacement." in token_guidance
+    assert "Require the approved secure channel for any replacement." in token_guidance
     token_exposure_purpose = saas_runbooks["saas-token-exposure"].purpose
     assert "actually exposed" in token_exposure_purpose
     assert all(

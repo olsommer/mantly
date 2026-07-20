@@ -146,7 +146,11 @@ seed:
         confirmed: true
 runbooks:
   - key: law-conflict-intake
-    purpose: Collect non-confidential party data and prepare a human conflict review.
+    purpose: >-
+      Use for prospective-client or pre-engagement conflict checks before
+      confidential disclosure, including when the requester says the firm may
+      have advised an adverse party. Collect non-confidential party data and
+      prepare a human conflict review; no existing customer matter is required.
     proposed_actions: [open_conflict_review]
   - key: law-urgent-deadline
     purpose: Capture an asserted deadline and prepare urgent human triage.
@@ -165,10 +169,12 @@ runbooks:
     proposed_actions: []
   - key: law-potential-conflict
     purpose: >-
-      For an existing or open matter, retrieve current matter facts, including
-      whether substantive discussion is paused, before preparing pending actions
-      to pause discussion, record the report, and escalate a newly reported
-      potential conflict without drawing a conclusion.
+      Use only when the requester affirmatively identifies their own existing or
+      open firm matter, normally with a matter reference. Retrieve current matter
+      facts, including whether substantive discussion is paused, before preparing
+      pending actions to pause discussion, record the report, and escalate a newly
+      reported potential conflict without drawing a conclusion. Never use this
+      runbook for prospective-client or pre-engagement conflict intake.
     proposed_actions: [record_potential_conflict, open_conflict_review, pause_substantive_discussion]
   - key: law-consultation-reschedule
     purpose: Prepare an appointment change while preserving the confirmed booking.
@@ -178,6 +184,7 @@ runbooks:
     proposed_actions: [create_secure_intake_request]
 knowledge_checks:
   - id: K01
+    source_case_id: L05
     question: >-
       Based only on reviewed knowledge and verified ticket facts: What are the
       standard consultation fee and retainer? What is invoice QA-LAW-204's

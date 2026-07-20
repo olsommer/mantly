@@ -21,6 +21,21 @@ def _actions(status: str = "pending_approval") -> list[dict[str, str]]:
     ]
 
 
+def _security_actions() -> list[dict[str, str]]:
+    return [
+        {
+            "name": "open_security_incident",
+            "label": "Open security incident",
+            "status": "pending_approval",
+        },
+        {
+            "name": "revoke_api_token",
+            "label": "Revoke API token",
+            "status": "pending_approval",
+        },
+    ]
+
+
 def _tracking_evidence(
     *,
     method: str = "GET",
@@ -1535,6 +1550,60 @@ def test_pending_action_guard_allows_action_subject_with_explicit_negative_state
 
     assert result.blocked is False
     assert result.claims == ()
+
+
+def test_pending_action_guard_blocks_and_repairs_bare_gerund_action_list() -> None:
+    answer = "Opening a security incident, revoking the exposed token."
+
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+    assert repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    ) == PENDING_ACTION_REPAIR_NOTICE
+
+
+def test_pending_action_guard_does_not_exempt_completed_action_with_approval_tail() -> None:
+    answer = "Revoked API token requires human approval before rotation."
+
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+    assert repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    ) == PENDING_ACTION_REPAIR_NOTICE
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "If approved, opening a security incident and revoking the exposed token can proceed.",
+        "Opening a security incident and revoking the exposed token are both pending human review.",
+        "Opening a security incident and revoking the exposed token require human approval before either action starts.",
+    ],
+)
+def test_pending_action_guard_allows_safe_gerund_action_list(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    )
+
+    assert result.blocked is False
+    assert result.claims == ()
+    assert repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=_security_actions(),
+    ) == answer
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ Rules:
 - In `ticket.runbookActions`, only `status: success` is completion proof. `status: pending_approval` means the action has not run yet.
 - When one concern has multiple `pending_approval` runbook actions, name each action in its own complete customer-facing sentence and state that it remains pending human review. Do not compress several actions into one list with a shared status clause.
 - In `ticket.concerns[].toolEvidence`, only `status: success` plus explicit `responseFacts` may support business facts returned by a tool. Legacy `ticket.toolEvidence` follows the same rule. Tool success without a named fact does not prove that fact.
+- Copy tool-backed identifiers, dates, times, and timestamps exactly as supplied in `responseFacts`. Preserve every separator and timezone marker; never reformat these scalars.
 - Apply every `replyRequirements` and `forbiddenClaims` entry from `ticket.concerns`. When requirements conflict, request human review and avoid the disputed claim.
 - Treat every `ticket.concerns[].requiredGuidanceObligations` item as mandatory runbook guidance. Apply the requirement explicitly in the customer answer and return its ID in `covered_obligation_ids`. A generic pending, unavailable, or future-review statement does not satisfy required guidance. Legacy `replyRequirements` remain constraints and do not need to be repeated as prose.
 - Select response attachments only by exact filename from `ticket.concerns[].attachments`. Never invent a filename. Files marked `always` or `generated` are added by the runtime.

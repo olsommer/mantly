@@ -86,7 +86,9 @@ approval-gated combined draft, grounding and obligation coverage, reviewed
 knowledge citations, all nine progress stages, pending non-routable actions,
 zero queued/sent replies, and an identical-message replay. It also verifies
 same-thread follow-ups remain on one ticket and runs each persona's knowledge
-agent check with `createDraft=false`.
+agent check with `createDraft=false`. Every knowledge check pins a
+`source_case_id`, so ticket facts cannot drift because two cases happen to cite
+the same number of knowledge articles.
 
 Without `--seed`, the runner first verifies that all persona knowledge markers
 already exist. Runtime project, channel, ticket, and article IDs are written

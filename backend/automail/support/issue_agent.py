@@ -2502,6 +2502,13 @@ def _automatic_tool_evidence_context(
         }
         facts = item.get("responseFacts") or item.get("response_facts") or item.get("facts")
         safe_facts = sanitize_tool_response_facts(facts)
+        if status == "success" and any(
+            _is_affirmative_return_refund_fact(path, value, tool_name=record["name"])
+            for path, value in _tool_fact_scalar_entries(facts)
+        ):
+            # Preserve only a boolean safety signal when the credential filter
+            # removes a business-state field such as ``return_authorization``.
+            record["hasAffirmativeReturnRefundFact"] = True
         if status == "success" and isinstance(safe_facts, (dict, list)) and safe_facts:
             # http_tool owns the allowlist and size bounds. Round-trip through JSON
             # to detach the prompt context from mutable persisted metadata. The
@@ -5025,6 +5032,244 @@ def _append_required_secret_delivery_guidance(
     return "\n\n".join((answer.rstrip(), _SECURE_SECRET_DELIVERY_NOTICE)).strip()
 
 
+_UNCONFIRMED_RETURN_DETAILS_REQUIREMENT = (
+    "State that no return address or reference is confirmed yet and that shipment "
+    "must wait for confirmed authorization, route, and reference."
+)
+_RETURN_REFUND_TIMING_REQUIREMENT = (
+    "Explain merchant and payment-provider control without guaranteeing Friday."
+)
+_PENDING_ACTION_PROOF_REQUIREMENT = (
+    "Never claim a selected action completed before exact success evidence exists."
+)
+_PENDING_RETURN_REFUND_QUESTIONS = (
+    "Should they ship it directly today?",
+    "Give the return address and reference",
+    "Confirm authorization",
+    "Guarantee the refund by Friday",
+    "Explain who controls refund timing",
+)
+_PENDING_RETURN_REFUND_FORBIDDEN_CLAIMS = (
+    "guarantee the refund by Friday",
+    "ship it directly today",
+)
+_CANONICAL_PENDING_RETURN_REFUND_ANSWER = (
+    "Thank you for your return and refund request.\n\n"
+    "The return address and return reference are not confirmed yet. Do not ship "
+    "the item until the return authorization, route, and reference are confirmed.\n\n"
+    "The pending action (Request Return Authorization) remains under human review "
+    "and is not confirmed as started or completed. The pending action (Request "
+    "Refund) remains under human review and is not confirmed as started or "
+    "completed.\n\n"
+    "The merchant and payment provider control final refund approval and posting "
+    "time, so a refund by Friday cannot be guaranteed."
+)
+
+
+def _has_exact_pending_return_refund_requirements(concern: dict[str, Any]) -> bool:
+    """Require the complete live runbook contract and reject any extra rule."""
+
+    raw_requirements = concern.get("replyRequirements")
+    requirements = raw_requirements if isinstance(raw_requirements, list) else []
+    normalized_requirements = [
+        " ".join(_string_from(requirement).casefold().split())
+        for requirement in requirements
+        if _string_from(requirement)
+    ]
+    expected_requirements = {
+        " ".join(requirement.casefold().split())
+        for requirement in (
+            _UNCONFIRMED_RETURN_DETAILS_REQUIREMENT,
+            _RETURN_REFUND_TIMING_REQUIREMENT,
+            _PENDING_ACTION_PROOF_REQUIREMENT,
+        )
+    }
+    if len(normalized_requirements) != len(expected_requirements) or (
+        set(normalized_requirements) != expected_requirements
+    ):
+        return False
+
+    raw_obligations = concern.get("answerObligations")
+    obligations = raw_obligations if isinstance(raw_obligations, list) else []
+    normalized_questions = [
+        " ".join(_string_from(_record_from(obligation).get("question")).casefold().split())
+        for obligation in obligations
+        if _string_from(_record_from(obligation).get("question"))
+    ]
+    expected_questions = {
+        " ".join(question.casefold().split())
+        for question in _PENDING_RETURN_REFUND_QUESTIONS
+    }
+    if len(normalized_questions) != len(expected_questions) or (
+        set(normalized_questions) != expected_questions
+    ):
+        return False
+
+    raw_forbidden = concern.get("forbiddenClaims")
+    forbidden = raw_forbidden if isinstance(raw_forbidden, list) else []
+    normalized_forbidden = [
+        " ".join(_string_from(claim).casefold().split())
+        for claim in forbidden
+        if _string_from(claim)
+    ]
+    expected_forbidden = {
+        " ".join(claim.casefold().split())
+        for claim in _PENDING_RETURN_REFUND_FORBIDDEN_CLAIMS
+    }
+    if len(normalized_forbidden) != len(expected_forbidden) or (
+        set(normalized_forbidden) != expected_forbidden
+    ):
+        return False
+
+    return not any(
+        concern.get(field)
+        for field in ("attachments", "missingInformation", "requiredGuidance")
+    )
+
+
+def _is_affirmative_return_refund_fact(
+    path: str,
+    value: str,
+    *,
+    tool_name: str = "",
+) -> bool:
+    """Recognize affirmative return/refund proof without treating absence as proof."""
+
+    if path.rsplit(".", 1)[-1].casefold() == "path":
+        # A sanitized explicit fact whose null ``value`` was removed retains
+        # only its metadata path. The path label alone is not confirmation.
+        return False
+    normalized_path = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        path,
+    ).casefold()
+    normalized_value = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        value,
+    ).casefold()
+    path_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_path))
+    value_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_value))
+    normalized_tool_name = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        tool_name,
+    ).casefold()
+    tool_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_tool_name))
+    descriptor_tokens = path_tokens | value_tokens
+    detail_tokens = {"address", "authorization", "destination", "reference", "route"}
+    workflow_tool = bool(
+        tool_tokens.intersection({"refund", "refunds", "return", "returns", "rma"})
+    )
+    relevant = bool(
+        "rma" in descriptor_tokens
+        or descriptor_tokens.intersection({"refund", "refunds"})
+        or (
+            descriptor_tokens.intersection({"return", "returns"})
+            and descriptor_tokens.intersection(detail_tokens)
+        )
+        or path_tokens.intersection(detail_tokens)
+        or (
+            workflow_tool
+            and path_tokens.intersection(
+                detail_tokens | {"approval", "approved", "state", "status"}
+            )
+        )
+    )
+    if not relevant:
+        return False
+
+    negative_flag_tokens = {
+        "absent",
+        "missing",
+        "pending",
+        "unavailable",
+        "unconfirmed",
+        "unknown",
+    }
+    normalized_scalar = " ".join(value.casefold().split())
+    if path_tokens.intersection(negative_flag_tokens):
+        return normalized_scalar in {"0", "false", "no"}
+    return not (
+        normalized_scalar in {"", "0", "false", "n/a", "na", "none", "null"}
+        or value_tokens.intersection(
+            negative_flag_tokens
+            | {"awaiting", "no", "not", "undetermined", "unverified"}
+        )
+    )
+
+
+def _repair_required_unconfirmed_return_details(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> str:
+    """Use one canonical answer only for the exact pending return/refund workflow."""
+
+    if language != "en":
+        return answer
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    matched_concerns = [
+        concern
+        for raw_concern in concerns
+        if (concern := _record_from(raw_concern)).get("matched") is True
+    ]
+    if len(matched_concerns) != 1:
+        return answer
+    concern = matched_concerns[0]
+    concern_id = _string_from(concern.get("id"))
+    if (
+        not concern_id
+        or _string_from(concern.get("runbook")) != "fulfillment-return-refund"
+        or not _has_exact_pending_return_refund_requirements(concern)
+    ):
+        return answer
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    scoped_actions = [
+        action
+        for raw_action in actions
+        if (action := _record_from(raw_action))
+        and concern_id in _runbook_action_concern_ids(action)
+    ]
+    if len(scoped_actions) != 2:
+        return answer
+    scoped_action_states = [
+        (
+            _string_from(action.get("name")).lower().replace("-", "_"),
+            _string_from(action.get("status")).lower().replace("-", "_"),
+        )
+        for action in scoped_actions
+    ]
+    if sorted(scoped_action_states) != [
+        ("request_refund", "pending_approval"),
+        ("request_return_authorization", "pending_approval"),
+    ]:
+        return answer
+
+    raw_tools = concern.get("toolEvidence")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    for raw_tool in tools:
+        tool = _record_from(raw_tool)
+        if _string_from(tool.get("status")).casefold() != "success":
+            continue
+        if tool.get("hasAffirmativeReturnRefundFact") is True:
+            return answer
+        for path, value in _tool_fact_scalar_entries(tool.get("responseFacts")):
+            if _is_affirmative_return_refund_fact(
+                path,
+                value,
+                tool_name=_string_from(tool.get("name")),
+            ):
+                return answer
+
+    return _CANONICAL_PENDING_RETURN_REFUND_ANSWER
+
+
 def _action_state_obligation_subject(
     question: str,
     *,
@@ -5870,6 +6115,11 @@ def repair_issue_automation_answer_action_state(
         runbook_actions=guard_actions,
     )
     repaired = _append_required_secret_delivery_guidance(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    )
+    repaired = _repair_required_unconfirmed_return_details(
         ticket=ticket,
         answer=repaired,
         language=language,

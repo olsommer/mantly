@@ -3305,14 +3305,15 @@ def _apply_prompt_injection_pretext_precedence(
             return False
 
         # The router may lossily abbreviate a direct-channel excerpt with
-        # literal ellipses. Accept that shape only when it starts with the
-        # exact canonical transport title and every literal-ellipsis fragment
-        # is a contiguous span, in order, in the complete hostile route.
+        # explicit ellipsis delimiters. Accept that shape only when it starts with the
+        # exact canonical transport title and every delimited fragment is a
+        # contiguous span, in order, in the complete hostile route.
         # Independent subject/body concerns have already returned above.
         canonical_direct_title = direct_channel_title_without_tracking_suffix
         if direct_channel_title and canonical_direct_title:
+            abridgment_delimiter = r"(?:\.{3}|…|\[\.\.\.\])"
             abridged_match = re.fullmatch(
-                rf"{re.escape(canonical_direct_title)}\s*(?:\.{{3}}|…)\s*"
+                rf"{re.escape(canonical_direct_title)}\s*{abridgment_delimiter}\s*"
                 r"(?P<remainder>.+)",
                 source,
                 flags=re.IGNORECASE,
@@ -3323,7 +3324,10 @@ def _apply_prompt_injection_pretext_precedence(
                 )
                 abridged_fragments = [
                     re.findall(r"[a-z0-9]+", item.casefold())
-                    for item in re.split(r"(?:\.{3}|…)", abridged_remainder)
+                    for item in re.split(
+                        abridgment_delimiter,
+                        abridged_remainder,
+                    )
                     if item.strip()
                 ]
                 prompt_tokens = re.findall(r"[a-z0-9]+", prompt_source.casefold())

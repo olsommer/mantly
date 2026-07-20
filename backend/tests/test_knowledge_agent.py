@@ -2030,6 +2030,96 @@ def _pending_action_obligation_issue(
     }
 
 
+def _pending_return_details_issue(
+    *,
+    reply_requirements: tuple[str, ...] | None = None,
+    action_specs: tuple[tuple[str, str, str], ...] | None = None,
+    tool_evidence: list[dict[str, Any]] | None = None,
+    extra_matched_concern: bool = False,
+) -> dict[str, Any]:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Should they ship it directly today?",
+            "Give the return address and reference",
+            "Confirm authorization",
+            "Guarantee the refund by Friday",
+            "Explain who controls refund timing",
+        ]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["intentName"] = "fulfillment-return-refund"
+    concern["replyRequirements"] = list(
+        reply_requirements
+        if reply_requirements is not None
+        else (
+            "Never claim a selected action completed before exact success evidence "
+            "exists.",
+            "State that no return address or reference is confirmed yet and that "
+            "shipment must wait for confirmed authorization, route, and reference.",
+            "Explain merchant and payment-provider control without guaranteeing Friday.",
+        )
+    )
+    concern["forbiddenClaims"] = [
+        "guarantee the refund by Friday",
+        "ship it directly today",
+    ]
+    concern["toolEvidence"] = (
+        tool_evidence
+        if tool_evidence is not None
+        else [
+            {
+                "name": "fixture_order_zf_20991",
+                "method": "GET",
+                "status": "success",
+                "responseFacts": [
+                    {"path": "order.id", "value": "ZF-20991"},
+                    {"path": "order.status", "value": "delivered"},
+                ],
+            }
+        ]
+    )
+    if extra_matched_concern:
+        issue["aiRuns"][0]["intentResult"]["concerns"].append(
+            {
+                "concernId": "concern-second",
+                "matched": True,
+                "intentName": "shipping-status",
+                "answerObligations": [],
+            }
+        )
+
+    specs = (
+        action_specs
+        if action_specs is not None
+        else (
+            ("request_return_authorization", "Request Return Authorization", "pending"),
+            ("request_refund", "Request Refund", "pending"),
+        )
+    )
+    issue["actionExecutions"] = [
+        {
+            "type": "runbook_webhook",
+            "status": status,
+            "label": label,
+            "metadata": {
+                "source": "runbook",
+                "approvalRequired": True,
+                "sourceMessageId": "message-b2b-urgent",
+                "concernId": concern["concernId"],
+                "runbook": "fulfillment-return-refund",
+            },
+            "result": {
+                "proposedAction": {
+                    "name": name,
+                    "label": label,
+                }
+            },
+        }
+        for name, label, status in specs
+    ]
+    return issue
+
+
 def _successful_runbook_action_execution(
     *,
     concern_id: str,
@@ -2167,6 +2257,349 @@ def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> No
         ).blocked
         is False
     )
+
+
+def test_action_state_repair_closes_live_fulfillment_e10_return_details() -> None:
+    issue = _pending_return_details_issue()
+    answer = (
+        "Thank you for reaching out regarding your return and refund request for "
+        "order ZF-20991.\n\n"
+        "You should not ship the item directly today. Route, which are not yet "
+        "available.\n\n"
+        "A request for return authorization is pending human review. Additionally, "
+        "a refund request is pending human review.\n\n"
+        "The merchant and payment provider control the refund timing."
+    )
+    messages = [
+        {
+            "direction": "customer",
+            "body": (
+                "Should they ship today? Give the return address and reference, "
+                "and confirm authorization."
+            ),
+        }
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=answer,
+    )
+    repaired_again = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=repaired,
+    )
+
+    assert repaired == issue_agent._CANONICAL_PENDING_RETURN_REFUND_ANSWER
+    assert repaired_again == repaired
+
+
+def test_return_detail_repair_discards_arbitrary_prose_in_exact_scope() -> None:
+    answer = (
+        "The return address remains Dock 4 and Dock 42 is also valid. "
+        "Use RMA-42 as the return reference. The return reference has not yet "
+        "been issued. Ship today. A refund by Friday is guaranteed."
+    )
+
+    repaired = issue_agent._repair_required_unconfirmed_return_details(
+        ticket=issue_agent._automatic_ticket_context(
+            _pending_return_details_issue()
+        ),
+        answer=answer,
+        language="en",
+    )
+
+    assert repaired == issue_agent._CANONICAL_PENDING_RETURN_REFUND_ANSWER
+    assert "Dock" not in repaired
+    assert "RMA-42" not in repaired
+
+
+@pytest.mark.parametrize(
+    "reply_requirements",
+    [
+        (),
+        (
+            "Never claim a selected action completed before exact success evidence "
+            "exists.",
+            "State that return details are unavailable.",
+            "Explain merchant and payment-provider control without guaranteeing Friday.",
+        ),
+        (
+            "Never claim a selected action completed before exact success evidence "
+            "exists.",
+            "State that no return address or reference is confirmed yet and that "
+            "shipment must wait for confirmed authorization, route, and reference.",
+        ),
+        (
+            "Never claim a selected action completed before exact success evidence "
+            "exists.",
+            "State that no return address or reference is confirmed yet and that "
+            "shipment must wait for confirmed authorization, route, and reference.",
+            "Explain refund timing without guaranteeing Friday.",
+        ),
+        (
+            "Never claim a selected action completed before exact success evidence "
+            "exists.",
+            "State that no return address or reference is confirmed yet and that "
+            "shipment must wait for confirmed authorization, route, and reference.",
+            "Explain merchant and payment-provider control without guaranteeing Friday.",
+            "Warn that a damaged lithium battery must never be shipped by ordinary mail.",
+        ),
+    ],
+)
+def test_return_detail_repair_requires_both_exact_requirements(
+    reply_requirements: tuple[str, ...],
+) -> None:
+    answer = "Original answer."
+    ticket = issue_agent._automatic_ticket_context(
+        _pending_return_details_issue(reply_requirements=reply_requirements)
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer=answer,
+        language="en",
+    ) == answer
+
+
+@pytest.mark.parametrize(
+    "field,extra_value",
+    [
+        (
+            "answerObligations",
+            {
+                "obligationId": "concern-b2b-urgent:obligation-extra",
+                "question": "Also explain the exchange policy",
+            },
+        ),
+        (
+            "requiredGuidance",
+            "Warn that a damaged lithium battery must never use ordinary mail.",
+        ),
+        ("missingInformation", "Whether the item contains a lithium battery"),
+        ("forbiddenClaims", "promise that an exchange has been approved"),
+        ("attachments", {"filename": "return-label.pdf", "mode": "always"}),
+    ],
+)
+def test_return_detail_repair_rejects_any_extra_concern_contract(
+    field: str,
+    extra_value: Any,
+) -> None:
+    issue = _pending_return_details_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern.setdefault(field, []).append(extra_value)
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer="Original answer.",
+        language="en",
+    ) == "Original answer."
+
+
+def test_return_detail_repair_never_erases_required_secret_delivery_guidance() -> None:
+    issue = _pending_return_details_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["requiredGuidance"] = [
+        "Never email a replacement credential; use the approved secure channel."
+    ]
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "How should the secret be sent?"}],
+        answer="Original answer.",
+    )
+
+    assert issue_agent._SECURE_SECRET_DELIVERY_NOTICE in repaired
+
+
+@pytest.mark.parametrize(
+    "action_specs",
+    [
+        (),
+        (("request_refund", "Request Refund", "pending"),),
+        (
+            ("request_return_authorization", "Request Return Authorization", "pending"),
+            ("request_refund", "Request Refund", "failed"),
+        ),
+        (
+            ("request_return_authorization", "Request Return Authorization", "pending"),
+            ("request_refund", "Request Refund", "pending"),
+            ("notify_warehouse", "Notify Warehouse", "pending"),
+        ),
+        (
+            ("request_return_authorization", "Request Return Authorization", "pending"),
+            ("issue_refund", "Issue Refund", "pending"),
+        ),
+    ],
+)
+def test_return_detail_repair_requires_exact_pending_actions(
+    action_specs: tuple[tuple[str, str, str], ...],
+) -> None:
+    answer = "Original answer."
+    ticket = issue_agent._automatic_ticket_context(
+        _pending_return_details_issue(action_specs=action_specs)
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer=answer,
+        language="en",
+    ) == answer
+
+
+@pytest.mark.parametrize(
+    "tool_name,response_facts",
+    [
+        ("order_lookup", [{"path": "return_address", "value": "Dock 4"}]),
+        ("order_lookup", [{"path": "reference", "value": "REF-42"}]),
+        ("order_lookup", [{"path": "route", "value": "Warehouse B"}]),
+        (
+            "order_lookup",
+            [
+                {
+                    "path": "fixture_evidence.result.0",
+                    "value": "return_address: Dock 4",
+                }
+            ],
+        ),
+        ("returns_lookup", [{"path": "destination", "value": "Dock 4"}]),
+        ("refunds_lookup", [{"path": "refund_status", "value": "completed"}]),
+        ("refunds_lookup", [{"path": "status", "value": "approved"}]),
+        ("order_lookup", {"missing_return_address": False}),
+    ],
+)
+def test_return_detail_repair_defers_to_affirmative_successful_tool_evidence(
+    tool_name: str,
+    response_facts: Any,
+) -> None:
+    answer = "Original answer."
+    issue = _pending_return_details_issue(
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "method": "GET",
+                "status": "success",
+                "responseFacts": response_facts,
+            }
+        ]
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=issue_agent._automatic_ticket_context(issue),
+        answer=answer,
+        language="en",
+    ) == answer
+
+
+def test_return_detail_repair_preserves_authorization_safety_signal_during_sanitization() -> None:
+    answer = "Original answer."
+    issue = _pending_return_details_issue(
+        tool_evidence=[
+            {
+                "name": "order_lookup",
+                "method": "GET",
+                "status": "success",
+                "responseFacts": [{"path": "authorization", "value": True}],
+            }
+        ]
+    )
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert ticket["concerns"][0]["toolEvidence"][0][
+        "hasAffirmativeReturnRefundFact"
+    ] is True
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer=answer,
+        language="en",
+    ) == answer
+
+
+@pytest.mark.parametrize(
+    "tool_name,response_facts",
+    [
+        ("returnReferenceLookup", []),
+        ("returns_lookup", [{"path": "order.id", "value": "ZF-20991"}]),
+        ("order_lookup", {"missing_return_address": True}),
+        ("order_lookup", {"missing_return_address": "unknown"}),
+        ("order_lookup", {"unconfirmed_reference": "unknown"}),
+        ("order_lookup", {"refund_pending": "pending"}),
+        ("order_lookup", [{"path": "return_address", "value": None}]),
+        ("order_lookup", [{"path": "refund.status", "value": "not_found"}]),
+        ("order_lookup", [{"path": "route", "value": "pending"}]),
+        ("order_lookup", [{"path": "authorization", "value": False}]),
+        ("order_lookup", [{"path": "reference", "value": "unconfirmed"}]),
+    ],
+)
+def test_return_detail_repair_accepts_negative_or_irrelevant_tool_evidence(
+    tool_name: str,
+    response_facts: Any,
+) -> None:
+    issue = _pending_return_details_issue(
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "method": "GET",
+                "status": "success",
+                "responseFacts": response_facts,
+            }
+        ]
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=issue_agent._automatic_ticket_context(issue),
+        answer="Original answer.",
+        language="en",
+    ) == issue_agent._CANONICAL_PENDING_RETURN_REFUND_ANSWER
+
+
+def test_return_detail_repair_requires_one_matched_concern_and_english() -> None:
+    answer = "Original answer."
+    multi_concern_ticket = issue_agent._automatic_ticket_context(
+        _pending_return_details_issue(extra_matched_concern=True)
+    )
+    wrong_intent_issue = _pending_return_details_issue()
+    wrong_intent_issue["aiRuns"][0]["intentResult"]["concerns"][0][
+        "intentName"
+    ] = "fulfillment_return_refund"
+    wrong_intent_ticket = issue_agent._automatic_ticket_context(wrong_intent_issue)
+    exact_ticket = issue_agent._automatic_ticket_context(
+        _pending_return_details_issue()
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=multi_concern_ticket,
+        answer=answer,
+        language="en",
+    ) == answer
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=wrong_intent_ticket,
+        answer=answer,
+        language="en",
+    ) == answer
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=exact_ticket,
+        answer=answer,
+        language="de",
+    ) == answer
+
+
+def test_return_detail_repair_allows_unrelated_order_lookup_facts() -> None:
+    ticket = issue_agent._automatic_ticket_context(
+        _pending_return_details_issue()
+    )
+
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer="Original answer.",
+        language="en",
+    ) == issue_agent._CANONICAL_PENDING_RETURN_REFUND_ANSWER
+    assert issue_agent._repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer="",
+        language="en",
+    ) == issue_agent._CANONICAL_PENDING_RETURN_REFUND_ANSWER
 
 
 def test_action_state_repair_removes_dependent_fragments_and_restores_spacing() -> None:

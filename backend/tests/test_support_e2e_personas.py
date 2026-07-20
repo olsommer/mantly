@@ -471,6 +471,10 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
             "successful action evidence explicitly proves approval."
         ),
     ]
+    assert saas_runbooks["saas-invoice-dispute"].required_read_only_tools == [
+        "fixture_saas_invoice_inv_9012",
+        "fixture_saas_subscription_northwind",
+    ]
     assert saas_runbooks["saas-privacy-export"].required_read_only_tools == [
         "fixture_saas_account_acme_4421"
     ]

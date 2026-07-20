@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml  # pyright: ignore[reportMissingModuleSource]
 
+from automail.core.sensitive_values import contains_sensitive_credential
+
 _PERSONA_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]+$")
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]+$")
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -114,8 +116,7 @@ def _render_evidence_value(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     rendered = " ".join(value.split())
-    lowered = rendered.lower()
-    if lowered.startswith(("bearer ", "sk-")):
+    if contains_sensitive_credential(rendered):
         return None
     if len(rendered) > _MAX_EVIDENCE_CHARS:
         return None

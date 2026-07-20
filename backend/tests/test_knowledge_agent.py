@@ -4788,6 +4788,385 @@ def test_grounding_r10_c02_intake_prerequisites_do_not_cover_run_conflict_check(
     assert result.obligation_assessments[0]["covered"] is False
 
 
+def _recent_change_grounding_issue(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    response_facts: Any = None,
+    evidence_concern_id: str = "webhook",
+) -> dict[str, Any]:
+    issue = _issue_with_grounding_obligations(
+        concern_id="webhook",
+        questions=[
+            (
+                "webhook:recent-change",
+                "What relevant recent change does the lookup show?",
+            )
+        ],
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    tool_evidence = {
+        "name": "fixture_saas_webhook_acme_orders",
+        "method": method,
+        "status": status,
+        "responseFacts": response_facts
+        or [
+            {
+                "path": "fixture_evidence.result.5",
+                "value": "recent_change: customer certificate rotation",
+            }
+        ],
+    }
+    if evidence_concern_id == "webhook":
+        concern["outcome"]["toolEvidence"] = [tool_evidence]
+    else:
+        issue["aiRuns"][0]["intentResult"]["concerns"].append(
+            {
+                "concernId": evidence_concern_id,
+                "matched": True,
+                "intentName": "other-runbook",
+                "outcome": {"toolEvidence": [tool_evidence]},
+            }
+        )
+    return issue
+
+
+def test_automation_draft_retries_once_with_missing_atomic_recent_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(
+        llm_module,
+        "resolve_effective_config",
+        lambda config, _tenant, _project: config,
+    )
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(
+        usage_module,
+        "record_usage_from_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeAutomationAgent:
+        def invoke(
+            self,
+            inputs: dict[str, Any],
+            *,
+            config: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            answer = (
+                "The endpoint is failing with a 401 response."
+                if len(prompts) == 1
+                else "The lookup shows a customer certificate rotation."
+            )
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer=answer,
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue=_recent_change_grounding_issue(),
+        messages=[
+            {
+                "direction": "customer",
+                "body": "What relevant recent change does the lookup show?",
+            }
+        ],
+        question="Prepare the best support answer.",
+        articles=[],
+        prior_agent_runs=[],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert len(prompts) == 2
+    assert "## Correction Required" in prompts[1]
+    assert "What relevant recent change does the lookup show?" in prompts[1]
+    assert "customer certificate rotation" in prompts[1]
+    assert result.answer == "The lookup shows a customer certificate rotation."
+
+
+def test_atomic_recent_change_grounding_rejects_supported_but_omitted_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _recent_change_grounding_issue()
+    answer = "The endpoint is failing with a 401 response."
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("webhook:recent-change", "answered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (
+        "What relevant recent change does the lookup show?",
+    )
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    ("answer", "resolution"),
+    [
+        (
+            "The relevant recent change is currently unavailable.",
+            "pending_or_unavailable",
+        ),
+        (
+            "The lookup does not show a customer certificate rotation.",
+            "answered",
+        ),
+        (
+            "Whether customer certificate rotation occurred is still unknown.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation, but it was actually a proxy migration.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation; that statement is false.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation, contrary to the actual result.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation; this is incorrect.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation, except that the actual change was a proxy migration.",
+            "answered",
+        ),
+        (
+            "The lookup shows customer certificate rotation?",
+            "answered",
+        ),
+    ],
+    ids=(
+        "unavailable",
+        "negated",
+        "uncertain",
+        "reversed",
+        "false-suffix",
+        "contrary-suffix",
+        "incorrect-suffix",
+        "except-suffix",
+        "interrogative",
+    ),
+)
+def test_atomic_recent_change_grounding_requires_affirmative_exact_fact(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    resolution: str,
+) -> None:
+    issue = _recent_change_grounding_issue()
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("webhook:recent-change", resolution, ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "response_facts",
+    [
+        {"recent_change": "customer certificate rotation"},
+        [
+            {
+                "path": "fixture_evidence.result.5",
+                "value": "recent_change: customer certificate rotation",
+            }
+        ],
+    ],
+    ids=("native", "fixture-wrapper"),
+)
+def test_atomic_recent_change_grounding_accepts_exact_same_tool_value(
+    monkeypatch: pytest.MonkeyPatch,
+    response_facts: Any,
+) -> None:
+    issue = _recent_change_grounding_issue(response_facts=response_facts)
+    answer = "The lookup shows a customer certificate rotation."
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("webhook:recent-change", "answered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _recent_change_grounding_issue(method="POST"),
+        _recent_change_grounding_issue(status="failed"),
+        _recent_change_grounding_issue(evidence_concern_id="other"),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: certificate rotation",
+                },
+                {
+                    "path": "fixture_evidence.result.2",
+                    "value": "recent_change: proxy migration",
+                },
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: api_token: sk-qa-secret-value",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: sk_live_51QATESTCREDENTIAL123456",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: AIzaSyA1234567890abcdefghijklmnop",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: glpat-1234567890abcdef",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": (
+                        "recent_change: eyJhbGciOiJIUzI1NiJ9."
+                        "eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+                    ),
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: api_key: ghp_1234567890abcdef",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: credential: qa-client-password",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: access token ghp_1234567890abcdef",
+                }
+            ]
+        ),
+        _recent_change_grounding_issue(
+            response_facts=[
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "recent_change: secret changed to qa-client-password",
+                }
+            ]
+        ),
+    ],
+    ids=(
+        "post",
+        "failed",
+        "foreign",
+        "ambiguous",
+        "api-token-secret",
+        "api-key-secret",
+        "credential-secret",
+        "access-token-secret",
+        "secret-change",
+        "stripe-secret",
+        "google-api-key",
+        "gitlab-token",
+        "jwt",
+    ),
+)
+def test_atomic_recent_change_correction_requires_safe_unambiguous_read_only_fact(
+    issue: dict[str, Any],
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._atomic_recent_change_requirements(ticket) == {}
+    assert issue_agent._missing_atomic_recent_change_requirements(ticket, "") == ()
+    assert "QATESTCREDENTIAL" not in json.dumps(ticket)
+
+
+def test_atomic_recent_change_correction_reports_only_missing_exact_value() -> None:
+    ticket = issue_agent._automatic_ticket_context(_recent_change_grounding_issue())
+
+    missing = issue_agent._missing_atomic_recent_change_requirements(
+        ticket,
+        "The endpoint is failing with 401.",
+    )
+
+    assert len(missing) == 1
+    assert missing[0]["value"] == "customer certificate rotation"
+    assert issue_agent._missing_atomic_recent_change_requirements(
+        ticket,
+        "The lookup shows a customer certificate rotation.",
+    ) == ()
+    assert len(
+        issue_agent._missing_atomic_recent_change_requirements(
+            ticket,
+            "The lookup does not show a customer certificate rotation.",
+        )
+    ) == 1
+
+
 def test_grounding_does_not_override_not_covered_equivalent_tool_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5160,6 +5539,46 @@ def test_coverage_repair_does_not_duplicate_present_incident_start_time() -> Non
 
     assert repaired == answer
     assert repaired.count("2026-07-19T07:40:00Z") == 1
+
+
+def test_coverage_repair_isolates_present_compound_incident_start_time() -> None:
+    answer = (
+        "The incident is currently investigating the outage affecting the EU "
+        "authentication service, which started at 2026-07-19T07:40:00Z."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_service_incident_start_time(
+        issue=_service_incident_start_time_repair_issue(),
+        answer=answer,
+        uncovered_obligation_ids=("service-incident:required-guidance-1",),
+    )
+    repaired_again = issue_agent.repair_issue_automation_answer_service_incident_start_time(
+        issue=_service_incident_start_time_repair_issue(),
+        answer=repaired,
+        uncovered_obligation_ids=("service-incident:required-guidance-1",),
+    )
+
+    assert repaired == (
+        f"{answer}\n\nThe incident began at 2026-07-19T07:40:00Z."
+    )
+    assert repaired.count("2026-07-19T07:40:00Z") == 2
+    assert repaired_again == repaired
+
+
+def test_coverage_repair_does_not_mask_conflicting_compound_incident_time() -> None:
+    answer = (
+        "The incident is currently investigating the outage affecting the EU "
+        "authentication service, which started at 2026-07-19T08:40:00Z. "
+        "The evidence also contains 2026-07-19T07:40:00Z."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_service_incident_start_time(
+        issue=_service_incident_start_time_repair_issue(),
+        answer=answer,
+        uncovered_obligation_ids=("service-incident:required-guidance-1",),
+    )
+
+    assert repaired == answer
 
 
 def test_grounding_rejects_two_incident_times_in_one_tool_record(

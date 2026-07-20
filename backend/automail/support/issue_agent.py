@@ -21,6 +21,10 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, computed_field
 
+from automail.core.sensitive_values import (
+    contains_sensitive_credential,
+    sanitize_tool_response_facts,
+)
 from automail.support.knowledge_workspace import KnowledgeWorkspace
 from automail.support.pending_action_claims import (
     PENDING_ACTION_CLAIM_REASON_CODE,
@@ -122,8 +126,8 @@ Keep these two decisions separate:
 2. whether supported units directly answer an obligation or explicitly state a
    pending/unavailable result and concrete next step.
 
-Directly supplied status, last-event, ETA, limitation, or eligibility information
-is `answered` for the matching question. For a requested action, a supported reply
+Directly supplied status, last-event, exact start time, ETA, limitation, or
+eligibility information is `answered` for the matching question. For a requested action, a supported reply
 that says the action cannot be done directly, is not confirmed or is pending human
 review, and gives the concrete next step is `pending_or_unavailable`. It must never
 be upgraded to `fulfilled_action` without successful exact same-concern action
@@ -2493,11 +2497,15 @@ def _automatic_tool_evidence_context(
             "status": status[:80],
         }
         facts = item.get("responseFacts") or item.get("response_facts") or item.get("facts")
-        if status == "success" and isinstance(facts, (dict, list)) and facts:
+        safe_facts = sanitize_tool_response_facts(facts)
+        if status == "success" and isinstance(safe_facts, (dict, list)) and safe_facts:
             # http_tool owns the allowlist and size bounds. Round-trip through JSON
-            # to detach the prompt context from mutable persisted metadata.
+            # to detach the prompt context from mutable persisted metadata. The
+            # value-level filter also protects prompts from unsafe historical rows.
             try:
-                record["responseFacts"] = json.loads(json.dumps(facts, ensure_ascii=False))
+                record["responseFacts"] = json.loads(
+                    json.dumps(safe_facts, ensure_ascii=False)
+                )
                 record["evidenceId"] = _tool_evidence_id(
                     record["name"],
                     concern_id=concern_id,
@@ -3389,6 +3397,19 @@ _EXPLICIT_INCIDENT_START_TIMESTAMP_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b",
     re.IGNORECASE,
 )
+_ATOMIC_RECENT_CHANGE_QUESTION_RE = re.compile(
+    r"^What\s+(?:(?:exact|relevant)\s+)*(?:recent\s+)?change\s+"
+    r"does\s+the\s+lookup\s+show\??$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE = re.compile(
+    r"\b(?:not|never|no|neither|nor|unknown|unavailable|uncertain|unverified|"
+    r"unconfirmed|unclear|undetermined|cannot|can't|couldn't|didn't|doesn't|"
+    r"isn't|wasn't|may|might|could|possibly|perhaps|whether|false|untrue|"
+    r"incorrect|inaccurate|wrong|contrary|except)\b|"
+    r"\b(?:but|however|although|though|yet|instead|rather)\b",
+    re.IGNORECASE,
+)
 
 
 def _tool_fact_scalar_entries(
@@ -3450,6 +3471,162 @@ def _tool_fact_scalar_entries(
         if scalar:
             entries.append((path[:240], scalar[:500]))
     return tuple(entries)
+
+
+def _atomic_recent_change_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    obligation_id: str,
+    question: str,
+) -> dict[str, Any] | None:
+    """Bind one atomic recent-change question to exact safe read-only proof."""
+
+    if (
+        not concern_id
+        or not obligation_id
+        or _ATOMIC_RECENT_CHANGE_QUESTION_RE.fullmatch(question.strip()) is None
+    ):
+        return None
+    values: dict[str, dict[str, Any]] = {}
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if (
+            not evidence_id
+            or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}
+        ):
+            continue
+        for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
+            path = raw_path
+            value = raw_value
+            fixture_scalar = (
+                _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
+                if _string_from(record.get("name")).startswith("fixture_")
+                and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+                else None
+            )
+            if fixture_scalar is not None:
+                path = fixture_scalar.group("path")
+                value = fixture_scalar.group("value")
+            leaf_path = path.rsplit(".", 1)[-1].casefold().replace("-", "_")
+            clean_value = " ".join(value.split())[:500]
+            if (
+                leaf_path != "recent_change"
+                or not clean_value
+                or contains_sensitive_credential(clean_value)
+            ):
+                continue
+            value_key = clean_value.casefold()
+            candidate = values.setdefault(
+                value_key,
+                {"value": clean_value, "evidenceIds": set()},
+            )
+            candidate["evidenceIds"].add(evidence_id)
+    if len(values) != 1:
+        return None
+    candidate = next(iter(values.values()))
+    return {
+        "obligationId": obligation_id,
+        "concernId": concern_id,
+        "question": question,
+        "path": "recent_change",
+        "value": candidate["value"],
+        "evidenceIds": frozenset(candidate["evidenceIds"]),
+    }
+
+
+def _atomic_recent_change_requirements(
+    ticket: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return safe exact recent-change requirements keyed by obligation ID."""
+
+    requirements: dict[str, dict[str, Any]] = {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(
+            concern.get("id") or concern.get("concernId") or concern.get("concern_id")
+        )
+        raw_obligations = concern.get("answerObligations")
+        obligations = raw_obligations if isinstance(raw_obligations, list) else []
+        for raw_obligation in obligations:
+            obligation = _record_from(raw_obligation)
+            obligation_id = _string_from(
+                obligation.get("id")
+                or obligation.get("obligationId")
+                or obligation.get("obligation_id")
+            )
+            question = _string_from(obligation.get("question"))
+            requirement = _atomic_recent_change_requirement(
+                ticket=ticket,
+                concern_id=concern_id,
+                obligation_id=obligation_id,
+                question=question,
+            )
+            if requirement is not None:
+                requirements[obligation_id] = requirement
+    return requirements
+
+
+def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> bool:
+    """Accept only an explicit affirmative lookup-to-value assertion."""
+
+    normalized_unit = " ".join(unit.casefold().split())
+    normalized_value = " ".join(value.casefold().split())
+    if (
+        not normalized_value
+        or normalized_value not in normalized_unit
+        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(normalized_unit)
+    ):
+        return False
+    value_pattern = re.escape(normalized_value).replace(r"\ ", r"\s+")
+    article = r"(?:(?:a|an|the)\s+)?"
+    candidate = re.sub(
+        r"^(?:[-*•]|\d+[.)])\s+",
+        "",
+        normalized_unit,
+    ).strip(" *_`")
+    return any(
+        re.fullmatch(pattern + r"[.!]?", candidate, re.IGNORECASE) is not None
+        for pattern in (
+            rf"\b(?:the\s+)?lookup(?:\s+result)?\s+"
+            rf"(?:shows?|showed|reports?|reported|returns?|returned|identifies?|"
+            rf"identified|indicates?|indicated|found|confirms?|confirmed)\s+"
+            rf"(?:that\s+)?(?:the\s+)?(?:(?:relevant|recent)\s+)*"
+            rf"(?:change\s+(?:is|was)\s+)?{article}{value_pattern}\b",
+            rf"\b(?:the\s+)?(?:(?:relevant|recent)\s+)*change"
+            rf"(?:\s+(?:shown|reported|returned|identified|indicated|found)\s+"
+            rf"(?:by|in|from)\s+(?:the\s+)?lookup)?\s+(?:is|was)\s+"
+            rf"{article}{value_pattern}\b",
+        )
+    )
+
+
+def _answer_affirmatively_states_atomic_lookup_value(answer: str, value: str) -> bool:
+    return any(
+        _atomic_lookup_unit_affirmatively_states_value(
+            _string_from(unit.get("text")),
+            value,
+        )
+        for unit in _grounding_answer_units(answer)
+    )
+
+
+def _missing_atomic_recent_change_requirements(
+    ticket: dict[str, Any],
+    answer: str,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        requirement
+        for requirement in _atomic_recent_change_requirements(ticket).values()
+        if not _answer_affirmatively_states_atomic_lookup_value(
+            answer,
+            _string_from(requirement.get("value")),
+        )
+    )
 
 
 def _temporal_fact_tokens(value: str) -> frozenset[str]:
@@ -3807,11 +3984,25 @@ def repair_issue_automation_answer_service_incident_start_time(
     started_at = next(iter(started_at_values))
     if "T" not in started_at or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
         return answer
-    if started_at.casefold() in clean_answer.casefold():
-        return answer
-    if _EXPLICIT_INCIDENT_START_TIMESTAMP_RE.search(clean_answer):
+    explicit_start_claims = tuple(
+        _EXPLICIT_INCIDENT_START_TIMESTAMP_RE.finditer(clean_answer)
+    )
+    if any(
+        started_at.casefold() not in match.group(0).casefold()
+        for match in explicit_start_claims
+    ):
         # Do not supplement a conflicting start-time claim. Grounding must keep
         # the draft blocked instead of masking the contradiction.
+        return answer
+    standalone_start_pattern = re.compile(
+        rf"(?:The\s+)?(?:service\s+)?(?:incident|outage|issue)\s+"
+        rf"(?:started|began)\s+(?:at|on|since)\s+{re.escape(started_at)}\.?",
+        re.IGNORECASE,
+    )
+    if any(
+        standalone_start_pattern.fullmatch(_string_from(unit.get("text")))
+        for unit in _grounding_answer_units(clean_answer)
+    ):
         return answer
     return f"{clean_answer}\n\nThe incident began at {started_at}."
 
@@ -5300,6 +5491,17 @@ def draft_issue_automation_answer(
                         "never email the secret or its replacement, and use only the approved secure channel "
                         "for any replacement."
                     )
+                for requirement in _missing_atomic_recent_change_requirements(
+                    ticket_context,
+                    first_answer,
+                ):
+                    correction_reasons.append(
+                        "In a standalone sentence, explicitly answer "
+                        + _json(_string_from(requirement.get("question")))
+                        + " using the exact read-only lookup fact "
+                        + _json(_string_from(requirement.get("value")))
+                        + "."
+                    )
                 if correction_reasons:
                     correction_prompt = (
                         f"{user_prompt}\n\n"
@@ -5939,6 +6141,9 @@ def assess_issue_automation_grounding(
             if _string_from(obligation.get("id"))
         }
         seen_obligation_ids: set[str] = set()
+        atomic_recent_change_requirements = _atomic_recent_change_requirements(
+            ticket_evidence
+        )
         deterministically_resolved_obligation_ids: set[str] = set()
         clean_obligation_assessments: list[dict[str, Any]] = []
         uncovered_obligations: list[str] = []
@@ -6039,6 +6244,32 @@ def assess_issue_automation_grounding(
             ):
                 resolution = "answered"
                 deterministically_resolved_obligation_ids.add(obligation_id)
+            atomic_recent_change = atomic_recent_change_requirements.get(obligation_id)
+            if atomic_recent_change is not None:
+                required_value = _string_from(atomic_recent_change.get("value"))
+                required_evidence_ids = frozenset(
+                    _string_from(evidence_id)
+                    for evidence_id in atomic_recent_change.get(
+                        "evidenceIds",
+                        frozenset(),
+                    )
+                    if _string_from(evidence_id)
+                )
+                exact_fact_is_linked = requested_resolution == "answered" and any(
+                    _atomic_lookup_unit_affirmatively_states_value(
+                        _string_from(expected_units.get(unit_id, {}).get("text")),
+                        required_value,
+                    )
+                    and bool(
+                        supported_unit_evidence_ids.get(
+                            unit_id,
+                            frozenset(),
+                        ).intersection(required_evidence_ids)
+                    )
+                    for unit_id in answer_unit_ids
+                )
+                if not exact_fact_is_linked:
+                    resolution = "not_covered"
             obligation_question = _string_from(obligation.get("question"))
             is_service_incident_temporal_requirement = bool(
                 obligation_kind == "runbook_requirement"

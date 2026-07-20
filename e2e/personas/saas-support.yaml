@@ -266,6 +266,7 @@ runbooks:
   - key: saas-invoice-dispute
     purpose: State invoice facts and prepare investigation and billing-profile changes.
     proposed_actions: [open_invoice_investigation, update_billing_profile]
+    required_read_only_tools: [fixture_saas_invoice_inv_9012, fixture_saas_subscription_northwind]
     required_guidance:
       - State the invoice status only from the successful invoice lookup.
       - State the exact invoice due date only from the successful invoice lookup.

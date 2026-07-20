@@ -26,6 +26,7 @@ import httpx
 from langchain.tools import BaseTool, tool
 from pydantic import Field, create_model
 
+from automail.core.sensitive_values import contains_sensitive_credential
 from automail.demo.e2e_fixtures import (
     E2EFixtureLookupError,
     E2EFixtureNotFound,
@@ -389,6 +390,8 @@ def _response_facts(response_text: str) -> tuple[list[dict[str, Any]], bool]:
         elif isinstance(value, str):
             if len(value) > _RESPONSE_FACT_MAX_STRING_CHARS:
                 truncated = True
+                return
+            if contains_sensitive_credential(value):
                 return
             safe_value = value
         else:

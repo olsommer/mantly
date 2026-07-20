@@ -33,6 +33,9 @@ def test_get_tool_collects_only_bounded_allowlisted_response_facts(monkeypatch):
         },
         "authorizationToken": "never-persist-this",
         "headers": {"Authorization": "Bearer never-persist-this"},
+        "reference": "ghp_QATESTCREDENTIAL1234567890",
+        "result": "postgresql://qa-user:qa-password@example.test/db",
+        "caseId": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJxYSJ9.signature123",
         "raw": "untrusted response content",
     }
     response = httpx.Response(
@@ -80,6 +83,9 @@ def test_get_tool_collects_only_bounded_allowlisted_response_facts(monkeypatch):
     serialized = json.dumps(calls)
     assert "private@example.test" not in serialized
     assert "never-persist-this" not in serialized
+    assert "ghp_QATESTCREDENTIAL" not in serialized
+    assert "qa-password" not in serialized
+    assert "eyJhbGci" not in serialized
     assert "untrusted response content" not in serialized
 
 

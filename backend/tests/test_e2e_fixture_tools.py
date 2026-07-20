@@ -9,6 +9,7 @@ from starlette.testclient import TestClient
 from automail.demo.e2e_fixtures import (
     E2EFixtureManifestError,
     E2EFixtureNotFound,
+    _fixture_evidence,
     lookup_e2e_tool_fixture,
     merge_e2e_tool_input,
 )
@@ -66,6 +67,20 @@ def test_repeated_query_parameters_remain_a_list():
             ("parties", "Helvetia Holdings SA"),
         ]
     ) == {"parties": ["Helvetia Systems AG", "Helvetia Holdings SA"]}
+
+
+@pytest.mark.no_gemini
+def test_fixture_evidence_filters_credentials_hidden_under_safe_keys():
+    evidence = _fixture_evidence(
+        {
+            "status": "active",
+            "reference": "ghp_QATESTCREDENTIAL1234567890",
+            "result": "recent_change: client_secret=qa-secret-value",
+            "case_id": "AKIAABCDEFGHIJKLMNOP",
+        }
+    )
+
+    assert evidence == ["status: active"]
 
 
 @pytest.mark.no_gemini

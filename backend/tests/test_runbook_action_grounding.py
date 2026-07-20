@@ -744,6 +744,150 @@ def test_channel_autopilot_repairs_s02_factual_corruption_once(monkeypatch):
     }
 
 
+def test_channel_autopilot_fills_omitted_s02_start_time_then_regrounds(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    guidance = "State the exact start time only from the successful service-status lookup."
+    obligation_id = "service-incident:required-guidance-1"
+    omitted_answer = (
+        "INC-204 affects the EU authentication service and is under investigation. "
+        "The ETA is unavailable."
+    )
+    repaired_answer = (
+        f"{omitted_answer}\n\nThe incident began at 2026-07-19T07:40:00Z."
+    )
+    incident_issue = {
+        "id": "issue1",
+        "subject": "EU authentication outage",
+        "messages": [
+            {
+                "id": "message1",
+                "direction": "customer",
+                "body": "When did incident INC-204 start?",
+            }
+        ],
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "service-incident",
+                            "matched": True,
+                            "intentName": "saas-service-incident",
+                            "requiredGuidance": [guidance],
+                            "toolEvidence": [
+                                {
+                                    "name": "service_status_inc_204",
+                                    "method": "GET",
+                                    "status": "success",
+                                    "responseFacts": {
+                                        "status": "investigating",
+                                        "affected_region": "EU",
+                                        "affected_service": "authentication",
+                                        "started_at": "2026-07-19T07:40:00Z",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    draft_calls: list[dict] = []
+
+    def fake_draft(**kwargs):
+        draft_calls.append(kwargs)
+        return IssueAgentDraft(
+            answer=omitted_answer,
+            confidence="high",
+            generation_mode="llm",
+        )
+
+    def fake_grounding(**kwargs):
+        grounding_calls.append(kwargs)
+        if len(grounding_calls) == 1:
+            return AutomationGroundingAssessment(
+                verified=False,
+                status="failed",
+                reason_code="incomplete_answer",
+                checked_at="2026-07-20T09:00:00Z",
+                answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+                answer_obligations=(
+                    {
+                        "id": obligation_id,
+                        "concernId": "service-incident",
+                        "question": guidance,
+                        "kind": "runbook_requirement",
+                    },
+                ),
+                obligation_assessments=(
+                    {
+                        "obligationId": obligation_id,
+                        "covered": False,
+                        "resolution": "not_covered",
+                    },
+                ),
+                uncovered_obligations=(guidance,),
+                provider="test",
+                model="grounding-model",
+            )
+        assert kwargs["answer"] == repaired_answer
+        return AutomationGroundingAssessment(
+            verified=True,
+            status="passed",
+            reason_code="",
+            checked_at="2026-07-20T09:00:01Z",
+            answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+            answer_obligations=(
+                {
+                    "id": obligation_id,
+                    "concernId": "service-incident",
+                    "question": guidance,
+                    "kind": "runbook_requirement",
+                },
+            ),
+            obligation_assessments=(
+                {
+                    "obligationId": obligation_id,
+                    "covered": True,
+                    "resolution": "answered",
+                },
+            ),
+            provider="test",
+            model="grounding-model",
+        )
+
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: incident_issue)
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_draft)
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", fake_grounding)
+    grounding_calls.clear()
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert len(draft_calls) == 2
+    assert [call["answer"] for call in grounding_calls] == [
+        omitted_answer,
+        repaired_answer,
+    ]
+    assert result["draftBlockedReason"] == ""
+    assert reply_calls[0]["body"] == repaired_answer
+    assert result["groundingGate"]["coverageRepair"]["verified"] is True
+
+
 def test_channel_factual_repair_is_rechecked_and_fails_closed_on_missing_safety(
     monkeypatch,
 ):

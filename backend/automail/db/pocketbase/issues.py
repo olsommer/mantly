@@ -35,6 +35,7 @@ from automail.support.issue_agent import (
     grounding_evidence_snapshot,
     grounding_text_sha256,
     repair_issue_automation_answer_action_state,
+    repair_issue_automation_answer_service_incident_start_time,
 )
 from automail.support.issue_fields import draft_issue_field_values
 from automail.support.issue_triage import IssueTriageSuggestion, draft_issue_triage
@@ -11936,6 +11937,8 @@ def _create_issue_agent_answer(
         _knowledge_reference_ids(prior_agent_runs)
         | _knowledge_reference_ids(clean_revision_context)
     )
+    if not use_knowledge_agent:
+        context_article_ids |= grounding_article_ids
     inherited_lineage = [
         *_knowledge_access_snapshots(prior_agent_runs),
         *_knowledge_access_snapshots(clean_revision_context),
@@ -12177,10 +12180,21 @@ def _create_issue_agent_answer(
             )
             if repair_draft.generation_mode == "llm" and not repair_draft.error:
                 draft = repair_draft
+                uncovered_obligation_ids = tuple(
+                    _string_from(assessment.get("obligationId"))
+                    for assessment in grounding_assessment.obligation_assessments
+                    if assessment.get("covered") is False
+                    and _string_from(assessment.get("obligationId"))
+                )
+                answer = repair_issue_automation_answer_service_incident_start_time(
+                    issue=issue,
+                    answer=draft.answer,
+                    uncovered_obligation_ids=uncovered_obligation_ids,
+                )
                 answer = repair_issue_automation_answer_action_state(
                     issue=issue,
                     messages=messages,
-                    answer=draft.answer,
+                    answer=answer,
                 )
                 answer = _clean_grounding_repair_orphan_fragments(
                     answer,

@@ -11632,6 +11632,7 @@ def test_create_issue_agent_answer_creates_approval_draft(monkeypatch):
     assert outbound["metadata"]["source"] == "agent_answer"
     assert outbound["metadata"]["approvalRequired"] is True
     assert outbound["metadata"]["generationMode"] == "knowledge_agent"
+    assert outbound["metadata"]["knowledgeContextArticleIds"] == []
     assert outbound["metadata"]["citations"][0]["title"] == "API outage runbook"
     assert outbound["metadata"]["citations"][0]["body"] == "Check status page and incident owner."
     assert outbound["metadata"]["citations"][0]["tags"] == ["api"]
@@ -13167,6 +13168,8 @@ def test_create_issue_agent_answer_routes_auto_send_without_citations_to_approva
     assert result["autoSendPolicy"] == "confidence_guard"
     assert result["autoSendBlockedReason"] == "missing_citations"
     assert result["reply"]["status"] == "draft"
+    assert result["citations"] == []
+    assert result["knowledgeContextArticleIds"] == ["article1"]
     outbound = next(data for path, data in posted if path == "/api/collections/support_outbound_messages/records")
     assert outbound["status"] == "draft"
     assert outbound["metadata"]["approvalRequired"] is True
@@ -13176,6 +13179,9 @@ def test_create_issue_agent_answer_routes_auto_send_without_citations_to_approva
     assert outbound["metadata"]["autoSendRequested"] is True
     assert outbound["metadata"]["autoSendPolicy"] == "confidence_guard"
     assert outbound["metadata"]["autoSendBlockedReason"] == "missing_citations"
+    assert outbound["metadata"]["citations"] == []
+    assert outbound["metadata"]["knowledgeArticleIds"] == []
+    assert outbound["metadata"]["knowledgeContextArticleIds"] == ["article1"]
     assert outbound["metadata"]["deliveryRequired"] is False
     ai_run = next(data for path, data in posted if path == "/api/collections/support_ai_runs/records")
     assert ai_run["requires_human"] is True
@@ -13183,6 +13189,9 @@ def test_create_issue_agent_answer_routes_auto_send_without_citations_to_approva
     assert ai_run["metadata"]["autoSendRequested"] is True
     assert ai_run["metadata"]["autoSendPolicy"] == "confidence_guard"
     assert ai_run["metadata"]["autoSendBlockedReason"] == "missing_citations"
+    assert ai_run["metadata"]["citations"] == []
+    assert ai_run["metadata"]["knowledgeArticleIds"] == []
+    assert ai_run["metadata"]["knowledgeContextArticleIds"] == ["article1"]
     assert ai_run["metadata"]["replyStatus"] == "draft"
     gap = next(data for path, data in posted if path == "/api/collections/support_knowledge_gaps/records")
     assert result["knowledgeGap"]["id"] == "gap123"

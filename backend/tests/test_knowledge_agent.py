@@ -4700,6 +4700,205 @@ def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
         assert result.reason_code == "incomplete_answer"
 
 
+def _service_incident_start_time_repair_issue(
+    *,
+    evidence_status: str = "success",
+    evidence_method: str = "GET",
+    evidence_concern_id: str = "service-incident",
+    guidance: str = "State the exact start time only from the successful service-status lookup.",
+    timestamps: tuple[str, ...] = ("2026-07-19T07:40:00Z",),
+    timestamps_in_one_record: bool = False,
+) -> dict[str, Any]:
+    target_concern: dict[str, Any] = {
+        "concernId": "service-incident",
+        "matched": True,
+        "intentName": "saas-service-incident",
+        "requiredGuidance": [guidance],
+    }
+    evidence = (
+        [
+            {
+                "name": "service_status_incidents",
+                "method": evidence_method,
+                "status": evidence_status,
+                "responseFacts": {
+                    "status": "investigating",
+                    "affected_region": "EU",
+                    "affected_service": "authentication",
+                    "incidents": [
+                        {
+                            "incident_id": f"INC-{204 + index}",
+                            "started_at": timestamp,
+                        }
+                        for index, timestamp in enumerate(timestamps)
+                    ],
+                },
+            }
+        ]
+        if timestamps_in_one_record
+        else [
+            {
+                "name": f"service_status_{index}",
+                "method": evidence_method,
+                "status": evidence_status,
+                "responseFacts": {
+                    "status": "investigating",
+                    "affected_region": "EU",
+                    "affected_service": "authentication",
+                    "started_at": timestamp,
+                },
+            }
+            for index, timestamp in enumerate(timestamps, start=1)
+        ]
+    )
+    concerns = [target_concern]
+    if evidence_concern_id == "service-incident":
+        target_concern["toolEvidence"] = evidence
+    else:
+        concerns.append(
+            {
+                "concernId": evidence_concern_id,
+                "matched": True,
+                "intentName": "account-review",
+                "toolEvidence": evidence,
+            }
+        )
+    return {
+        "id": "issue-service-incident",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {"concerns": concerns},
+            }
+        ],
+    }
+
+
+def test_coverage_repair_appends_exact_same_concern_incident_start_time() -> None:
+    answer = "INC-204 affects EU authentication. The ETA is unavailable."
+
+    repaired = issue_agent.repair_issue_automation_answer_service_incident_start_time(
+        issue=_service_incident_start_time_repair_issue(),
+        answer=answer,
+        uncovered_obligation_ids=("service-incident:required-guidance-1",),
+    )
+
+    assert repaired == (
+        f"{answer}\n\nThe incident began at 2026-07-19T07:40:00Z."
+    )
+
+
+@pytest.mark.parametrize(
+    ("issue", "answer"),
+    [
+        (
+            _service_incident_start_time_repair_issue(evidence_status="failed"),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(evidence_method="POST"),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(evidence_concern_id="other-concern"),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(
+                guidance=(
+                    "State the exact start time from the successful service-status lookup "
+                    "and change it."
+                )
+            ),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(timestamps=("2026-07-19",)),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(
+                timestamps=("2026-07-19T07:40:00Z", "2026-07-19T08:40:00Z")
+            ),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(
+                timestamps=("2026-07-19T07:40:00Z", "2026-07-19T08:40:00Z"),
+                timestamps_in_one_record=True,
+            ),
+            "The incident is under investigation.",
+        ),
+        (
+            _service_incident_start_time_repair_issue(),
+            "The incident began at 2026-07-19T08:40:00Z.",
+        ),
+    ],
+    ids=(
+        "failed-evidence",
+        "mutating-evidence",
+        "cross-concern-evidence",
+        "mutating-obligation",
+        "date-without-exact-time",
+        "conflicting-tool-times",
+        "conflicting-times-in-one-tool-record",
+        "wrong-existing-time",
+    ),
+)
+def test_coverage_repair_does_not_append_untrusted_incident_start_time(
+    issue: dict[str, Any],
+    answer: str,
+) -> None:
+    assert (
+        issue_agent.repair_issue_automation_answer_service_incident_start_time(
+            issue=issue,
+            answer=answer,
+            uncovered_obligation_ids=("service-incident:required-guidance-1",),
+        )
+        == answer
+    )
+
+
+def test_coverage_repair_does_not_duplicate_present_incident_start_time() -> None:
+    answer = "The incident began at 2026-07-19T07:40:00Z."
+
+    repaired = issue_agent.repair_issue_automation_answer_service_incident_start_time(
+        issue=_service_incident_start_time_repair_issue(),
+        answer=answer,
+        uncovered_obligation_ids=("service-incident:required-guidance-1",),
+    )
+
+    assert repaired == answer
+    assert repaired.count("2026-07-19T07:40:00Z") == 1
+
+
+def test_grounding_rejects_two_incident_times_in_one_tool_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _service_incident_start_time_repair_issue(
+        timestamps=("2026-07-19T07:40:00Z", "2026-07-19T08:40:00Z"),
+        timestamps_in_one_record=True,
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The incident began at 2026-07-19T07:40:00Z.",
+        resolutions=[
+            (
+                "service-incident:required-guidance-1",
+                "answered",
+                ["u001"],
+            )
+        ],
+        unit_evidence_ids=["tool:service-incident:service_status_incidents"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
 @pytest.mark.parametrize(
     "answer",
     [

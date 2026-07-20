@@ -3206,6 +3206,11 @@ _SERVICE_INCIDENT_RUNBOOK_RE = re.compile(
 _SERVICE_INCIDENT_FACT_PATHS = frozenset(
     {"affected_region", "affected_service", "started_at", "status"}
 )
+_EXPLICIT_INCIDENT_START_TIMESTAMP_RE = re.compile(
+    r"\b(?:started|began)\s+(?:at|on|since)\s+"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b",
+    re.IGNORECASE,
+)
 
 
 def _tool_fact_scalar_entries(
@@ -3464,10 +3469,12 @@ def _is_service_incident_temporal_requirement(
     return True
 
 
-def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
-    """Extract only the exact status fields used by the incident sentence grammar."""
+def _service_incident_record_fact_values(
+    record: dict[str, Any],
+) -> dict[str, frozenset[str]]:
+    """Retain every incident field value so conflicting lookup rows stay ambiguous."""
 
-    facts: dict[str, str] = {}
+    facts: dict[str, set[str]] = {}
     is_fixture = _string_from(record.get("name")).startswith("fixture_")
     for raw_path, raw_scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
         path = raw_path.rsplit(".", 1)[-1]
@@ -3481,8 +3488,18 @@ def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
             path = fixture_scalar.group("path")
             scalar = fixture_scalar.group("value")
         if path in _SERVICE_INCIDENT_FACT_PATHS and scalar:
-            facts.setdefault(path, scalar)
-    return facts
+            facts.setdefault(path, set()).add(scalar)
+    return {path: frozenset(values) for path, values in facts.items()}
+
+
+def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
+    """Extract only unambiguous status fields used by the incident sentence grammar."""
+
+    return {
+        path: next(iter(values))
+        for path, values in _service_incident_record_fact_values(record).items()
+        if len(values) == 1
+    }
 
 
 def _is_isolated_service_incident_temporal_answer(
@@ -3551,6 +3568,70 @@ def _is_isolated_service_incident_temporal_answer(
         if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
             return True
     return False
+
+
+def repair_issue_automation_answer_service_incident_start_time(
+    *,
+    issue: dict[str, Any],
+    answer: str,
+    uncovered_obligation_ids: tuple[str, ...],
+) -> str:
+    """Fill one omitted incident start time from exact same-concern tool proof."""
+
+    clean_answer = answer.strip()
+    uncovered_ids = {
+        _string_from(obligation_id)
+        for obligation_id in uncovered_obligation_ids
+        if _string_from(obligation_id)
+    }
+    if not clean_answer or not uncovered_ids:
+        return answer
+
+    ticket = _automatic_ticket_context(issue)
+    qualifying_concern_ids = {
+        concern_id
+        for obligation in _answer_obligations_from_issue(issue)
+        if _string_from(obligation.get("id")) in uncovered_ids
+        and (
+            concern_id := _string_from(obligation.get("concernId"))
+        )
+        and _is_service_incident_temporal_requirement(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=_string_from(obligation.get("question")),
+        )
+    }
+    if len(qualifying_concern_ids) != 1:
+        return answer
+    concern_id = next(iter(qualifying_concern_ids))
+
+    started_at_values: set[str] = set()
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        if not _valid_tool_evidence_id(record, concern_id=concern_id):
+            continue
+        if _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        started_at_values.update(
+            _service_incident_record_fact_values(record).get(
+                "started_at",
+                frozenset(),
+            )
+        )
+    if len(started_at_values) != 1:
+        return answer
+
+    started_at = next(iter(started_at_values))
+    if "T" not in started_at or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+        return answer
+    if started_at.casefold() in clean_answer.casefold():
+        return answer
+    if _EXPLICIT_INCIDENT_START_TIMESTAMP_RE.search(clean_answer):
+        # Do not supplement a conflicting start-time claim. Grounding must keep
+        # the draft blocked instead of masking the contradiction.
+        return answer
+    return f"{clean_answer}\n\nThe incident began at {started_at}."
 
 
 def _required_secret_delivery_guidance(ticket: dict[str, Any]) -> bool:

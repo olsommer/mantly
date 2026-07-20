@@ -4117,7 +4117,7 @@ def test_grounding_r10_c02_intake_prerequisites_do_not_cover_run_conflict_check(
     assert result.obligation_assessments[0]["covered"] is False
 
 
-def test_grounding_resolves_equivalent_same_concern_tool_timestamp(
+def test_grounding_does_not_override_not_covered_equivalent_tool_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     concern_id = "service-incident"
@@ -4144,12 +4144,12 @@ def test_grounding_resolves_equivalent_same_concern_tool_timestamp(
         unit_evidence_ids=[evidence_id],
     )
 
-    assert result.verified is True
-    assert result.uncovered_obligations == ()
-    assert result.obligation_assessments[0]["resolution"] == "answered"
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
 
 
-def test_grounding_resolves_fixture_wrapped_same_concern_tool_timestamp(
+def test_grounding_does_not_override_not_covered_fixture_tool_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     concern_id = "service-incident"
@@ -4181,9 +4181,256 @@ def test_grounding_resolves_fixture_wrapped_same_concern_tool_timestamp(
         unit_evidence_ids=[evidence_id],
     )
 
-    assert result.verified is True
-    assert result.uncovered_obligations == ()
-    assert result.obligation_assessments[0]["resolution"] == "answered"
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    ("timestamp_resolution", "expected_verified"),
+    [("answered", True), ("not_covered", False)],
+)
+@pytest.mark.parametrize(
+    "incident_sentence",
+    [
+        (
+            "The authentication service in the EU region is currently investigating an issue "
+            "that started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "The incident is currently investigating, affecting the authentication service "
+            "in the EU, and started on 2026-07-19T07:40:00Z."
+        ),
+    ],
+)
+def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
+    monkeypatch: pytest.MonkeyPatch,
+    timestamp_resolution: str,
+    expected_verified: bool,
+    incident_sentence: str,
+) -> None:
+    """A read-only `started_at` fact must not look like a completed action."""
+
+    concern_id = "service-incident"
+    tool_name = "fixture_saas_incident_inc_204"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    guidance = [
+        "State the incident status only from the successful service-status lookup.",
+        "State the affected region only from the successful service-status lookup.",
+        "State the affected service only from the successful service-status lookup.",
+        "State the exact start time only from the successful service-status lookup.",
+    ]
+    issue = {
+        "id": "issue-obligations",
+        "subject": "EU authentication outage",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": concern_id,
+                            "matched": True,
+                            "intentName": "saas-service-incident",
+                            "requiredGuidance": guidance,
+                            "outcome": {
+                                "toolEvidence": [
+                                    {
+                                        "name": tool_name,
+                                        "status": "success",
+                                        "responseFacts": [
+                                            {
+                                                "path": "fixture_evidence.result.0",
+                                                "value": "status: investigating",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.1",
+                                                "value": "affected_region: EU",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.2",
+                                                "value": "affected_service: authentication",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.3",
+                                                "value": "started_at: 2026-07-19T07:40:00Z",
+                                            },
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    answer = (
+        "Hello. "
+        "Thank you for reaching out. "
+        "Regarding the authentication outage, here is the current status. "
+        f"{incident_sentence}"
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                f"{concern_id}:required-guidance-{index}",
+                timestamp_resolution if index == 4 else "answered",
+                ["u004"],
+            )
+            for index in range(1, 5)
+        ],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is expected_verified
+    assert result.obligation_assessments[3]["resolution"] == timestamp_resolution
+    if expected_verified:
+        assert result.uncovered_obligations == ()
+    else:
+        assert result.reason_code == "incomplete_answer"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The service incident and account deletion started at 2026-07-19T07:40:00Z.",
+        "The service incident and termination started at 2026-07-19T07:40:00Z.",
+        "The service incident and suspension started at 2026-07-19T07:40:00Z.",
+        "The service incident and reset started at 2026-07-19T07:40:00Z.",
+        "The service incident and booking started at 2026-07-19T07:40:00Z.",
+        "The service incident and export started at 2026-07-19T07:40:00Z.",
+        "The service incident and collection started at 2026-07-19T07:40:00Z.",
+        "The service incident and dispatch started at 2026-07-19T07:40:00Z.",
+        "The service incident and acceptance started at 2026-07-19T07:40:00Z.",
+        "The service incident and closure started at 2026-07-19T07:40:00Z.",
+        "The service incident and rotation started at 2026-07-19T07:40:00Z.",
+        "The authentication service is starting at 2026-07-19T07:40:00Z.",
+        "The EU service began at 2026-07-19T07:40:00Z.",
+        "The issue is current and the authentication service started at 2026-07-19T07:40:00Z.",
+    ],
+)
+@pytest.mark.parametrize("resolution", ["answered", "not_covered"])
+def test_grounding_rejects_non_isolated_incident_timestamp_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    resolution: str,
+) -> None:
+    concern_id = "service-incident"
+    tool_name = "fixture_saas_incident_inc_204"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    issue = {
+        "id": "issue-obligations",
+        "subject": "EU authentication outage",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": concern_id,
+                            "matched": True,
+                            "intentName": "saas-service-incident",
+                            "requiredGuidance": [
+                                "State the exact start time only from the successful service-status lookup."
+                            ],
+                            "outcome": {
+                                "toolEvidence": [
+                                    {
+                                        "name": tool_name,
+                                        "status": "success",
+                                        "responseFacts": [
+                                            {
+                                                "path": "fixture_evidence.result.0",
+                                                "value": "status: investigating",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.1",
+                                                "value": "affected_region: EU",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.2",
+                                                "value": "affected_service: authentication",
+                                            },
+                                            {
+                                                "path": "fixture_evidence.result.3",
+                                                "value": "started_at: 2026-07-19T07:40:00Z",
+                                            },
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (f"{concern_id}:required-guidance-1", resolution, ["u001"]),
+        ],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "State the exact start time when the cancellation started.",
+        "Report the exact start time when the cancellation started.",
+        "Provide the exact start time when the cancellation started.",
+    ],
+)
+@pytest.mark.parametrize("resolution", ["answered", "not_covered"])
+def test_grounding_does_not_restore_mutating_action_timestamp_from_lookup_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    resolution: str,
+) -> None:
+    concern_id = "cancellation"
+    tool_name = "fixture_cancellation_status"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[
+            (
+                "cancellation:start",
+                question,
+            )
+        ],
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "status": "success",
+                "responseFacts": {"started_at": "2026-07-19T07:40:00Z"},
+            }
+        ],
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer="The cancellation started at 2026-07-19T07:40:00Z.",
+        resolutions=[("cancellation:start", resolution, ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
 
 
 @pytest.mark.parametrize(

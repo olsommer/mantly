@@ -2901,6 +2901,15 @@ _FIXTURE_EVIDENCE_SCALAR_RE = re.compile(
     r"^(?P<path>[A-Za-z][^:\r\n]{0,119}): (?P<value>[^\r\n]{1,500})$"
 )
 _FIXTURE_TEMPORAL_SCALAR_PATHS = frozenset({"started_at"})
+_SERVICE_STATUS_LOOKUP_RE = re.compile(r"\bservice[-_\s]?status\s+lookup\b", re.IGNORECASE)
+_SERVICE_INCIDENT_RUNBOOK_RE = re.compile(
+    r"(?:^|[-_\s])(?:service[-_\s]+)?incident(?:$|[-_\s])|"
+    r"(?:^|[-_\s])outage(?:$|[-_\s])",
+    re.IGNORECASE,
+)
+_SERVICE_INCIDENT_FACT_PATHS = frozenset(
+    {"affected_region", "affected_service", "started_at", "status"}
+)
 
 
 def _tool_fact_scalar_entries(
@@ -3125,6 +3134,113 @@ def _tool_backed_temporal_scalar_answers_obligation(
             allowed_evidence_ids=linked_evidence_ids,
         )
     )
+
+
+def _is_service_incident_temporal_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+) -> bool:
+    """Recognize a trusted service-incident timestamp requirement."""
+
+    if (
+        _SERVICE_STATUS_LOOKUP_RE.search(question) is None
+        or not _is_atomic_read_only_temporal_question(question)
+        or "start" not in _temporal_fact_tokens(question)
+    ):
+        return False
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            record
+            for raw_concern in concerns
+            if (record := _record_from(raw_concern))
+            and _string_from(record.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or _SERVICE_INCIDENT_RUNBOOK_RE.search(
+        _string_from(concern.get("runbook"))
+    ) is None:
+        return False
+    return True
+
+
+def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
+    """Extract only the exact status fields used by the incident sentence grammar."""
+
+    facts: dict[str, str] = {}
+    is_fixture = _string_from(record.get("name")).startswith("fixture_")
+    for raw_path, raw_scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+        path = raw_path.rsplit(".", 1)[-1]
+        scalar = raw_scalar
+        fixture_scalar = (
+            _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_scalar)
+            if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+            else None
+        )
+        if fixture_scalar is not None:
+            path = fixture_scalar.group("path")
+            scalar = fixture_scalar.group("value")
+        if path in _SERVICE_INCIDENT_FACT_PATHS and scalar:
+            facts.setdefault(path, scalar)
+    return facts
+
+
+def _is_isolated_service_incident_temporal_answer(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Prove one linked unit contains only an exact incident-status timestamp claim."""
+
+    if len(answer_unit_ids) != 1:
+        return False
+    unit_id = answer_unit_ids[0]
+    linked_text = _string_from(expected_units.get(unit_id, {}).get("text"))
+    linked_evidence_ids = supported_unit_evidence_ids.get(unit_id, frozenset())
+    if not linked_text or not linked_evidence_ids:
+        return False
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or evidence_id not in linked_evidence_ids:
+            continue
+        facts = _service_incident_record_facts(record)
+        started_at = facts.get("started_at", "")
+        if not started_at or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+            continue
+        timestamp = re.escape(started_at)
+        start_clause = rf"(?:started|began)\s+(?:at|on|since)\s+{timestamp}"
+        patterns = [
+            rf"(?:The\s+)?(?:service\s+)?(?:incident|outage|issue)\s+{start_clause}\.?",
+        ]
+        status = facts.get("status", "")
+        region = facts.get("affected_region", "")
+        service = facts.get("affected_service", "")
+        if status and region and service:
+            escaped_status = re.escape(status)
+            escaped_region = re.escape(region)
+            escaped_service = re.escape(service)
+            patterns.extend(
+                (
+                    rf"The\s+{escaped_service}\s+service\s+in\s+(?:the\s+)?{escaped_region}"
+                    rf"(?:\s+region)?\s+is\s+currently\s+{escaped_status}\s+an?\s+"
+                    rf"(?:incident|outage|issue)\s+(?:that|which)\s+{start_clause}\.?",
+                    rf"The\s+(?:service\s+)?(?:incident|outage|issue)\s+is\s+currently\s+"
+                    rf"{escaped_status},\s+affecting\s+the\s+{escaped_service}\s+service\s+in\s+"
+                    rf"(?:the\s+)?{escaped_region}(?:\s+region)?,\s+and\s+{start_clause}\.?",
+                )
+            )
+        if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
+            return True
+    return False
 
 
 def _required_secret_delivery_guidance(ticket: dict[str, Any]) -> bool:
@@ -5345,22 +5461,33 @@ def assess_issue_automation_grounding(
             ):
                 resolution = "answered"
                 deterministically_resolved_obligation_ids.add(obligation_id)
-            if (
-                requested_resolution == "not_covered"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _tool_backed_temporal_scalar_answers_obligation(
+            obligation_question = _string_from(obligation.get("question"))
+            is_service_incident_temporal_requirement = bool(
+                obligation_kind == "runbook_requirement"
+                and _is_service_incident_temporal_requirement(
                     ticket=ticket_evidence,
                     concern_id=obligation_concern_id,
-                    question=_string_from(obligation.get("question")),
+                    question=obligation_question,
+                )
+            )
+            isolated_service_incident_temporal_answer = bool(
+                is_service_incident_temporal_requirement
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _is_isolated_service_incident_temporal_answer(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
                     answer_unit_ids=answer_unit_ids,
                     expected_units=expected_units,
                     supported_unit_evidence_ids=supported_unit_evidence_ids,
                 )
+            )
+            if (
+                requested_resolution == "answered"
+                and is_service_incident_temporal_requirement
+                and not isolated_service_incident_temporal_answer
             ):
-                resolution = "answered"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            obligation_question = _string_from(obligation.get("question"))
+                resolution = "not_covered"
             linked_answer_asserts_action_state = any(
                 check_pending_action_claims(
                     answer=_string_from(expected_units.get(unit_id, {}).get("text")),
@@ -5402,6 +5529,29 @@ def assess_issue_automation_grounding(
                     )
                 ):
                     resolution = "not_covered"
+            # Run this exact-fact exception after action-state validation. A
+            # read-only sentence such as "the incident started at <ISO>" can
+            # look like a completed mutation to the generic action guard. Only
+            # restore coverage when the obligation and linked unit pass the
+            # stricter same-concern, successful-tool, exact-scalar checks.
+            if (
+                resolution == "not_covered"
+                and requested_resolution == "answered"
+                and obligation_kind == "runbook_requirement"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and isolated_service_incident_temporal_answer
+                and _tool_backed_temporal_scalar_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=obligation_question,
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
             # A runbook response requirement is trusted operational guidance,
             # not a customer-requested business action. Enforce this after all
             # deterministic resolution overrides: only a substantive `answered`

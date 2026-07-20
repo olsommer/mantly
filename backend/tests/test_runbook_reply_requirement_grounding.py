@@ -163,6 +163,66 @@ def test_s06_runbook_requirements_cannot_be_satisfied_by_generic_pending_reply(
     assert {item["resolution"] for item in requirement_assessments} == {"not_covered"}
 
 
+def test_l03_source_bound_deadline_repeat_rejects_generic_pending_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "urgent-deadline"
+    repeat_requirement = (
+        "Repeat the deadline: Zurich Commercial Court response due "
+        "20 July 2026 at 12:00."
+    )
+    issue = _issue(
+        {
+            "concernId": concern_id,
+            "matched": True,
+            "intentName": "law-urgent-deadline",
+            "answerObligations": [
+                {
+                    "obligationId": f"{concern_id}:obligation-1",
+                    "question": "Identify and escalate the deadline.",
+                }
+            ],
+            "requiredGuidance": [repeat_requirement],
+        }
+    )
+    answer = (
+        "Escalating the deadline is not confirmed. A related next step remains "
+        "pending human review."
+    )
+    units = issue_agent._grounding_answer_units(answer)
+    concern_evidence = [f"concern:{concern_id}"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                f"{concern_id}:obligation-1",
+                "pending_or_unavailable",
+                [units[0]["id"]],
+                concern_evidence,
+            ),
+            (
+                f"{concern_id}:required-guidance-1",
+                "pending_or_unavailable",
+                [units[0]["id"]],
+                concern_evidence,
+            ),
+        ],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (repeat_requirement,)
+    repeat_assessment = next(
+        item
+        for item in result.obligation_assessments
+        if item["obligationId"] == f"{concern_id}:required-guidance-1"
+    )
+    assert repeat_assessment["resolution"] == "not_covered"
+
+
 def test_customer_questions_and_multi_concern_runbook_requirements_are_both_grounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

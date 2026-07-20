@@ -1613,17 +1613,102 @@ _KNOWLEDGE_REQUEST_TOKEN_ALIASES = {
     "approved": "approv",
     "approves": "approv",
     "approving": "approv",
+    "confirmation": "confirm",
+    "confirmations": "confirm",
+    "confirmed": "confirm",
+    "confirming": "confirm",
     "quantification": "quantifi",
     "quantified": "quantifi",
     "quantify": "quantifi",
     "services": "service",
 }
-_KNOWLEDGE_REQUEST_GENERIC_STATE_TOKENS = frozenset(
-    {
-        "approv",
-        "known",
-        "quantifi",
-    }
+_KNOWLEDGE_REQUEST_EXPLICIT_STATE_PATTERN = re.compile(
+    r"\b(?:approved|authorized|confirmed|known|quantified|available|allowed|permitted|"
+    r"prohibited|pending|awaiting|unknown|unverified|unavailable|unconfirmed|"
+    r"undetermined|unclear|granted|denied|declined|rejected|may|can(?:not)?|"
+    r"must(?:\s+not)?|should(?:\s+not)?|does\s+not\s+establish|"
+    r"cannot\s+establish|not\s+(?:yet|currently)|"
+    r"best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|"
+    r"erlaubt|ausstehend|unbekannt|ungepr[uü]ft|abgelehnt|kann|darf|nicht|"
+    r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|"
+    r"autoris[ée]e?s?|en\s+attente|inconnue?s?|non\s+confirm[ée]e?s?|refus[ée]e?s?|peut|pas|"
+    r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|"
+    r"disponible?s?|autorizad[oa]s?|pendiente?s?|desconocid[oa]s?|"
+    r"no\s+confirmad[oa]s?|denegad[oa]s?|rechazad[oa]s?|puede|"
+    r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|disponibile|"
+    r"autorizzat[oaie]|in\s+attesa|sconosciut[oaie]|non\s+confermat[oaie]|"
+    r"negat[oaie]|rifiutat[oaie]|pu[oò])\b|\b(?:no|nein|non)\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE = (
+    r"(?:approved|confirmed|known|quantified|available|authorized|allowed|permitted)"
+)
+_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES = (
+    rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE}"
+    rf"(?:\s+(?:and|or)\s+{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE})*"
+)
+_KNOWLEDGE_REQUEST_STATE_QUESTION_PATTERNS = (
+    re.compile(
+        r"^\s*(?:is|are|was|were)\s+(?P<subject>.+?)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:has|have)\s+(?P<subject>.+?)\s+been\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*whether\s+(?P<subject>.+?)\s+(?:is|are|was|were)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:what|which)\s+(?P<subject>.+?)\s+(?:is|are|was|were)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:can|could|may|might|should|must|will|would|kann|k[oö]nnen|"
+        r"darf|d[uü]rfen|soll|sollen|muss|m[uü]ssen|wird|werden|peut|peuvent|"
+        r"pourrait|pourraient|puede|pueden|podr[ií]a|podr[ií]an|pu[oò]|possono|"
+        r"potrebbe|potrebbero)\s+(?P<subject>.+?)\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:ist|sind|war|waren|wurde|wurden)\s+(?P<subject>.+?)\s+"
+        r"(?:best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt)\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?P<subject>.+?)\s+(?:ist|sind|est|sont|est[áa]|estan|est[áa]n|[èe]|sono)\s+"
+        r"(?:best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt|"
+        r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|autoris[ée]e?s?|"
+        r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|disponible?s?|autorizad[oa]s?|"
+        r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|disponibile|autorizzat[oaie])"
+        r"\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_KNOWLEDGE_REQUEST_STATE_HINT_PATTERN = re.compile(
+    r"\b(?:approved|confirmed|known|quantified|available|authorized|allowed|permitted|"
+    r"best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt|"
+    r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|autoris[ée]e?s?|"
+    r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|autorizad[oa]s?|"
+    r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|autorizzat[oaie])\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"(?<=[.!?])\s+|[\r\n]+|\s*;\s*|"
+    r",\s*(?:but|while|whereas|however|aber|w[aä]hrend|mais|tandis\s+que|"
+    r"cependant|pero|mientras|sin\s+embargo|ma|mentre|tuttavia)\s+|"
+    r"\s+(?:but|while|whereas|however|aber|w[aä]hrend|mais|tandis\s+que|"
+    r"cependant|pero|mientras|sin\s+embargo|ma|mentre|tuttavia)\s+",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN = re.compile(
+    r"\s+(?P<conjunction>and|or|und|oder|et|ou|y|o|e)\s+",
+    re.IGNORECASE,
 )
 _KNOWLEDGE_FRAMING_MANNER_ADVERB = r"[a-z]+(?:-[a-z]+)*ly"
 _KNOWLEDGE_FRAMING_MANNER_PATTERN = re.compile(
@@ -1792,7 +1877,7 @@ def _knowledge_request_tokens(value: str) -> set[str]:
         value.casefold(),
     )
     tokens: set[str] = set()
-    for raw in re.findall(r"[a-z0-9]+", normalized):
+    for raw in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE):
         if raw in _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS or (len(raw) == 1 and not raw.isdigit()):
             continue
         token = _KNOWLEDGE_REQUEST_TOKEN_ALIASES.get(raw, raw)
@@ -1808,16 +1893,109 @@ def _knowledge_request_tokens(value: str) -> set[str]:
     return tokens
 
 
+def _knowledge_request_state_subject(question: str) -> tuple[bool, str]:
+    """Return a parsed state-question subject or fail closed on an unknown shape."""
+
+    normalized = " ".join(str(question or "").split()).strip("¿¡")
+    for pattern in _KNOWLEDGE_REQUEST_STATE_QUESTION_PATTERNS:
+        match = pattern.fullmatch(normalized)
+        if match is None:
+            continue
+        subject = match.group("subject").strip(" ?!.,:;\t\r\n")
+        return True, subject
+    if _KNOWLEDGE_REQUEST_STATE_HINT_PATTERN.search(normalized):
+        return True, ""
+    return False, normalized
+
+
+def _knowledge_request_answer_clauses(
+    excerpt: str,
+    *,
+    subject: str,
+) -> tuple[str, ...]:
+    """Split independent state clauses without breaking compound subjects."""
+
+    subject_tokens = _knowledge_request_tokens(subject)
+    subject_conjunction_counts: dict[str, int] = {}
+    for match in _KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN.finditer(
+        subject
+    ):
+        conjunction = match.group("conjunction").casefold()
+        subject_conjunction_counts[conjunction] = (
+            subject_conjunction_counts.get(conjunction, 0) + 1
+        )
+
+    def split_independent_coordination(value: str) -> list[str]:
+        matches = list(
+            _KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN.finditer(value)
+        )
+        if not matches:
+            return [value.strip()] if value.strip() else []
+
+        remaining = dict(subject_conjunction_counts)
+        split_matches: list[re.Match[str]] = []
+        for index, match in enumerate(matches):
+            conjunction = match.group("conjunction").casefold()
+            local_start = matches[index - 1].end() if index else 0
+            local_end = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else len(value)
+            )
+            local_tokens = _knowledge_request_tokens(value[local_start:local_end])
+            if (
+                remaining.get(conjunction, 0) > 0
+                and subject_tokens
+                and subject_tokens.issubset(local_tokens)
+            ):
+                remaining[conjunction] -= 1
+                continue
+            split_matches.append(match)
+
+        if not split_matches:
+            return [value.strip()] if value.strip() else []
+        parts: list[str] = []
+        cursor = 0
+        for match in split_matches:
+            if part := value[cursor : match.start()].strip():
+                parts.append(part)
+            cursor = match.end()
+        if part := value[cursor:].strip():
+            parts.append(part)
+        return parts
+
+    clauses: list[str] = []
+    for unit in _KNOWLEDGE_REQUEST_CLAUSE_SPLIT_PATTERN.split(excerpt):
+        clauses.extend(split_independent_coordination(unit))
+    return tuple(clauses)
+
+
 def _knowledge_request_excerpt_matches(item: dict[str, str], excerpt: str) -> bool:
-    topic_tokens = _knowledge_request_tokens(item["question"])
+    state_sensitive, subject = _knowledge_request_state_subject(item["question"])
+    if state_sensitive and not subject:
+        return False
+    topic_tokens = _knowledge_request_tokens(subject)
     if not topic_tokens:
-        return bool(excerpt.strip())
-    excerpt_tokens = _knowledge_request_tokens(excerpt)
-    specific_tokens = topic_tokens - _KNOWLEDGE_REQUEST_GENERIC_STATE_TOKENS
-    compared_tokens = specific_tokens or topic_tokens
-    matched = len(compared_tokens & excerpt_tokens)
-    required = max(1, (len(compared_tokens) * 2 + 4) // 5)
-    return matched >= required
+        return bool(excerpt.strip()) and not state_sensitive
+    compared_tokens = topic_tokens
+    required = (
+        len(compared_tokens)
+        if len(compared_tokens) <= 2
+        else (len(compared_tokens) * 2 + 2) // 3
+    )
+
+    def has_subject_coverage(value: str) -> bool:
+        value_tokens = _knowledge_request_tokens(value)
+        return len(compared_tokens & value_tokens) >= max(1, required)
+
+    if not state_sensitive:
+        return has_subject_coverage(excerpt)
+    excerpt_units = _knowledge_request_answer_clauses(excerpt, subject=subject)
+    return any(
+        has_subject_coverage(unit)
+        and _KNOWLEDGE_REQUEST_EXPLICIT_STATE_PATTERN.search(unit) is not None
+        for unit in excerpt_units
+    )
 
 
 def _uncovered_knowledge_request_items(

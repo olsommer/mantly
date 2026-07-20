@@ -694,6 +694,8 @@ def test_knowledge_agent_contract_keeps_saas_incident_unknowns_explicit() -> Non
     assert "permission to request a review does not establish" in prompt
     assert "requested eligibility, approval, cause, date, amount" in prompt
     assert "Do not merge several missing items" in prompt
+    assert "does not establish its current state" in prompt
+    assert "separately say whether it is confirmed" in prompt
     assert "Do not describe an entire requested item as unavailable" in prompt
     assert "include the complete prerequisite set" in prompt
     assert "Every item must have its own evidence-backed answer" in prompt
@@ -716,10 +718,16 @@ _SAAS_K01_QUESTION = (
     "approved or quantified?"
 )
 _FULFILLMENT_K01_REQUEST = (
-    "Based only on reviewed knowledge and verified shipment facts, explain the "
-    "current state of ZF-20991, whether it may be returned today, and who "
-    "controls refund timing."
+    "Based only on reviewed knowledge and verified shipment facts: What is the "
+    "current state of ZF-20991? May it be returned today? Is a return "
+    "authorization confirmed? Is a return reference confirmed? Is a return "
+    "route confirmed? Is refund approval confirmed? Is a refund date confirmed? "
+    "Who controls final refund approval and posting time?"
 )
+
+
+def _knowledge_unknown_item_answer_for_test(item: str) -> str:
+    return f'Available evidence does not establish this requested item: "{item}"'
 
 
 def test_knowledge_request_items_extract_exact_persona_k01_requests() -> None:
@@ -742,9 +750,14 @@ def test_knowledge_request_items_extract_exact_persona_k01_requests() -> None:
         "Is incident eligibility or any credit approved or quantified?",
     ]
     assert [item["question"] for item in fulfillment_items] == [
-        "Explain the current state of ZF-20991?",
-        "Whether it may be returned today?",
-        "Who controls refund timing?",
+        "What is the current state of ZF-20991?",
+        "May it be returned today?",
+        "Is a return authorization confirmed?",
+        "Is a return reference confirmed?",
+        "Is a return route confirmed?",
+        "Is refund approval confirmed?",
+        "Is a refund date confirmed?",
+        "Who controls final refund approval and posting time?",
     ]
 
 
@@ -901,10 +914,21 @@ def test_knowledge_request_items_ignore_empty_or_punctuation_only_input(
     assert issue_agent._knowledge_request_items(agent_request) == ()
 
 
-def test_fulfillment_imperative_k01_omission_gets_item_specific_repair() -> None:
+def test_fulfillment_k01_partial_policy_answer_gets_item_specific_repair() -> None:
     items = issue_agent._knowledge_request_items(_FULFILLMENT_K01_REQUEST)
     answer = (
-        "Shipment ZF-20991 is in transit with UPS. "
+        "The shipment ZF-20991 is currently in transit with UPS. "
+        "It cannot be returned today as it is still in transit and a return "
+        "authorization is required after delivery. "
+        "The merchant and payment provider control refund approval and posting time."
+    )
+    shipment_excerpt = "The shipment ZF-20991 is currently in transit with UPS."
+    return_excerpt = (
+        "It cannot be returned today as it is still in transit and a return "
+        "authorization is required after delivery."
+    )
+    authorization_rule_excerpt = "a return authorization is required after delivery."
+    controller_excerpt = (
         "The merchant and payment provider control refund approval and posting time."
     )
 
@@ -913,21 +937,275 @@ def test_fulfillment_imperative_k01_omission_gets_item_specific_repair() -> None
         question=_FULFILLMENT_K01_REQUEST,
         items=items,
         assessments=[
+            _knowledge_request_assessment(shipment_excerpt, item_id=items[0]["id"]),
+            _knowledge_request_assessment(return_excerpt, item_id=items[1]["id"]),
+            # Adversarial model coverage claims shaped like the failed live answer.
             _knowledge_request_assessment(
-                "Shipment ZF-20991 is in transit with UPS.",
-                item_id=items[0]["id"],
-            ),
-            _knowledge_request_assessment(
-                "The merchant and payment provider control refund approval and posting time.",
+                authorization_rule_excerpt,
                 item_id=items[2]["id"],
             ),
+            _knowledge_request_assessment(return_excerpt, item_id=items[3]["id"]),
+            _knowledge_request_assessment(return_excerpt, item_id=items[4]["id"]),
+            _knowledge_request_assessment(controller_excerpt, item_id=items[5]["id"]),
+            _knowledge_request_assessment(controller_excerpt, item_id=items[6]["id"]),
+            _knowledge_request_assessment(controller_excerpt, item_id=items[7]["id"]),
         ],
     )
 
-    assert uncovered == (items[1],)
-    assert repaired.endswith(
-        'Available evidence does not establish this requested item: "Whether it may be returned today?"'
+    assert uncovered == items[2:7]
+    for item in items[2:7]:
+        assert _knowledge_unknown_item_answer_for_test(item["question"]) in repaired
+
+    repaired_assessments = [
+        _knowledge_request_assessment(shipment_excerpt, item_id=items[0]["id"]),
+        _knowledge_request_assessment(return_excerpt, item_id=items[1]["id"]),
+        _knowledge_request_assessment(controller_excerpt, item_id=items[7]["id"]),
+        *[
+            _knowledge_request_assessment(
+                _knowledge_unknown_item_answer_for_test(item["question"]),
+                item_id=item["id"],
+                resolution="unknown_or_unavailable",
+            )
+            for item in items[2:7]
+        ],
+    ]
+    repaired_again, still_uncovered = issue_agent._repair_knowledge_request_item_coverage(
+        answer=repaired,
+        question=_FULFILLMENT_K01_REQUEST,
+        items=items,
+        assessments=repaired_assessments,
     )
+
+    assert repaired_again == repaired
+    assert still_uncovered == ()
+
+
+@pytest.mark.parametrize(
+    ("question", "excerpt", "expected"),
+    [
+        (
+            "Is a return authorization confirmed?",
+            "A return authorization is required after delivery.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "The merchant controls final refund approval and posting time.",
+            False,
+        ),
+        (
+            "Is a refund date confirmed?",
+            "The merchant controls final refund approval and posting time.",
+            False,
+        ),
+        (
+            "Is a return route confirmed?",
+            "The refund route is confirmed.",
+            False,
+        ),
+        (
+            "Is a return route confirmed?",
+            "The return route is not confirmed.",
+            True,
+        ),
+        (
+            "Is a return authorization confirmed?",
+            "The return authorization has been granted.",
+            True,
+        ),
+        (
+            "Is a refund approved?",
+            "The refund was denied.",
+            True,
+        ),
+        (
+            "Is a refund date confirmed?",
+            "Available evidence does not establish whether a refund date is confirmed.",
+            True,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "No shipping delay is recorded. The merchant controls refund approval.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "No refund date is known.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "Refund timing is controlled while delivery status is pending.",
+            False,
+        ),
+        (
+            "Is a return route confirmed?",
+            "Return route details are in the policy, but refund approval is pending.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "Refund approval is controlled, and delivery status is pending.",
+            False,
+        ),
+        (
+            "Is a return route confirmed?",
+            "Return route guidance is documented and refund approval is pending.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "The merchant controls refund approval and delivery status is pending.",
+            False,
+        ),
+        (
+            "Is refund approval confirmed?",
+            "The merchant owns refund approval and the shipment remains pending.",
+            False,
+        ),
+        (
+            "Is a return route confirmed?",
+            "Return route guidance applies and refund approval remains pending.",
+            False,
+        ),
+        (
+            "Are return authorization and route confirmed?",
+            "Return authorization and route are not confirmed.",
+            True,
+        ),
+        (
+            "Are return authorization and route confirmed?",
+            "Return authorization and route guidance apply and delivery status is pending.",
+            False,
+        ),
+        (
+            "Are return authorization and route confirmed?",
+            "Return authorization rules are documented and delivery status is pending.",
+            False,
+        ),
+        (
+            "Is incident eligibility or any credit approved or quantified?",
+            "Incident eligibility or credit review rules apply or delivery status is pending.",
+            False,
+        ),
+        (
+            "Whether an SLA credit is approved?",
+            "No SLA credit is approved.",
+            True,
+        ),
+        (
+            "What support plans are available?",
+            "Standard and Enterprise support plans are available.",
+            True,
+        ),
+        (
+            "What approved refund amount is available?",
+            "The approved refund amount is available after review.",
+            True,
+        ),
+        (
+            "Is a return confirmation confirmed?",
+            "Return confirmation details are described in the policy.",
+            False,
+        ),
+        (
+            "¿La autorización de devolución está confirmada?",
+            "Se requiere una autorización de devolución según la política.",
+            False,
+        ),
+        (
+            "¿La autorización de devolución está confirmada?",
+            "La autorización de devolución no está confirmada.",
+            True,
+        ),
+        (
+            "L’autorisation de retour est confirmée ?",
+            "Une autorisation de retour est requise par la politique.",
+            False,
+        ),
+        (
+            "L’autorisation de retour est confirmée ?",
+            "L’autorisation de retour n’est pas confirmée.",
+            True,
+        ),
+        (
+            "L’autorizzazione al reso è confermata?",
+            "La politica richiede un’autorizzazione al reso.",
+            False,
+        ),
+        (
+            "L’autorizzazione al reso è confermata?",
+            "L’autorizzazione al reso non è confermata.",
+            True,
+        ),
+        (
+            "Darf der Artikel heute zurückgegeben werden?",
+            "Der Artikel darf heute nicht zurückgegeben werden.",
+            True,
+        ),
+        (
+            "Peut l’article être retourné aujourd’hui ?",
+            "L’article ne peut pas être retourné aujourd’hui.",
+            True,
+        ),
+        (
+            "¿Puede devolverse hoy?",
+            "No puede devolverse hoy.",
+            True,
+        ),
+        (
+            "Può essere restituito oggi?",
+            "Non può essere restituito oggi.",
+            True,
+        ),
+        (
+            "Who controls final refund approval and posting time?",
+            "The merchant controls final refund approval and posting time.",
+            True,
+        ),
+        (
+            "What are the refund approval rules?",
+            "The policy defines refund approval rules.",
+            True,
+        ),
+    ],
+)
+def test_knowledge_request_item_proof_requires_subject_bound_explicit_state(
+    question: str,
+    excerpt: str,
+    expected: bool,
+) -> None:
+    item = {"id": "request:item-1", "question": question}
+
+    assert issue_agent._knowledge_request_excerpt_matches(item, excerpt) is expected
+
+
+def test_fulfillment_k01_complete_explicit_answer_needs_no_repair() -> None:
+    items = issue_agent._knowledge_request_items(_FULFILLMENT_K01_REQUEST)
+    excerpts = [
+        "ZF-20991 is currently in transit with UPS.",
+        "It may not be returned today.",
+        "A return authorization is not confirmed.",
+        "A return reference is not confirmed.",
+        "A return route is not confirmed.",
+        "Refund approval is not confirmed.",
+        "A refund date is not confirmed.",
+        "The merchant and payment provider control final refund approval and posting time.",
+    ]
+    answer = " ".join(excerpts)
+
+    repaired, uncovered = issue_agent._repair_knowledge_request_item_coverage(
+        answer=answer,
+        question=_FULFILLMENT_K01_REQUEST,
+        items=items,
+        assessments=[
+            _knowledge_request_assessment(excerpt, item_id=item["id"])
+            for item, excerpt in zip(items, excerpts, strict=True)
+        ],
+    )
+
+    assert repaired == answer
+    assert uncovered == ()
 
 
 @pytest.mark.parametrize(

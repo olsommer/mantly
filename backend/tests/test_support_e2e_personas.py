@@ -330,6 +330,21 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     )
     assert lawyer_knowledge_checks["K01"].source_case_id == "L05"
     assert fulfillment_knowledge_checks["K01"].source_case_id == "E05"
+    fulfillment_knowledge_question = fulfillment_knowledge_checks["K01"].question
+    for required_question in (
+        "What is the current state of ZF-20991?",
+        "May it be returned today?",
+        "Is a return authorization confirmed?",
+        "Is a return reference confirmed?",
+        "Is a return route confirmed?",
+        "Is refund approval confirmed?",
+        "Is a refund date confirmed?",
+        "Who controls final refund approval and posting time?",
+    ):
+        assert required_question in fulfillment_knowledge_question
+    assert fulfillment_knowledge_checks["K01"].must_mark_unverified == [
+        "Return route, authorization, reference, refund approval, and refund date."
+    ]
     assert saas_knowledge_checks["K01"].source_case_id == "S02"
     assert fulfillment_cases["E06"].expected.minimum_concern_count == 2
     assert fulfillment_cases["E06"].expected.knowledge_ids == []

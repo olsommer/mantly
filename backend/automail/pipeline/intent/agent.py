@@ -1652,6 +1652,103 @@ _EXPLICIT_REQUEST_SENTENCE_PATTERN = re.compile(
     r"send|show|state|stop|submit|terminate|tell|update|verify|waive)\b",
     re.IGNORECASE,
 )
+_SOURCE_BOUND_REPEAT_REQUIREMENT_PATTERN = re.compile(
+    r"^\s*repeat\s+the\s+deadline:\s*(?P<statement>\S.{10,488})\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SENSITIVE_REPEAT_REQUIREMENT_PATTERN = re.compile(
+    r"\b(?:api[-\s]?(?:keys?|tokens?)|access[-\s]?tokens?|credentials?|"
+    r"passwords?|private[-\s]+keys?|secrets?|session\s+(?:cookies?|tokens?)|"
+    r"card(?:holder)?\s+(?:numbers?|no\.?|pan)|cvv|cvc|diagnos(?:is|ed)|"
+    r"medical\s+(?:condition|history|record)|patient\s+(?:condition|record)|"
+    r"social\s+security(?:\s+(?:numbers?|no\.?))?|ssn|"
+    r"(?:mfa|otp|one[-\s]?time|recovery|auth(?:entication|orization)?|"
+    r"verification|security)\s+(?:codes?|passwords?)|bearer(?:\s+tokens?)?|"
+    r"pins?)\b|"
+    r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)|(?<!\d)(?:\d[ -]?){13,19}(?!\d)",
+    re.IGNORECASE,
+)
+_SAFE_LEGAL_DEADLINE_STATEMENT_PATTERN = re.compile(
+    r"^[a-zà-öø-ÿ&'(). -]{2,160}\b(?:court|tribunal)\b\s+"
+    r"(?:response|filing|submission|appeal)\s+(?:is\s+)?due\s+"
+    r"(?:\d{4}-\d{2}-\d{2}|"
+    r"\d{1,2}\s+(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)\s+\d{4})"
+    r"(?:\s+at\s+\d{1,2}:\d{2}(?::\d{2})?)?\.?$",
+    re.IGNORECASE,
+)
+_NON_ATOMIC_DEADLINE_REPEAT_PATTERN = re.compile(
+    r";|\b(?:https?://|www\.)|,\s+(?:and|but|or)\s+|\s+[—–|]\s+",
+    re.IGNORECASE,
+)
+_NEGATED_OR_ATTRIBUTED_DEADLINE_PATTERN = re.compile(
+    r"\b(?:alleged|allegedly|claim(?:ed|s)?|den(?:ied|ies|y)|false|falsely|"
+    r"could|if|may|might|no|not|never|perhaps|possible|possibly|reported|"
+    r"reportedly|said|says|should|supposedly|uncertain|unconfirmed|without|"
+    r"would)\b|\baccording\s+to\b",
+    re.IGNORECASE,
+)
+
+
+def _source_bound_repeat_guidance(
+    requirements: list[str],
+    source_text: str,
+    *,
+    intent_name: str,
+) -> list[str]:
+    """Promote only safe repeat requirements whose exact fact came from this concern."""
+
+    normalized_intent_name = re.sub(
+        r"[-_\s]+",
+        "-",
+        str(intent_name or "").strip().casefold(),
+    ).strip("-")
+    if normalized_intent_name != "law-urgent-deadline":
+        return []
+    unquoted_source = _mask_balanced_quoted_spans(str(source_text or ""))
+    source_sentences = {
+        sentence
+        for raw_sentence in _CUSTOMER_TEXT_SENTENCE_SPLIT_PATTERN.split(unquoted_source)
+        if (sentence := " ".join(raw_sentence.split()).strip())
+    }
+    if not source_sentences:
+        return []
+
+    promoted: list[str] = []
+    for raw_requirement in requirements[:20]:
+        raw_requirement_text = str(raw_requirement or "")
+        if "\n" in raw_requirement_text or "\r" in raw_requirement_text:
+            continue
+        requirement = " ".join(raw_requirement_text.split()).strip()
+        if len(requirement) > 500:
+            continue
+        match = _SOURCE_BOUND_REPEAT_REQUIREMENT_PATTERN.fullmatch(requirement)
+        if match is None:
+            continue
+        statement = " ".join(match.group("statement").split()).strip()
+        matching_source_sentence = next(
+            (
+                source_sentence
+                for source_sentence in source_sentences
+                if source_sentence.casefold() == statement.casefold()
+            ),
+            "",
+        )
+        if not matching_source_sentence:
+            continue
+        if (
+            _SAFE_LEGAL_DEADLINE_STATEMENT_PATTERN.fullmatch(statement) is None
+            or _NON_ATOMIC_DEADLINE_REPEAT_PATTERN.search(statement)
+            or _NEGATED_OR_ATTRIBUTED_DEADLINE_PATTERN.search(statement)
+            or _SENSITIVE_REPEAT_REQUIREMENT_PATTERN.search(requirement)
+            or _PROMPT_OVERRIDE_REQUEST_PATTERN.search(requirement)
+            or _IDENTITY_BYPASS_REQUEST_PATTERN.search(requirement)
+            or _PROTECTED_DATA_EXFILTRATION_PATTERN.search(requirement)
+            or _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(requirement)
+        ):
+            continue
+        promoted.append(requirement)
+    return _dedupe_strings(promoted)
 
 
 def _split_answer_obligation(value: str) -> list[str]:
@@ -2426,7 +2523,14 @@ def _build_routed_concern_outcome(
             intent_result.response.response_rules,
             output.reply_requirements,
         ),
-        required_guidance=_dedupe_strings(intent_result.response.required_guidance),
+        required_guidance=_dedupe_strings(
+            intent_result.response.required_guidance,
+            _source_bound_repeat_guidance(
+                output.reply_requirements,
+                route.source_text,
+                intent_name=intent_name,
+            ),
+        ),
         forbidden_claims=output.forbidden_claims,
         attachments=_outcome_attachments(
             intent_name,

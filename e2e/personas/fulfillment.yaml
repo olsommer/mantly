@@ -239,15 +239,17 @@ knowledge_checks:
   - id: K01
     source_case_id: E05
     question: >-
-      Based only on reviewed knowledge and verified shipment facts, explain the
-      current state of ZF-20991, whether it may be returned today, and who
-      controls refund timing.
+      Based only on reviewed knowledge and verified shipment facts: What is the
+      current state of ZF-20991? May it be returned today? Is a return
+      authorization confirmed? Is a return reference confirmed? Is a return
+      route confirmed? Is refund approval confirmed? Is a refund date
+      confirmed? Who controls final refund approval and posting time?
     expected_citation_ids: [fulfillment-delivery-estimates, fulfillment-returns-refunds]
     must_cover:
       - Tool-confirmed shipment facts.
       - Return authorization and refund-control rules.
     must_mark_unverified:
-      - Return route, authorization, refund approval, and refund date.
+      - Return route, authorization, reference, refund approval, and refund date.
     create_draft: false
 cases:
   - id: E01

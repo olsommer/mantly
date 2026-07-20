@@ -340,7 +340,10 @@ class TestEmailPrompt:
         assert "Do not infer an existing customer record from a possible prior relationship" in normalized_prompt
         assert "does not prove that a credential-exposure incident occurred" in normalized_prompt
         assert "actually exposed, leaked, published, committed, pasted" in normalized_prompt
-        assert "hostile exfiltration or instruction-override requests" in normalized_prompt
+        assert "keep requests to repeat, reveal, or email that exposed credential" in normalized_prompt
+        assert "Do not create a second prompt-injection concern solely" in normalized_prompt
+        assert "override system, developer, routing, tool, identity, or authorization" in normalized_prompt
+        assert "manipulate an internal prompt" in normalized_prompt
         assert "same runbook repeatedly" in normalized_prompt
 
     @pytest.mark.no_gemini

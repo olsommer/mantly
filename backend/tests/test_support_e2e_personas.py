@@ -383,6 +383,10 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert {
         concern.runbook_key for concern in saas_cases["S10"].concerns
     } == {"saas-prompt-injection"}
+    prompt_injection_purpose = saas_runbooks["saas-prompt-injection"].purpose
+    assert "explicit instruction overrides" in prompt_injection_purpose
+    assert "internal-prompt manipulation" in prompt_injection_purpose
+    assert "that exact exposed credential or its replacement" in prompt_injection_purpose
     incident_guidance = saas_runbooks["saas-service-incident"].required_guidance
     assert len(incident_guidance) == 5
     assert [rule.split(" only from", 1)[0] for rule in incident_guidance] == [

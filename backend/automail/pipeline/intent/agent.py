@@ -197,6 +197,258 @@ _FULFILLMENT_INTENT_TERMS = {
     "shipment",
     "warehouse",
 }
+_CREDENTIAL_EXPOSURE_EVENT_PATTERN = re.compile(
+    r"\b(?:api[-\s]?keys?|credentials?|secrets?|tokens?)\b"
+    r"[^.!?\n]{0,240}\b(?:was|were|got|has\s+been|have\s+been|"
+    r"is\s+(?:already|currently|now))\s+(?:accidentally\s+)?"
+    r"(?:committed|disclosed|exposed|leaked|pasted|published|shared)\b|"
+    r"\b(?:api[-\s]?keys?|credentials?|secrets?|tokens?)\b"
+    r"[^.!?\n]{0,240}\b(?:has|have)\s+(?:actually\s+)?leaked\b|"
+    r"\b(?:employee|i|someone|team|user|we)\b\s+(?:accidentally\s+)?"
+    r"(?:committed|disclosed|exposed|leaked|pasted|"
+    r"published|shared)\b"
+    r"[^.!?\n]{0,240}\b(?:api[-\s]?keys?|credentials?|secrets?|tokens?)\b",
+    re.IGNORECASE,
+)
+_UNCERTAIN_EXPOSURE_TOKENS = frozenset(
+    {
+        "alleged",
+        "allegedly",
+        "almost",
+        "apparently",
+        "believe",
+        "believed",
+        "can",
+        "could",
+        "hypothetical",
+        "if",
+        "intend",
+        "intended",
+        "intends",
+        "may",
+        "maybe",
+        "might",
+        "must",
+        "nearly",
+        "never",
+        "no",
+        "not",
+        "deny",
+        "denied",
+        "denies",
+        "dispute",
+        "disputed",
+        "false",
+        "falsely",
+        "incorrect",
+        "perhaps",
+        "plan",
+        "planned",
+        "planning",
+        "possible",
+        "possibly",
+        "potential",
+        "potentially",
+        "going",
+        "refute",
+        "refuted",
+        "rumor",
+        "scheduled",
+        "suspect",
+        "suspected",
+        "supposed",
+        "supposedly",
+        "should",
+        "unlikely",
+        "want",
+        "wanted",
+        "whether",
+        "will",
+        "would",
+        "claim",
+        "claimed",
+        "claims",
+    }
+)
+_CREDENTIAL_HANDLING_VERBS = frozenset(
+    {
+        "copy",
+        "email",
+        "emailing",
+        "give",
+        "provide",
+        "repeat",
+        "repeating",
+        "return",
+        "reveal",
+        "revealing",
+        "send",
+        "sending",
+        "share",
+        "sharing",
+        "show",
+        "tell",
+        "write",
+    }
+)
+_CREDENTIAL_NOUNS = frozenset(
+    {"credential", "credentials", "key", "keys", "secret", "secrets", "token", "tokens"}
+)
+_SAME_CREDENTIAL_MARKERS = frozenset(
+    {"compromised", "exposed", "replacement", "same", "that", "this"}
+)
+_SAFE_CREDENTIAL_SOURCE_TOKENS = frozenset(
+    {
+        "a",
+        "also",
+        "an",
+        "and",
+        "api",
+        "back",
+        "by",
+        "complete",
+        "compromised",
+        "copy",
+        "credential",
+        "credentials",
+        "directly",
+        "email",
+        "emailing",
+        "exposed",
+        "for",
+        "full",
+        "generated",
+        "give",
+        "have",
+        "i",
+        "in",
+        "it",
+        "its",
+        "key",
+        "keys",
+        "know",
+        "me",
+        "my",
+        "new",
+        "newly",
+        "now",
+        "of",
+        "or",
+        "our",
+        "please",
+        "provide",
+        "repeat",
+        "repeating",
+        "replacement",
+        "return",
+        "reveal",
+        "revealing",
+        "same",
+        "secret",
+        "secrets",
+        "send",
+        "sending",
+        "share",
+        "sharing",
+        "show",
+        "so",
+        "tell",
+        "that",
+        "the",
+        "them",
+        "then",
+        "this",
+        "to",
+        "token",
+        "tokens",
+        "us",
+        "via",
+        "we",
+        "with",
+        "write",
+        "you",
+        "your",
+    }
+)
+_SAFE_CREDENTIAL_OBLIGATION_TOKENS = _SAFE_CREDENTIAL_SOURCE_TOKENS | frozenset(
+    {
+        "answer",
+        "cannot",
+        "decline",
+        "deny",
+        "do",
+        "explain",
+        "must",
+        "not",
+        "refuse",
+        "reject",
+        "request",
+        "requests",
+        "should",
+        "why",
+    }
+)
+_SAFE_CREDENTIAL_SUMMARY_TOKENS = _SAFE_CREDENTIAL_OBLIGATION_TOKENS | frozenset(
+    {
+        "concern",
+        "concerns",
+        "disclosure",
+        "due",
+        "flagged",
+        "handling",
+        "hostile",
+        "human",
+        "injection",
+        "instructions",
+        "potential",
+        "prompt",
+        "rejected",
+        "review",
+        "security",
+        "sensitive",
+        "unsafe",
+    }
+)
+_SAFE_CREDENTIAL_EXPOSURE_EMAIL_TOKENS = _SAFE_CREDENTIAL_SOURCE_TOKENS | frozenset(
+    {
+        "accidentally",
+        "acme",
+        "already",
+        "been",
+        "committed",
+        "confirm",
+        "create",
+        "currently",
+        "disclosed",
+        "exposed",
+        "fingerprint",
+        "four",
+        "got",
+        "has",
+        "have",
+        "identified",
+        "incident",
+        "is",
+        "last",
+        "leaked",
+        "nobody",
+        "now",
+        "open",
+        "pasted",
+        "production",
+        "public",
+        "published",
+        "qax",
+        "repository",
+        "revoke",
+        "safe",
+        "security",
+        "shared",
+        "used",
+        "was",
+        "were",
+    }
+)
 
 
 def _action_is_enabled(raw: dict[str, Any]) -> bool:
@@ -2302,6 +2554,228 @@ def _merge_subsumed_route(
     )
 
 
+def _apply_credential_exposure_precedence(
+    email: Email,
+    routes: list[ConcernRoute],
+) -> list[ConcernRoute]:
+    """Absorb only a narrowly proven same-credential handling concern."""
+    if len(routes) < 2:
+        return routes
+
+    def ordered_text_tokens(value: str) -> list[str]:
+        normalized = value.casefold().replace("n’t", " not").replace("n't", " not")
+        return re.findall(r"[a-z]+", normalized)
+
+    def text_tokens(value: str) -> frozenset[str]:
+        return frozenset(ordered_text_tokens(value))
+
+    def exposure_body_tokens(value: str) -> frozenset[str]:
+        without_fixture_identifiers = re.sub(
+            r"\[saas-support-\d{8}t\d{6}z-[a-z0-9]{6,12}-s\d{2}\]",
+            " ",
+            value,
+            flags=re.IGNORECASE,
+        )
+        without_fixture_identifiers = re.sub(
+            r"\bsha256:qa-[a-f0-9]{8}\b",
+            " ",
+            without_fixture_identifiers,
+            flags=re.IGNORECASE,
+        )
+        return text_tokens(without_fixture_identifiers)
+
+    def has_affirmative_exposure(value: str) -> bool:
+        for clause in re.findall(r"[^.!?\n]+[.!?]?", value):
+            if _CREDENTIAL_EXPOSURE_EVENT_PATTERN.search(clause) is None:
+                continue
+            tokens = text_tokens(clause)
+            if clause.rstrip().endswith("?") or tokens.intersection(
+                _UNCERTAIN_EXPOSURE_TOKENS
+            ):
+                continue
+            return True
+        return False
+
+    def intent_terms(route: ConcernRoute) -> frozenset[str]:
+        return text_tokens(str(route.intent_name or ""))
+
+    def body_is_safe_exposure_flow(exposure_index: int) -> bool:
+        unrelated_source_tokens = {
+            exposure_body_tokens(route.source_text)
+            for index, route in enumerate(routes)
+            if index != exposure_index
+            and not {"prompt", "injection"} <= intent_terms(route)
+            and exposure_body_tokens(route.source_text)
+        }
+        for clause in re.findall(r"[^.!?;\n]+", f"{email.subject}\n{email.body}"):
+            if any(ord(character) > 127 for character in clause):
+                return False
+            clause_tokens = exposure_body_tokens(clause)
+            if not clause_tokens:
+                return False
+            if clause_tokens.issubset(_SAFE_CREDENTIAL_EXPOSURE_EMAIL_TOKENS):
+                continue
+            if clause_tokens in unrelated_source_tokens:
+                continue
+            return False
+        return True
+
+    def credential_kind(token: str) -> str:
+        for singular, plural in (
+            ("credential", "credentials"),
+            ("key", "keys"),
+            ("secret", "secrets"),
+            ("token", "tokens"),
+        ):
+            if token in {singular, plural}:
+                return singular
+        return ""
+
+    def credential_kinds(tokens: frozenset[str]) -> frozenset[str]:
+        kinds: set[str] = set()
+        for token in tokens:
+            if kind := credential_kind(token):
+                kinds.add(kind)
+        return frozenset(kinds)
+
+    def credential_mentions_are_linked(
+        value: str,
+        *,
+        exposure_kinds: frozenset[str],
+    ) -> bool:
+        found = False
+        ambiguous_ownership = {"another", "different", "my", "other", "their", "your"}
+        for clause in re.findall(r"[^.!?;\n]+", value):
+            clause_tokens = ordered_text_tokens(clause)
+            clause_token_set = set(clause_tokens)
+            for index, token in enumerate(clause_tokens):
+                kind = credential_kind(token)
+                if not kind:
+                    continue
+                found = True
+                if token in {"credentials", "keys", "secrets", "tokens"}:
+                    return False
+                if kind not in exposure_kinds:
+                    return False
+                qualifiers = set(clause_tokens[max(0, index - 3) : index])
+                if clause_token_set.intersection(ambiguous_ownership) or qualifiers.intersection(
+                    {"a", "an"}
+                ):
+                    return False
+                if not (
+                    qualifiers.intersection(_SAME_CREDENTIAL_MARKERS)
+                    or "the" in qualifiers
+                ):
+                    return False
+        return found
+
+    def is_same_credential_handling(
+        route: ConcernRoute,
+        *,
+        exposure_kinds: frozenset[str],
+    ) -> bool:
+        summary_tokens = text_tokens(route.summary)
+        source_tokens = text_tokens(route.source_text)
+        summary_kinds = credential_kinds(summary_tokens)
+        if (
+            not summary_tokens
+            or not summary_tokens.issubset(_SAFE_CREDENTIAL_SUMMARY_TOKENS)
+            or not summary_kinds
+            or not summary_kinds.issubset(exposure_kinds)
+            or not source_tokens
+            or not source_tokens.issubset(_SAFE_CREDENTIAL_SOURCE_TOKENS)
+            or not source_tokens.intersection(_CREDENTIAL_HANDLING_VERBS)
+            or not source_tokens.intersection(_CREDENTIAL_NOUNS)
+            or not credential_mentions_are_linked(
+                route.source_text,
+                exposure_kinds=exposure_kinds,
+            )
+            or not route.answer_obligations
+        ):
+            return False
+        for obligation in route.answer_obligations:
+            obligation_tokens = text_tokens(obligation)
+            if (
+                not obligation_tokens
+                or not obligation_tokens.issubset(_SAFE_CREDENTIAL_OBLIGATION_TOKENS)
+                or not obligation_tokens.intersection(_CREDENTIAL_HANDLING_VERBS)
+                or not obligation_tokens.intersection(_CREDENTIAL_NOUNS)
+                or not credential_mentions_are_linked(
+                    obligation,
+                    exposure_kinds=exposure_kinds,
+                )
+            ):
+                return False
+        return True
+
+    if not has_affirmative_exposure(email.body):
+        return routes
+
+    exposure_indices = [
+        index
+        for index, route in enumerate(routes)
+        if intent_terms(route).intersection(_CREDENTIAL_NOUNS)
+        and intent_terms(route).intersection(
+            {"compromise", "compromised", "exposure", "exposed", "leak", "leaked"}
+        )
+        and has_affirmative_exposure(f"{route.summary}\n{route.source_text}")
+    ]
+    if len(exposure_indices) != 1:
+        return routes
+
+    exposure_index = exposure_indices[0]
+    if not body_is_safe_exposure_flow(exposure_index):
+        return routes
+    merged = routes[exposure_index]
+    exposure_kinds = credential_kinds(intent_terms(merged))
+    if not exposure_kinds:
+        return routes
+    absorbed_indices: list[int] = []
+    for prompt_index, prompt_route in enumerate(routes):
+        if (
+            not {"prompt", "injection"} <= intent_terms(prompt_route)
+            or not is_same_credential_handling(
+                prompt_route,
+                exposure_kinds=exposure_kinds,
+            )
+        ):
+            continue
+        merged_obligations = _dedupe_strings(
+            merged.answer_obligations,
+            prompt_route.answer_obligations,
+        )
+        if len(merged_obligations) > 10:
+            continue
+        merged = merged.model_copy(
+            update={
+                "source_text": _merge_routed_source_text(
+                    merged.source_text,
+                    prompt_route.source_text,
+                ),
+                "answer_obligations": merged_obligations,
+                "confidence": max(merged.confidence, prompt_route.confidence),
+            }
+        )
+        absorbed_indices.append(prompt_index)
+        logger.info(
+            "Credential-exposure runbook '%s' absorbed unsafe handling from '%s'",
+            merged.intent_name,
+            prompt_route.intent_name,
+        )
+    if not absorbed_indices:
+        return routes
+
+    merged_index = min(exposure_index, *absorbed_indices)
+    suppressed = {exposure_index, *absorbed_indices}
+    corrected: list[ConcernRoute] = []
+    for index, route in enumerate(routes):
+        if index == merged_index:
+            corrected.append(merged)
+        elif index not in suppressed:
+            corrected.append(route)
+    return corrected
+
+
 def _apply_runbook_subsumption(
     email: Email,
     routes: list[ConcernRoute],
@@ -2518,6 +2992,7 @@ def run_intent_agent(
     )
     del creator
     routes = _apply_safety_intent_precedence(routes, known_intents)
+    routes = _apply_credential_exposure_precedence(email, routes)
     routes = _dedupe_concern_routes(routes)
     routes = _apply_runbook_subsumption(email, routes, intents_dir)
     if not routes:

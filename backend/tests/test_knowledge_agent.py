@@ -4149,6 +4149,111 @@ def test_grounding_resolves_equivalent_same_concern_tool_timestamp(
     assert result.obligation_assessments[0]["resolution"] == "answered"
 
 
+def test_grounding_resolves_fixture_wrapped_same_concern_tool_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "service-incident"
+    tool_name = "fixture_saas_incident_inc_204"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[("incident:start", "State the exact start time from the service-status lookup.")],
+        tool_evidence=[
+            {
+                "name": tool_name,
+                "status": "success",
+                "responseFacts": [
+                    {
+                        "path": "fixture_evidence.result.3",
+                        "value": "started_at: 2026-07-19T07:40:00Z",
+                    }
+                ],
+            }
+        ],
+    )
+    answer = "INC-204 started on 2026-07-19T07:40:00Z."
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("incident:start", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "fact_path", "fact_value", "answer"),
+    [
+        (
+            "fixture_saas_incident_inc_204",
+            "fixture_evidence.result.invalid",
+            "started_at: 2026-07-19T07:40:00Z",
+            "INC-204 started on 2026-07-19T07:40:00Z.",
+        ),
+        (
+            "fixture_saas_incident_inc_204",
+            "fixture_evidence.result.3",
+            "started_at: 2026-07-19T07:40:00Z",
+            "INC-204 started on 2026-07-19T08:40:00Z.",
+        ),
+        (
+            "fixture_saas_incident_inc_204",
+            "fixture_evidence.result.3",
+            "planned_start: 2026-07-19T07:40:00Z",
+            "INC-204 started on 2026-07-19T07:40:00Z.",
+        ),
+        (
+            "fixture_saas_incident_inc_204",
+            "fixture_evidence.result.3",
+            "customer_reported_start: 2026-07-19T07:40:00Z",
+            "INC-204 started on 2026-07-19T07:40:00Z.",
+        ),
+        (
+            "external_service_status",
+            "fixture_evidence.result.3",
+            "started_at: 2026-07-19T07:40:00Z",
+            "INC-204 started on 2026-07-19T07:40:00Z.",
+        ),
+    ],
+)
+def test_fixture_wrapped_temporal_tool_fact_rejects_malformed_path_or_wrong_answer(
+    tool_name: str,
+    fact_path: str,
+    fact_value: str,
+    answer: str,
+) -> None:
+    concern_id = "service-incident"
+    evidence_id = f"tool:{concern_id}:{tool_name}"
+    ticket = {
+        "concerns": [
+            {
+                "id": concern_id,
+                "toolEvidence": [
+                    {
+                        "name": tool_name,
+                        "status": "success",
+                        "responseFacts": [{"path": fact_path, "value": fact_value}],
+                        "evidenceId": evidence_id,
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert issue_agent._same_concern_tool_temporal_fact_matches(
+        ticket=ticket,
+        concern_id=concern_id,
+        question="State the exact start time from the service-status lookup.",
+        answer=answer,
+        allowed_evidence_ids=frozenset({evidence_id}),
+    ) is False
+
+
 def test_grounding_does_not_resolve_wrong_tool_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

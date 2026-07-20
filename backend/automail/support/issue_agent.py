@@ -2894,9 +2894,21 @@ _RECORDED_CHANGED_DUE_DATE_CONTRAST_RE = re.compile(
 _ISO_DATE_OR_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$"
 )
+_FIXTURE_EVIDENCE_RESULT_PATH_RE = re.compile(
+    r"^fixture_evidence\.result\.\d{1,2}$"
+)
+_FIXTURE_EVIDENCE_SCALAR_RE = re.compile(
+    r"^(?P<path>[A-Za-z][^:\r\n]{0,119}): (?P<value>[^\r\n]{1,500})$"
+)
+_FIXTURE_TEMPORAL_SCALAR_PATHS = frozenset({"started_at"})
 
 
-def _tool_fact_scalar_entries(value: Any, *, path: str = "") -> tuple[tuple[str, str], ...]:
+def _tool_fact_scalar_entries(
+    value: Any,
+    *,
+    path: str = "",
+    allow_fixture_result_scalars: bool = False,
+) -> tuple[tuple[str, str], ...]:
     """Flatten bounded scalar tool facts while retaining their semantic path."""
 
     entries: list[tuple[str, str]] = []
@@ -2905,17 +2917,46 @@ def _tool_fact_scalar_entries(value: Any, *, path: str = "") -> tuple[tuple[str,
         if explicit_path and "value" in value and not isinstance(value.get("value"), (dict, list)):
             scalar = _string_from(value.get("value"))
             if scalar:
-                entries.append((explicit_path[:240], scalar[:500]))
+                fixture_scalar = (
+                    _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(scalar)
+                    if allow_fixture_result_scalars
+                    and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(explicit_path)
+                    else None
+                )
+                if (
+                    fixture_scalar
+                    and fixture_scalar.group("path") in _FIXTURE_TEMPORAL_SCALAR_PATHS
+                ):
+                    entries.append(
+                        (
+                            fixture_scalar.group("path")[:240],
+                            fixture_scalar.group("value")[:500],
+                        )
+                    )
+                else:
+                    entries.append((explicit_path[:240], scalar[:500]))
             return tuple(entries)
         for raw_key, child in list(value.items())[:100]:
             key = _string_from(raw_key)
             if not key:
                 continue
             child_path = f"{path}.{key}" if path else key
-            entries.extend(_tool_fact_scalar_entries(child, path=child_path))
+            entries.extend(
+                _tool_fact_scalar_entries(
+                    child,
+                    path=child_path,
+                    allow_fixture_result_scalars=allow_fixture_result_scalars,
+                )
+            )
     elif isinstance(value, list):
         for child in value[:100]:
-            entries.extend(_tool_fact_scalar_entries(child, path=path))
+            entries.extend(
+                _tool_fact_scalar_entries(
+                    child,
+                    path=path,
+                    allow_fixture_result_scalars=allow_fixture_result_scalars,
+                )
+            )
     elif path:
         scalar = _string_from(value)
         if scalar:
@@ -3014,7 +3055,10 @@ def _same_concern_tool_temporal_fact_matches(
         evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
         if not evidence_id or (allowed_evidence_ids is not None and evidence_id not in allowed_evidence_ids):
             continue
-        for path, scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+        for path, scalar in _tool_fact_scalar_entries(
+            record.get("responseFacts"),
+            allow_fixture_result_scalars=_string_from(record.get("name")).startswith("fixture_"),
+        ):
             path_tokens = _temporal_fact_tokens(path).intersection(_TEMPORAL_FACT_TOKENS)
             if (
                 path_tokens
@@ -3036,7 +3080,10 @@ def _canonicalize_tool_backed_timestamps(ticket: dict[str, Any], answer: str) ->
     for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
         if not _valid_tool_evidence_id(record, concern_id=concern_id):
             continue
-        for _path, scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+        for _path, scalar in _tool_fact_scalar_entries(
+            record.get("responseFacts"),
+            allow_fixture_result_scalars=_string_from(record.get("name")).startswith("fixture_"),
+        ):
             if "T" not in scalar or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(scalar) is None:
                 continue
             for variant in _temporal_scalar_answer_variants(scalar)[1:]:

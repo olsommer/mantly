@@ -35,10 +35,12 @@ from automail.pipeline.intent.agent import (
     _apply_deterministic_action_eligibility,
     _apply_prompt_injection_pretext_precedence,
     _build_process_user_message,
+    _collapse_redundant_same_runbook_routes,
     _concern_id,
     _concern_processing_email,
     _execute_routed_concern,
     _mask_balanced_quoted_spans,
+    _merge_routed_source_text,
     _route_concerns_call_is_invalid,
     _select_deterministic_prompt_injection_incident_action,
     _source_bound_repeat_guidance,
@@ -701,6 +703,118 @@ def test_prompt_injection_pretext_suppresses_live_subject_without_tracking_suffi
     ]
 
     assert _apply_prompt_injection_pretext_precedence(email, routed) == [routes[1]]
+
+
+def test_prompt_injection_pretext_suppresses_direct_channel_clipped_subject() -> None:
+    title = (
+        "Urgent audit export requested by the CEO "
+        "[saas-support-20260720t063006z-p0trii-s10]"
+    )
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(
+            update={"source_text": "Urgent audit export requested by the CEO"}
+        ),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == [routed[1]]
+
+
+def test_prompt_injection_pretext_suppresses_generic_direct_channel_title() -> None:
+    title = "Urgent audit export requested by our CEO"
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == [routed[1]]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Need the audit report for our board review",
+        "SOC 2 audit package for procurement review",
+        "Audit evidence requested for our annual compliance review",
+    ],
+)
+def test_prompt_injection_pretext_preserves_declarative_direct_channel_audit_request(
+    title: str,
+) -> None:
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
+
+
+def test_prompt_injection_pretext_preserves_direct_channel_clipped_audit_request(
+) -> None:
+    title = (
+        "Question from our procurement and compliance leadership team: can workspace "
+        "admins export audit events as CSV? "
+        "[saas-support-20260720t063006z-p0trii-s10]"
+    )
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert "audit" not in email.subject.casefold()
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
+
+
+def test_prompt_injection_pretext_does_not_recover_noncanonical_clipped_title(
+) -> None:
+    clean_title = "Urgent audit export requested by the CEO"
+    title = f"{clean_title} [customer supplied reference]"
+    original = _prompt_injection_pretext_email(subject=title)
+    body = f"{title}\n\n{original.body}"
+    compact_body = " ".join(body.split())
+    email = original.model_copy(
+        update={"subject": f"{compact_body[:77]}...", "body": body}
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": clean_title}),
+        routes[1].model_copy(update={"source_text": body}),
+    ]
+
+    assert len(email.subject) == 80
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
 
 
 @pytest.mark.parametrize(
@@ -3328,6 +3442,340 @@ def test_duplicate_routes_execute_runbook_only_once(monkeypatch):
     assert calls == ["cancel-contract"]
     assert response is None
     assert [item.intent_name for item in result.concerns] == ["cancel-contract"]
+
+
+def test_same_runbook_umbrella_collapses_repeated_subset_for_shared_object():
+    email = Email(
+        id="message-webhook",
+        subject="Webhook failure for account ACME-4421",
+        from_address="customer@example.test",
+        body=(
+            "For account ACME-4421, tell me the exact status and first failure time. "
+            "Rotate the signing secret."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Diagnose and recover the webhook",
+            source_text="For account ACME-4421, the webhook is failing.",
+            answer_obligations=[
+                "What exact status does the lookup show?",
+                "What first-failure time does the lookup show?",
+                "Rotate the signing secret.",
+            ],
+            intent_name="webhook-recovery",
+            confidence=0.97,
+        ),
+        ConcernRoute(
+            summary="Read the webhook status",
+            source_text="Tell me the exact status and first failure time.",
+            answer_obligations=[
+                "What exact status does the lookup show?",
+                "What first-failure time does the lookup show?",
+            ],
+            intent_name="webhook-recovery",
+            confidence=0.93,
+        ),
+        ConcernRoute(
+            summary="Rotate the signing secret",
+            source_text="Rotate the signing secret.",
+            answer_obligations=["Rotate the signing secret."],
+            intent_name="webhook-recovery",
+            confidence=0.99,
+        ),
+    ]
+
+    collapsed = _collapse_redundant_same_runbook_routes(email, routes)
+
+    assert len(collapsed) == 1
+    assert collapsed[0].intent_name == "webhook-recovery"
+    assert collapsed[0].confidence == 0.99
+    assert collapsed[0].answer_obligations == routes[0].answer_obligations
+    assert "Tell me the exact status" in collapsed[0].source_text
+    assert "Rotate the signing secret" in collapsed[0].source_text
+
+
+def test_same_runbook_umbrella_executes_only_once(monkeypatch):
+    _base_stubs(monkeypatch)
+    email = Email(
+        id="message-contract-status",
+        subject="Cancel contract C-1",
+        from_address="customer@example.test",
+        body="Cancel contract C-1 and confirm its current status.",
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="Cancel contract C-1.",
+            answer_obligations=["Cancel contract C-1.", "Confirm its current status."],
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            source_text="Please cancel contract C-1.",
+            answer_obligations=["Cancel contract C-1."],
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            source_text="Confirm its current status.",
+            answer_obligations=["Confirm its current status."],
+            intent_name="cancel-contract",
+        ),
+    ]
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_intent_router_agent",
+        lambda *_args, **_kwargs: (routes, None),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_actions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_response_config",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent.get_intent_tools",
+        lambda *_args, **_kwargs: [{"name": "contract_lookup", "method": "GET"}],
+    )
+    calls: list[str] = []
+
+    def process(intent_name, *_args, **_kwargs):
+        calls.append(intent_name)
+        return IntentProcessingOutput(summary="Cancellation prepared")
+
+    monkeypatch.setattr(
+        "automail.pipeline.intent.agent._run_processing_agent",
+        process,
+    )
+
+    result, response = run_intent_agent(email)
+
+    assert calls == ["cancel-contract"]
+    assert response is None
+    assert len(result.concerns) == 1
+
+
+def test_same_runbook_subset_routes_keep_distinct_business_objects():
+    email = Email(
+        id="message-two-contracts",
+        subject="Two contracts",
+        from_address="customer@example.test",
+        body="Cancel contract C-1 and tell me the status of contract C-2.",
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="Cancel contract C-1.",
+            answer_obligations=["Cancel the contract.", "Confirm its status."],
+            intent_name="cancel-contract",
+        ),
+        ConcernRoute(
+            source_text="Tell me the status of contract C-2.",
+            answer_obligations=["Confirm its status."],
+            intent_name="cancel-contract",
+        ),
+    ]
+
+    assert _collapse_redundant_same_runbook_routes(email, routes) == routes
+
+
+def test_same_runbook_subset_routes_keep_same_value_under_distinct_object_labels():
+    email = Email(
+        id="message-shared-number",
+        subject="Account and contract 123",
+        from_address="customer@example.test",
+        body="Check account 123 and contract 123.",
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="Check account 123.",
+            answer_obligations=["Confirm status.", "Cancel it."],
+            intent_name="status-and-cancel",
+        ),
+        ConcernRoute(
+            source_text="Check contract 123.",
+            answer_obligations=["Confirm status."],
+            intent_name="status-and-cancel",
+        ),
+    ]
+
+    assert _collapse_redundant_same_runbook_routes(email, routes) == routes
+
+
+def test_same_runbook_partition_keeps_distinct_action_parameters():
+    email = Email(
+        id="message-seat-scopes",
+        subject="Seat changes for account ACME-4421",
+        from_address="customer@example.test",
+        body=(
+            "For account ACME-4421, reduce user seats to 20, reduce API seats to 10, "
+            "and cancel SSO."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="For account ACME-4421, reduce user seats to 20 and cancel SSO.",
+            answer_obligations=["Reduce seats.", "Cancel the add-on."],
+            intent_name="subscription-change",
+        ),
+        ConcernRoute(
+            source_text="Reduce API seats to 10.",
+            answer_obligations=["Reduce seats."],
+            intent_name="subscription-change",
+        ),
+        ConcernRoute(
+            source_text="Cancel the add-on.",
+            answer_obligations=["Cancel the add-on."],
+            intent_name="subscription-change",
+        ),
+    ]
+
+    assert _collapse_redundant_same_runbook_routes(email, routes) == routes
+
+
+def test_same_runbook_partition_keeps_repeated_parameterized_action_instances():
+    email = Email(
+        id="message-explicit-seat-scopes",
+        subject="Seat changes for account ACME-4421",
+        from_address="customer@example.test",
+        body=(
+            "For account ACME-4421, reduce user seats to 20, reduce API seats to 10, "
+            "and cancel SSO."
+        ),
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="For account ACME-4421, apply all three changes.",
+            answer_obligations=[
+                "Reduce user seats to 20.",
+                "Reduce API seats to 10.",
+                "Cancel SSO.",
+            ],
+            intent_name="subscription-change",
+        ),
+        ConcernRoute(
+            source_text="For account ACME-4421, reduce user seats to 20.",
+            answer_obligations=["Reduce user seats to 20."],
+            intent_name="subscription-change",
+        ),
+        ConcernRoute(
+            source_text="For account ACME-4421, reduce API seats to 10.",
+            answer_obligations=["Reduce API seats to 10."],
+            intent_name="subscription-change",
+        ),
+        ConcernRoute(
+            source_text="For account ACME-4421, cancel SSO.",
+            answer_obligations=["Cancel SSO."],
+            intent_name="subscription-change",
+        ),
+    ]
+
+    assert _collapse_redundant_same_runbook_routes(email, routes) == routes
+
+
+def test_redundant_partition_allows_repeated_shared_object_context():
+    email = Email(
+        id="message-repeated-account",
+        subject="Webhook for account ACME-4421",
+        from_address="customer@example.test",
+        body="For account ACME-4421, report status and rotate the secret.",
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            summary="Webhook recovery",
+            source_text="For account ACME-4421, handle both requests.",
+            answer_obligations=["Report status.", "Rotate the secret."],
+            intent_name="webhook-recovery",
+        ),
+        ConcernRoute(
+            summary="Status request",
+            source_text="For account ACME-4421, report status.",
+            answer_obligations=["Report status."],
+            intent_name="webhook-recovery",
+        ),
+        ConcernRoute(
+            summary="Secret rotation",
+            source_text="For account ACME-4421, rotate the secret.",
+            answer_obligations=["Rotate the secret."],
+            intent_name="webhook-recovery",
+        ),
+    ]
+
+    collapsed = _collapse_redundant_same_runbook_routes(email, routes)
+
+    assert len(collapsed) == 1
+    assert "Status request" in collapsed[0].summary
+    assert "Secret rotation" in collapsed[0].summary
+
+
+def test_merge_routed_source_text_never_uses_partial_substring_containment():
+    assert _merge_routed_source_text("Umbrella.", "A.") == "Umbrella.\nA."
+
+
+def test_same_runbook_partition_fails_closed_for_ambiguous_umbrellas():
+    email = Email(
+        id="message-ambiguous-umbrellas",
+        subject="Requests for account ACME-4421",
+        from_address="customer@example.test",
+        body="For account ACME-4421, do A, B, and C.",
+        attachments=[],
+    )
+    routes = [
+        ConcernRoute(
+            source_text="Do A and B.",
+            answer_obligations=["Do A.", "Do B."],
+            intent_name="account-change",
+        ),
+        ConcernRoute(
+            source_text="Do A and C.",
+            answer_obligations=["Do A.", "Do C."],
+            intent_name="account-change",
+        ),
+        ConcernRoute(
+            source_text="Do A.",
+            answer_obligations=["Do A."],
+            intent_name="account-change",
+        ),
+    ]
+
+    assert _collapse_redundant_same_runbook_routes(email, routes) == routes
+
+
+def test_same_runbook_partition_has_stable_source_across_sibling_order():
+    email = Email(
+        id="message-stable-partition",
+        subject="Webhook for account ACME-4421",
+        from_address="customer@example.test",
+        body="For account ACME-4421, report status and rotate the secret.",
+        attachments=[],
+    )
+    umbrella = ConcernRoute(
+        source_text="For account ACME-4421, the webhook is failing.",
+        answer_obligations=["Report status.", "Rotate the secret."],
+        intent_name="webhook-recovery",
+    )
+    status = ConcernRoute(
+        source_text="Report status.",
+        answer_obligations=["Report status."],
+        intent_name="webhook-recovery",
+    )
+    rotate = ConcernRoute(
+        source_text="Rotate the secret.",
+        answer_obligations=["Rotate the secret."],
+        intent_name="webhook-recovery",
+    )
+
+    first = _collapse_redundant_same_runbook_routes(email, [umbrella, status, rotate])
+    second = _collapse_redundant_same_runbook_routes(email, [rotate, umbrella, status])
+
+    assert len(first) == len(second) == 1
+    assert first[0].source_text == second[0].source_text
+    assert _concern_id(email, first[0], {}) == _concern_id(email, second[0], {})
 
 
 def test_same_runbook_executes_distinct_source_excerpts_independently(monkeypatch):

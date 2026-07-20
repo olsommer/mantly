@@ -487,6 +487,13 @@ _AUTHORITY_PRETEXT_SENTENCE_PATTERN = re.compile(
     r"(?:this|the)\s+(?:action|export|request)\.?$",
     re.IGNORECASE,
 )
+_AUTHORITY_PRETEXT_TITLE_PATTERN = re.compile(
+    r"^(?:urgent\s+)?(?:audit\s+)?(?:data\s+)?export\s+"
+    r"(?:request(?:ed)?|approv(?:e|ed))\s+by\s+"
+    r"(?:(?:the|our)\s+)?(?:admin(?:istrator)?|ceo|cfo|coo|cto|director|"
+    r"executive|owner|president)\.?$",
+    re.IGNORECASE,
+)
 _PROMPT_INJECTION_META_FRAMING_PATTERN = re.compile(
     r"\b(?:for|during|as\s+part\s+of)\s+(?:a\s+|an\s+)?"
     r"(?:(?:staff|security|employee|awareness)\s+)?"
@@ -2786,6 +2793,236 @@ def _dedupe_concern_routes(routes: list[ConcernRoute]) -> list[ConcernRoute]:
     return deduplicated
 
 
+def _normalized_route_obligations(route: ConcernRoute) -> frozenset[str]:
+    """Return comparable customer obligations without weakening their wording."""
+    return frozenset(
+        normalized
+        for obligation in route.answer_obligations
+        if (
+            normalized := " ".join(
+                re.findall(r"[\w]+", str(obligation or "").casefold())
+            )
+        )
+    )
+
+
+_COLLAPSE_IGNORABLE_SOURCE_TOKENS = frozenset(
+    {
+        "a",
+        "also",
+        "an",
+        "and",
+        "can",
+        "could",
+        "do",
+        "for",
+        "i",
+        "if",
+        "in",
+        "is",
+        "me",
+        "needed",
+        "please",
+        "tell",
+        "the",
+        "then",
+        "to",
+        "we",
+        "which",
+        "you",
+    }
+)
+
+
+def _route_source_scope_is_captured(
+    route: ConcernRoute,
+    *,
+    identity: tuple[str, str],
+) -> bool:
+    """Prove that a repeated route carries no parameters absent from its obligations."""
+    source_tokens = set(re.findall(r"[\w]+", route.source_text.casefold()))
+    obligation_tokens = set(
+        re.findall(
+            r"[\w]+",
+            " ".join(str(value or "") for value in route.answer_obligations).casefold(),
+        )
+    )
+    object_tokens = set(re.findall(r"[\w]+", " ".join(identity).casefold()))
+    return not (
+        source_tokens
+        - obligation_tokens
+        - object_tokens
+        - _COLLAPSE_IGNORABLE_SOURCE_TOKENS
+    )
+
+
+_MUTATION_VERB_ALIASES = {
+    "buy": "purchase",
+    "cancel": "cancel",
+    "change": "change",
+    "create": "create",
+    "decrease": "reduce",
+    "delete": "delete",
+    "export": "export",
+    "lower": "reduce",
+    "modify": "change",
+    "open": "create",
+    "order": "purchase",
+    "pause": "pause",
+    "purchase": "purchase",
+    "reduce": "reduce",
+    "refund": "refund",
+    "reimburse": "refund",
+    "remove": "delete",
+    "replay": "replay",
+    "reset": "reset",
+    "resume": "resume",
+    "retry": "replay",
+    "revoke": "revoke",
+    "rotate": "rotate",
+    "send": "send",
+    "terminate": "cancel",
+    "update": "change",
+}
+_MUTATION_LEADING_TOKENS = frozenset(
+    {"can", "could", "kindly", "please", "request", "would", "you"}
+)
+
+
+def _obligation_mutation_signature(obligation: str) -> str:
+    tokens = re.findall(r"[\w]+", obligation.casefold())
+    while tokens and tokens[0] in _MUTATION_LEADING_TOKENS:
+        tokens.pop(0)
+    if not tokens:
+        return ""
+    direct = _MUTATION_VERB_ALIASES.get(tokens[0])
+    if direct:
+        return direct
+    if tokens[0] == "request":
+        return next(
+            (
+                _MUTATION_VERB_ALIASES[token]
+                for token in tokens[1:4]
+                if token in _MUTATION_VERB_ALIASES
+            ),
+            "",
+        )
+    return ""
+
+
+def _has_repeated_mutation_signature(route: ConcernRoute) -> bool:
+    signatures = [
+        signature
+        for obligation in route.answer_obligations
+        if (signature := _obligation_mutation_signature(str(obligation or "")))
+    ]
+    return len(signatures) != len(set(signatures))
+
+
+def _collapse_redundant_same_runbook_routes(
+    email: Email,
+    routes: list[ConcernRoute],
+) -> list[ConcernRoute]:
+    """Collapse only one proven umbrella plus its complete repeated partition.
+
+    Routers occasionally emit one complete concern and then repeat each of its
+    answer obligations as smaller concerns for the same runbook. Executing all
+    of them isolates read-only evidence onto the umbrella concern and leaves the
+    repeated obligations impossible to ground. Collapse requires one unique
+    umbrella, two or more proper-subset siblings whose disjoint union exactly
+    equals the umbrella obligations, one label-aware business object, and no
+    sibling source parameter absent from its obligations. Every ambiguous or
+    partial shape stays isolated.
+    """
+
+    groups: dict[tuple[str, tuple[str, str]], list[int]] = {}
+    for index, route in enumerate(routes):
+        intent = str(route.intent_name or "").strip().casefold()
+        identity = _route_business_object_identity(email, route)
+        if intent and identity and _normalized_route_obligations(route):
+            groups.setdefault((intent, identity), []).append(index)
+
+    replacements: dict[int, ConcernRoute] = {}
+    removed: set[int] = set()
+    for (_intent, identity), indices in groups.items():
+        if len(indices) < 3:
+            continue
+        obligation_sets = {
+            index: _normalized_route_obligations(routes[index])
+            for index in indices
+        }
+        candidates: list[tuple[int, list[int]]] = []
+        for umbrella_index in indices:
+            umbrella_obligations = obligation_sets[umbrella_index]
+            sibling_indices = [index for index in indices if index != umbrella_index]
+            sibling_sets = [obligation_sets[index] for index in sibling_indices]
+            if not all(values and values < umbrella_obligations for values in sibling_sets):
+                continue
+            combined: set[str] = set()
+            disjoint = True
+            for values in sibling_sets:
+                if combined.intersection(values):
+                    disjoint = False
+                    break
+                combined.update(values)
+            if (
+                not disjoint
+                or combined != set(umbrella_obligations)
+                or _has_repeated_mutation_signature(routes[umbrella_index])
+                or not all(
+                    _route_source_scope_is_captured(
+                        routes[index],
+                        identity=identity,
+                    )
+                    for index in sibling_indices
+                )
+            ):
+                continue
+            candidates.append((umbrella_index, sibling_indices))
+        if len(candidates) != 1:
+            continue
+
+        umbrella_index, sibling_indices = candidates[0]
+        umbrella = routes[umbrella_index]
+        merged_source = umbrella.source_text
+        merged_summary = umbrella.summary
+        for sibling_index in sorted(
+            sibling_indices,
+            key=lambda index: (
+                tuple(sorted(obligation_sets[index])),
+                " ".join(routes[index].source_text.split()).casefold(),
+            ),
+        ):
+            merged_source = _merge_routed_source_text(
+                merged_source,
+                routes[sibling_index].source_text,
+            )
+            merged_summary = _merge_routed_source_text(
+                merged_summary,
+                routes[sibling_index].summary,
+            )
+        target_index = min(indices)
+        replacements[target_index] = umbrella.model_copy(
+            update={
+                "summary": merged_summary,
+                "source_text": merged_source,
+                "confidence": max(routes[index].confidence for index in indices),
+            }
+        )
+        removed.update(index for index in indices if index != target_index)
+        logger.warning(
+            "Collapsed redundant routed concern partition into runbook '%s' for shared object '%s'",
+            umbrella.intent_name,
+            ":".join(identity),
+        )
+
+    return [
+        replacements.get(index, route)
+        for index, route in enumerate(routes)
+        if index not in removed
+    ]
+
+
 def _route_business_object_identifier(email: Email, route: ConcernRoute) -> str:
     """Return one unambiguous identifier available to an isolated concern."""
     routed_values = {
@@ -2809,8 +3046,48 @@ def _route_business_object_identifier(email: Email, route: ConcernRoute) -> str:
     return next(iter(message_values)) if len(message_values) == 1 else ""
 
 
+def _route_business_object_identity(
+    email: Email,
+    route: ConcernRoute,
+) -> tuple[str, str] | None:
+    """Return one label-aware object identity or fail closed on ambiguity."""
+
+    def identities(value: str) -> set[tuple[str, str]]:
+        extracted = {
+            (label.casefold(), identifier.casefold())
+            for label, identifier in _business_object_identifiers(value)
+        }
+        # `_business_object_identifiers` deduplicates repeated textual values.
+        # Preserve every explicit label here so account 123 and contract 123
+        # remain distinct identities rather than collapsing by value alone.
+        for match in _LABELED_BUSINESS_OBJECT_IDENTIFIER_PATTERN.finditer(value):
+            identifier = match.group("value").strip(".,;:()[]{}<>")
+            if identifier and any(character.isdigit() for character in identifier):
+                extracted.add((match.group("label").casefold(), identifier.casefold()))
+        return extracted
+
+    routed = identities(f"{route.summary}\n{route.source_text}")
+    if routed:
+        if len(routed) != 1:
+            return None
+        label, value = next(iter(routed))
+        if label == "reference":
+            full_labels = {
+                full_label
+                for full_label, full_value in identities(f"{email.subject}\n{email.body}")
+                if full_value == value and full_label != "reference"
+            }
+            if len(full_labels) > 1:
+                return None
+            if len(full_labels) == 1:
+                return next(iter(full_labels)), value
+        return label, value
+    message = identities(f"{email.subject}\n{email.body}")
+    return next(iter(message)) if len(message) == 1 else None
+
+
 def _merge_routed_source_text(primary: str, subsumed: str) -> str:
-    """Preserve both routed excerpts without repeating a contained span."""
+    """Preserve both routed excerpts without partial-token substring loss."""
     primary = primary.strip()
     subsumed = subsumed.strip()
     if not primary:
@@ -2819,9 +3096,19 @@ def _merge_routed_source_text(primary: str, subsumed: str) -> str:
         return primary
     normalized_primary = " ".join(primary.split()).casefold()
     normalized_subsumed = " ".join(subsumed.split()).casefold()
-    if normalized_subsumed in normalized_primary:
+
+    def contains_span(container: str, candidate: str) -> bool:
+        return (
+            re.search(
+                rf"(?<![\w]){re.escape(candidate)}(?![\w])",
+                container,
+            )
+            is not None
+        )
+
+    if contains_span(normalized_primary, normalized_subsumed):
         return primary
-    if normalized_primary in normalized_subsumed:
+    if contains_span(normalized_subsumed, normalized_primary):
         return subsumed
     return f"{primary}\n{subsumed}"
 
@@ -2896,23 +3183,66 @@ def _apply_prompt_injection_pretext_precedence(
         return routes
 
     subject = normalized(email.subject)
-    subject_without_tracking_suffix = normalized(
-        re.sub(
-            r"\s*\[saas-support-\d{8}t\d{6}z-[a-z0-9]{6,12}-s10\]\s*$",
-            "",
-            subject,
-            flags=re.IGNORECASE,
-        )
+    tracking_suffix_pattern = (
+        r"\s*\[saas-support-\d{8}t\d{6}z-[a-z0-9]{6,12}-s10\]\s*$"
     )
-    if (
-        _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(subject) is None
-        and (
-            ("?" in subject and re.search(r"\baudit\b", subject, re.IGNORECASE))
-            or (
-                _AUDIT_BUSINESS_REQUEST_PATTERN.search(subject) is not None
-                and _AUDIT_BUSINESS_SUBJECT_CONTEXT_PATTERN.search(subject) is not None
+
+    def without_tracking_suffix(value: str) -> str:
+        return normalized(
+            re.sub(
+                tracking_suffix_pattern,
+                "",
+                value,
+                flags=re.IGNORECASE,
             )
         )
+
+    subject_without_tracking_suffix = without_tracking_suffix(subject)
+    body_text = str(email.body or "")
+    body_first_line = normalized(body_text.partition("\n")[0])
+    compact_body = normalized(body_text)
+    generated_channel_subject = (
+        compact_body
+        if len(compact_body) <= 80
+        else f"{compact_body[:77]}..."
+    )
+    direct_channel_title = (
+        body_first_line
+        if (
+            body_first_line
+            and "\n\n" in body_text
+            and subject.casefold() == generated_channel_subject.casefold()
+            and _AUTHORITY_PRETEXT_TITLE_PATTERN.fullmatch(
+                without_tracking_suffix(body_first_line)
+            )
+            is not None
+        )
+        else ""
+    )
+    direct_channel_title_without_tracking_suffix = without_tracking_suffix(
+        direct_channel_title
+    )
+    semantic_subjects = tuple(
+        dict.fromkeys(
+            value
+            for value in (subject, direct_channel_title)
+            if value
+        )
+    )
+    if any(
+        _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(candidate) is None
+        and (
+            (
+                "?" in candidate
+                and re.search(r"\baudit\b", candidate, re.IGNORECASE)
+            )
+            or (
+                _AUDIT_BUSINESS_REQUEST_PATTERN.search(candidate) is not None
+                and _AUDIT_BUSINESS_SUBJECT_CONTEXT_PATTERN.search(candidate)
+                is not None
+            )
+        )
+        for candidate in semantic_subjects
     ):
         # Subject is customer content too. A complete audit question there is
         # an independent concern even when the body is entirely hostile.
@@ -2926,7 +3256,12 @@ def _apply_prompt_injection_pretext_precedence(
         subject_variants = tuple(
             dict.fromkeys(
                 value
-                for value in (subject, subject_without_tracking_suffix)
+                for value in (
+                    subject,
+                    subject_without_tracking_suffix,
+                    direct_channel_title,
+                    direct_channel_title_without_tracking_suffix,
+                )
                 if value
             )
         )
@@ -2979,6 +3314,15 @@ def _apply_prompt_injection_pretext_precedence(
     for sentence in _CUSTOMER_TEXT_SENTENCE_SPLIT_PATTERN.split(email.body):
         item = normalized(sentence)
         if not item:
+            continue
+        if (
+            direct_channel_title
+            and item.casefold() == direct_channel_title.casefold()
+        ):
+            # Direct generic-channel transport mirrors its title as the first
+            # body line. The semantic-subject guard above already preserved a
+            # real audit question; do not count the mirrored S10 pretext title
+            # as an independent body concern.
             continue
         if _AUTHORITY_PRETEXT_SENTENCE_PATTERN.fullmatch(item) is not None:
             continue
@@ -3457,6 +3801,7 @@ def run_intent_agent(
     routes = _apply_safety_intent_precedence(routes, known_intents)
     routes = _apply_credential_exposure_precedence(email, routes)
     routes = _dedupe_concern_routes(routes)
+    routes = _collapse_redundant_same_runbook_routes(email, routes)
     routes = _apply_prompt_injection_pretext_precedence(email, routes)
     routes = _apply_runbook_subsumption(email, routes, intents_dir)
     if not routes:

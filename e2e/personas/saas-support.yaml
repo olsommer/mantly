@@ -249,6 +249,8 @@ runbooks:
     purpose: Block destructive deletion until owner authority and retention review are complete.
     proposed_actions: [request_workspace_deletion]
     required_read_only_tools: [fixture_saas_account_acme_4421]
+    required_guidance:
+      - State explicitly that a Billing Admin cannot authorize workspace deletion.
   - key: saas-webhook-recovery
     purpose: Explain verified integration failures and prepare secret rotation or event replay.
     proposed_actions: [rotate_signing_secret, replay_webhook_events]

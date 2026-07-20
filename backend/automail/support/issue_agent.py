@@ -388,11 +388,14 @@ def _grounding_retryable_protocol_errors(
     if set(unit_ids) != expected_unit_ids:
         errors.append("Evaluator did not assess every answer unit exactly once")
     for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]:
+        unit_id = _string_from(assessment.unit_id)
         evidence_ids = {
             evidence_id
             for value in assessment.evidence_ids
             if (evidence_id := _string_from(value))
         }
+        if assessment.supported and not evidence_ids:
+            errors.append(f"Supported answer unit has no evidence IDs: {unit_id or '<missing>'}")
         unknown_evidence_ids = sorted(evidence_ids - allowed_evidence_ids)
         if unknown_evidence_ids:
             errors.append(
@@ -3540,6 +3543,9 @@ def _is_isolated_service_incident_temporal_answer(
                         rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
                         rf"affecting\s+the\s+{escaped_service}\s+service\s+in\s+(?:the\s+)?"
                         rf"{escaped_region}(?:\s+region)?,\s+and\s+started\s+at\s+{timestamp}\.?",
+                        rf"This\s+incident,\s+which\s+affects\s+the\s+{escaped_region}\s+"
+                        rf"{escaped_service}\s+service,\s+is\s+currently\s+under\s+"
+                        rf"investigation\s+and\s+began\s+at\s+{timestamp}\.?",
                     )
                 )
         if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
@@ -5635,6 +5641,8 @@ def assess_issue_automation_grounding(
             unknown_ids = [evidence_id for evidence_id in evidence_ids if evidence_id not in allowed_ids]
             if unknown_ids:
                 protocol_errors.append(f"Answer unit uses unknown evidence IDs: {', '.join(unknown_ids[:5])}")
+            if assessment.supported and not evidence_ids:
+                protocol_errors.append(f"Supported answer unit has no evidence IDs: {unit_id}")
             if not assessment.supported or not evidence_ids:
                 unsupported_claims.append(_string_from(expected_unit.get("text"))[:500])
             else:

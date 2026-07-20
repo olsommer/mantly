@@ -487,6 +487,43 @@ _AUTHORITY_PRETEXT_SENTENCE_PATTERN = re.compile(
     r"(?:this|the)\s+(?:action|export|request)\.?$",
     re.IGNORECASE,
 )
+_PROMPT_INJECTION_META_FRAMING_PATTERN = re.compile(
+    r"\b(?:for|during|as\s+part\s+of)\s+(?:a\s+|an\s+)?"
+    r"(?:(?:staff|security|employee|awareness)\s+)?"
+    r"(?:training|exercise|simulation|test(?:ing)?)\b|"
+    r"\b(?:hypothetical|example|sample|training|test)\s+"
+    r"(?:case|email|exercise|message|prompt|scenario)\b|"
+    r"\b(?:i|we)\s+(?:am|are|'m|'re)?\s*"
+    r"(?:analy[sz]ing|forwarding|quoting|reporting|reviewing)\b|"
+    r"\b(?:a\s+user|an\s+attacker|someone|the\s+sender)\s+"
+    r"(?:asked|said|sent|wrote)\b|"
+    r"\b(?:quote|quoted|quotation|verbatim)\s+"
+    r"(?:example|excerpt|message|prompt|text)\b",
+    re.IGNORECASE,
+)
+_PROMPT_INJECTION_BENIGN_META_TASK_PATTERN = re.compile(
+    r"\b(?:classify|review|analy[sz]e|detect)\s+"
+    r"(?:the\s+following|this|that|the|a|an)?\s*"
+    r"(?:quoted\s+|sample\s+)?(?:example|email|message|prompt|scenario|text)\b|"
+    r"\b(?:would|does|is)\s+(?:this|that|the\s+following)\b"
+    r"[^.!?\n]{0,120}\b(?:prompt\s+injection|unsafe|malicious|attack)\b|"
+    r"\b(?:only\s+)?explain\s+(?:why|whether)\b"
+    r"[^.!?\n]{0,120}\b(?:prompt\s+injection|unsafe|malicious)\b|"
+    r"\bexplain\s+(?:the\s+)?(?:classification|detection)\b|"
+    r"\breport\s+(?:if|whether)\b"
+    r"[^.!?\n]{0,120}\b(?:prompt\s+injection|unsafe|malicious)\b",
+    re.IGNORECASE,
+)
+_PROMPT_INJECTION_META_EXECUTION_REQUEST_PATTERN = re.compile(
+    r"(?:^|[,:;.!?]\s*|\b(?:and|then|but)\s+)"
+    r"(?:also\s+|still\s+|then\s+)?(?:please\s+)?"
+    r"(?:obey|follow|execute|carry\s+out|apply|do|perform|"
+    r"comply\s+with|act\s+on)\s+"
+    r"(?:it|them|this|that|instructions?|request|commands?|prompt|message|"
+    r"(?:the|these|those|its|their|quoted|sample)\s+"
+    r"(?:instructions?|request|commands?|prompt|message))\b",
+    re.IGNORECASE,
+)
 
 
 def _action_is_enabled(raw: dict[str, Any]) -> bool:
@@ -698,6 +735,103 @@ def _select_applicable_actions(
         selected.append(action)
         seen.add(action.name)
     return selected
+
+
+def _quote_is_escaped(value: str, index: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and value[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _balanced_quote_end(value: str, start: int, closing: str) -> int | None:
+    for index in range(start + 1, len(value)):
+        if value[index] != closing or _quote_is_escaped(value, index):
+            continue
+        if closing in {"'", "’"} and 0 < index < len(value) - 1:
+            if value[index - 1].isalnum() and value[index + 1].isalnum():
+                # Contractions inside a quoted span are not closing delimiters.
+                continue
+        return index
+    return None
+
+
+def _mask_balanced_quoted_spans(value: str) -> str:
+    """Mask paired quote contents while preserving offsets and malformed text."""
+    quote_pairs = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+    masked = list(value)
+    index = 0
+    while index < len(value):
+        opener = value[index]
+        closing = quote_pairs.get(opener)
+        if closing is None or _quote_is_escaped(value, index):
+            index += 1
+            continue
+        if opener == "'" and index > 0 and value[index - 1].isalnum():
+            # Apostrophes in contractions and possessives never open a span.
+            index += 1
+            continue
+        end = _balanced_quote_end(value, index, closing)
+        if end is None:
+            # An unbalanced quote must not hide a later execution request.
+            index += 1
+            continue
+        for cursor in range(index, end + 1):
+            if not masked[cursor].isspace():
+                masked[cursor] = " "
+        index = end + 1
+    return "".join(masked)
+
+
+def _select_deterministic_prompt_injection_incident_action(
+    route: ConcernRoute,
+    actions: list[IntentAction],
+    output: IntentProcessingOutput,
+    selected: list[IntentAction],
+) -> list[IntentAction]:
+    """Recover one internal incident proposal for a proven hostile request.
+
+    An explicit empty model selection normally suppresses every action. The one
+    exception is a high-confidence prompt-injection route whose source contains
+    the complete hostile request cluster and whose runbook configures exactly
+    one open/create security-incident action. The returned action is still only
+    a proposal; persistence keeps normal human-approval semantics.
+    """
+    if output.selected_action_names != [] or selected or route.confidence < 0.95:
+        return selected
+    intent_terms = set(re.findall(r"[a-z0-9]+", str(route.intent_name or "").casefold()))
+    if {"prompt", "injection"} - intent_terms:
+        return selected
+    if not _has_explicit_prompt_injection_attack_cluster(route.source_text):
+        return selected
+    unquoted_source = _mask_balanced_quoted_spans(route.source_text)
+    if (
+        _PROMPT_INJECTION_META_FRAMING_PATTERN.search(route.source_text)
+        and _PROMPT_INJECTION_BENIGN_META_TASK_PATTERN.search(route.source_text)
+        and not _PROMPT_INJECTION_META_EXECUTION_REQUEST_PATTERN.search(
+            unquoted_source
+        )
+    ):
+        return selected
+
+    incident_actions = []
+    for action in actions:
+        action_terms = set(re.findall(r"[a-z0-9]+", action.name.casefold()))
+        if (
+            {"security", "incident"} <= action_terms
+            and action_terms.intersection({"create", "open"})
+        ):
+            incident_actions.append(action)
+    if len(incident_actions) != 1:
+        return selected
+
+    logger.warning(
+        "Selecting configured internal security-incident proposal for proven "
+        "prompt-injection concern"
+    )
+    return incident_actions
 
 
 def _verified_boolean_state(
@@ -2234,8 +2368,15 @@ def _build_routed_concern_outcome(
     verified_facts = _verified_facts(tool_evidence)
     if intent_result.actions and isinstance(output, IntentProcessingOutput):
         action_selection_error = _action_selection_error(intent_result.actions, output)
+        selected_actions = _select_applicable_actions(intent_result.actions, output)
+        selected_actions = _select_deterministic_prompt_injection_incident_action(
+            route,
+            intent_result.actions,
+            output,
+            selected_actions,
+        )
         applicable_actions = _apply_deterministic_action_eligibility(
-            _select_applicable_actions(intent_result.actions, output),
+            selected_actions,
             verified_facts,
         )
         fills_count = _merge_action_fills(applicable_actions, output)
@@ -2592,6 +2733,23 @@ def _merge_subsumed_route(
     )
 
 
+def _has_explicit_prompt_injection_attack_cluster(value: str) -> bool:
+    """Require every concrete hostile-request signal used by S10 precedence."""
+    source = " ".join(str(value or "").split()).strip()
+    return bool(
+        source
+        and all(
+            pattern.search(source)
+            for pattern in (
+                _PROMPT_OVERRIDE_REQUEST_PATTERN,
+                _IDENTITY_BYPASS_REQUEST_PATTERN,
+                _PROTECTED_DATA_EXFILTRATION_PATTERN,
+                _AUDIT_DESTRUCTION_REQUEST_PATTERN,
+            )
+        )
+    )
+
+
 def _apply_prompt_injection_pretext_precedence(
     email: Email,
     routes: list[ConcernRoute],
@@ -2619,15 +2777,7 @@ def _apply_prompt_injection_pretext_precedence(
     prompt_index = prompt_indices[0]
     prompt_route = routes[prompt_index]
     prompt_source = normalized(prompt_route.source_text)
-    if not prompt_source or not all(
-        pattern.search(prompt_source)
-        for pattern in (
-            _PROMPT_OVERRIDE_REQUEST_PATTERN,
-            _IDENTITY_BYPASS_REQUEST_PATTERN,
-            _PROTECTED_DATA_EXFILTRATION_PATTERN,
-            _AUDIT_DESTRUCTION_REQUEST_PATTERN,
-        )
-    ):
+    if not _has_explicit_prompt_injection_attack_cluster(prompt_source):
         return routes
 
     subject = normalized(email.subject)

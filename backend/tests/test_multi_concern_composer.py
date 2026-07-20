@@ -357,3 +357,34 @@ def test_pipeline_composer_blocks_s04_artifact_and_completion_promises():
     assert artifact.blocked is True
     assert completion.blocked is True
     assert safe.blocked is False
+
+
+def test_pipeline_composer_blocks_pending_return_artifact_receipt_promise():
+    result = _result()
+    result.concerns[0].action_outcomes = [
+        RunbookActionOutcome(
+            name="request_return_authorization",
+            label="Request return authorization",
+            status="proposed",
+        )
+    ]
+
+    unsafe = _pending_action_claim_check(
+        result,
+        (
+            "You will receive the confirmed return authorization, return address, "
+            "and reference once they are approved."
+        ),
+    )
+    safe_pending = _pending_action_claim_check(
+        result,
+        "The return authorization and return address remain pending human review.",
+    )
+    safe_explanation = _pending_action_claim_check(
+        result,
+        "If approved, the return authorization would identify the return address.",
+    )
+
+    assert unsafe.blocked is True
+    assert safe_pending.blocked is False
+    assert safe_explanation.blocked is False

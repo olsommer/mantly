@@ -774,6 +774,13 @@ def test_pending_action_guard_blocks_multilingual_conditional_customer_contact(
         "We will email you the report once it is generated.",
         "You will receive the data export after approval.",
         "The export link will be sent once it is ready.",
+        (
+            "You will receive the confirmed return authorization, return address, "
+            "and reference once they are approved."
+        ),
+        "You'll get your return authorization after human review.",
+        "Our team will send you the return address once approved.",
+        "The return reference will be delivered after approval.",
     ],
 )
 def test_pending_action_guard_blocks_conditional_action_artifact_delivery(
@@ -927,6 +934,12 @@ def test_pending_action_guard_blocks_contingent_confirmation_of_completion(
         "The vendor can confirm the deletion is complete.",
         "You will receive the export link from the vendor after processing.",
         "We can provide the export link after approval.",
+        "The return authorization, return address, and reference remain pending human review.",
+        "If approved, the return authorization would identify the return address.",
+        "You may receive a return authorization if the merchant approves it.",
+        "You will receive the return authorization from the vendor after processing.",
+        "The return authorization can be used only after approval.",
+        "You will not receive a return authorization before approval.",
     ],
 )
 def test_pending_action_guard_allows_safe_artifact_and_completion_contrasts(
@@ -1919,6 +1932,10 @@ def test_pending_action_repair_removes_conditional_contact_promise_and_preserves
     [
         "We will provide the export link once it is available.",
         (
+            "You will receive the confirmed return authorization, return address, "
+            "and reference once they are approved."
+        ),
+        (
             "Once we have these confirmations, we can confirm the deletion is complete "
             "and that no retained copies exist."
         ),
@@ -1937,6 +1954,26 @@ def test_pending_action_repair_removes_artifact_or_completion_promise_and_preser
 
     assert repaired == f"{safe_fact}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
     assert unsafe_claim not in repaired
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=_actions(),
+    ).blocked is False
+
+
+def test_pending_action_repair_drops_entire_coordinated_return_artifact_promise() -> None:
+    safe_fact = "Refund timing is controlled by the merchant and payment provider."
+    unsafe_claim = (
+        "You will receive the confirmed return authorization, return address, "
+        "and reference once they are approved."
+    )
+
+    repaired = repair_pending_action_claims(
+        answer=f"{unsafe_claim}\n\n{safe_fact}",
+        runbook_actions=_actions(),
+    )
+
+    assert repaired == f"{safe_fact}\n\n{PENDING_ACTION_REPAIR_NOTICE}"
+    assert "Reference once" not in repaired
     assert check_pending_action_claims(
         answer=repaired,
         runbook_actions=_actions(),

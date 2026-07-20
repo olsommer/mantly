@@ -961,16 +961,20 @@ _ITALIAN_CUSTOMER_CONTACT_PROMISE_PATTERN = re.compile(
 )
 _ACTION_ARTIFACT_PATTERN = (
     r"(?:(?:export|download)\s+)?(?:link|file|report|copy|data|token|document)|"
-    r"(?:export|download)"
+    r"(?:export|download)|"
+    r"return\s+(?:authorization|address|reference(?:\s+(?:number|code))?)"
+)
+_ACTION_ARTIFACT_QUALIFIER_PATTERN = (
+    r"(?:(?:the|an?|your|requested|generated)\s+)?(?:confirmed\s+)?"
 )
 _FUTURE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN = re.compile(
     rf"\b{_CUSTOMER_CONTACT_MODAL_PATTERN}\s+"
     rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:"
     r"(?:provide|send|share|give|deliver|email|message)\s+"
     r"(?:(?:you|the\s+customer)\s+(?:with\s+)?)?"
-    r"(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"{_ACTION_ARTIFACT_QUALIFIER_PATTERN}"
     rf"(?:{_ACTION_ARTIFACT_PATTERN})|"
-    r"make\s+(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"make\s+{_ACTION_ARTIFACT_QUALIFIER_PATTERN}"
     rf"(?:{_ACTION_ARTIFACT_PATTERN})\s+available)\b",
     re.IGNORECASE,
 )
@@ -978,9 +982,9 @@ _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN = re.compile(
     rf"\b(?:"
     rf"(?:you['’]ll|(?:you|the\s+customer)\s+(?:will|shall))\s+"
     rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:receive|get)\s+"
-    r"(?:(?:the|an?|your|requested|generated)\s+)?"
+    rf"{_ACTION_ARTIFACT_QUALIFIER_PATTERN}"
     rf"(?:{_ACTION_ARTIFACT_PATTERN})|"
-    r"(?:(?:the|your|requested|generated)\s+)?"
+    rf"{_ACTION_ARTIFACT_QUALIFIER_PATTERN}"
     rf"(?:{_ACTION_ARTIFACT_PATTERN})\s+(?:will|shall)\s+"
     r"(?!(?:not|never)\b)(?:be\s+)?(?:provided|sent|shared|delivered|emailed|made\s+available)"
     r")\b",
@@ -4237,6 +4241,11 @@ def _preserve_safe_local_clauses(
     dynamic_subjects: tuple[tuple[str, str], ...],
 ) -> str:
     shadow = _action_claim_shadow(unit)
+    if _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN.search(shadow):
+        # A coordinated artifact list is one promise, not independent prose.
+        # Dropping the whole answer unit prevents a tail such as
+        # ``and reference once approved`` from surviving as an orphan clause.
+        return ""
     for pattern in (*_CLAIM_PATTERNS, *_FUTURE_CLAIM_PATTERNS):
         for match in pattern.finditer(shadow):
             if not _is_success_backed_action_claim(

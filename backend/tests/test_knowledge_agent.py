@@ -4602,6 +4602,10 @@ def test_grounding_does_not_override_not_covered_fixture_tool_timestamp(
             "This incident is currently under investigation, affecting the authentication "
             "service in the EU region, and started at 2026-07-19T07:40:00Z."
         ),
+        (
+            "This incident, which affects the EU authentication service, is currently under "
+            "investigation and began at 2026-07-19T07:40:00Z."
+        ),
     ],
 )
 def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
@@ -4753,6 +4757,31 @@ def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
         (
             "This incident is currently under investigation, affecting the authentication "
             "service in the EU region, and started at 2026-07-19T08:40:00Z."
+        ),
+        (
+            "This incident, which affects the US authentication service, is currently under "
+            "investigation and began at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects the EU billing service, is currently under "
+            "investigation and began at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects the EU authentication service, is currently under "
+            "review and began at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects the EU authentication service, is currently under "
+            "investigation and began at 2026-07-19T08:40:00Z."
+        ),
+        (
+            "This incident, which affects the EU authentication service, is currently under "
+            "investigation and the service began at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident, which affects the EU authentication service, is currently under "
+            "investigation and began at 2026-07-19T07:40:00Z, while an SLA credit is being "
+            "approved."
         ),
     ],
 )
@@ -6751,6 +6780,142 @@ def test_grounding_retries_unknown_unit_evidence_but_not_semantic_failure(
     else:
         assert result.status == "error"
         assert "unknown evidence IDs" in result.error
+
+
+def test_grounding_retries_supported_unit_without_evidence_and_accepts_corrected_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_id = "enterprise-entitlements"
+    obligation_id = f"{concern_id}:price"
+    concern_evidence_id = f"concern:{concern_id}"
+    answer = "Pricing information is not available in the provided evidence."
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, "Tell me the price.")],
+    )
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["summary"] = (
+        "Pricing information is unverified."
+    )
+    unit = issue_agent._grounding_answer_units(answer)[0]
+    malformed = AutomationGroundingOutput(
+        verdict="not_grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="not_covered",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=[],
+            )
+        ],
+    )
+    corrected = AutomationGroundingOutput(
+        verdict="grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[concern_evidence_id],
+            )
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="pending_or_unavailable",
+                answer_unit_ids=[unit["id"]],
+                evidence_ids=[concern_evidence_id],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[malformed, corrected],
+    )
+
+    assert len(prompts) == 2
+    assert "## Required Protocol Correction" in prompts[1]
+    assert "Supported answer unit has no evidence IDs: u001" in prompts[1]
+    assert "Every answer unit marked `supported: true` must include at least one" in prompts[1]
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": obligation_id,
+            "resolution": "pending_or_unavailable",
+            "covered": True,
+            "answerUnitIds": [unit["id"]],
+            "evidenceIds": [concern_evidence_id],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The price is $499 per month.",
+        "Pricing is unavailable, but the price is $499 per month.",
+    ],
+)
+def test_grounding_repeated_supported_unit_without_evidence_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    concern_id = "enterprise-entitlements"
+    obligation_id = f"{concern_id}:price"
+    issue = _issue_with_grounding_obligations(
+        concern_id=concern_id,
+        questions=[(obligation_id, "Tell me the price.")],
+    )
+    units = issue_agent._grounding_answer_units(answer)
+    malformed = AutomationGroundingOutput(
+        verdict="grounded",
+        answer_sha256=issue_agent.grounding_text_sha256(answer),
+        unit_assessments=[
+            AutomationGroundingUnitAssessment(
+                unit_id=unit["id"],
+                unit_sha256=unit["sha256"],
+                supported=True,
+                evidence_ids=[],
+            )
+            for unit in units
+        ],
+        obligation_assessments=[
+            AutomationGroundingObligationAssessment(
+                obligation_id=obligation_id,
+                resolution="answered",
+                answer_unit_ids=[unit["id"] for unit in units],
+                evidence_ids=[],
+            )
+        ],
+    )
+
+    result, prompts = _assess_with_grounding_outputs(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        outputs=[malformed, malformed],
+    )
+
+    assert len(prompts) == issue_agent.GROUNDING_MODEL_CALL_LIMIT == 2
+    assert result.verified is False
+    assert result.status == "error"
+    assert result.reason_code == "grounding_check_failed"
+    assert "Supported answer unit has no evidence IDs" in result.error
+    assert answer in result.unsupported_claims
 
 
 def test_grounding_gate_rejects_incomplete_unit_protocol(

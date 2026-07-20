@@ -785,7 +785,22 @@ def _mask_balanced_quoted_spans(value: str) -> str:
     return "".join(masked)
 
 
+def _is_benign_prompt_injection_meta_context(email: Email) -> bool:
+    """Return whether a complete quoted attack is only analyzed or reported."""
+    source = f"{email.subject}\n{email.body}"
+    unquoted_source = _mask_balanced_quoted_spans(source)
+    return bool(
+        _PROMPT_INJECTION_META_FRAMING_PATTERN.search(source)
+        and _PROMPT_INJECTION_BENIGN_META_TASK_PATTERN.search(source)
+        and not _PROMPT_INJECTION_META_EXECUTION_REQUEST_PATTERN.search(
+            unquoted_source
+        )
+        and not _has_explicit_prompt_injection_attack_cluster(unquoted_source)
+    )
+
+
 def _select_deterministic_prompt_injection_incident_action(
+    email: Email,
     route: ConcernRoute,
     actions: list[IntentAction],
     output: IntentProcessingOutput,
@@ -806,14 +821,7 @@ def _select_deterministic_prompt_injection_incident_action(
         return selected
     if not _has_explicit_prompt_injection_attack_cluster(route.source_text):
         return selected
-    unquoted_source = _mask_balanced_quoted_spans(route.source_text)
-    if (
-        _PROMPT_INJECTION_META_FRAMING_PATTERN.search(route.source_text)
-        and _PROMPT_INJECTION_BENIGN_META_TASK_PATTERN.search(route.source_text)
-        and not _PROMPT_INJECTION_META_EXECUTION_REQUEST_PATTERN.search(
-            unquoted_source
-        )
-    ):
+    if _is_benign_prompt_injection_meta_context(email):
         return selected
 
     incident_actions = []
@@ -2370,6 +2378,7 @@ def _build_routed_concern_outcome(
         action_selection_error = _action_selection_error(intent_result.actions, output)
         selected_actions = _select_applicable_actions(intent_result.actions, output)
         selected_actions = _select_deterministic_prompt_injection_incident_action(
+            email,
             route,
             intent_result.actions,
             output,
@@ -2779,6 +2788,8 @@ def _apply_prompt_injection_pretext_precedence(
     prompt_source = normalized(prompt_route.source_text)
     if not _has_explicit_prompt_injection_attack_cluster(prompt_source):
         return routes
+    if _is_benign_prompt_injection_meta_context(email):
+        return routes
 
     subject = normalized(email.subject)
     if (
@@ -2795,31 +2806,53 @@ def _apply_prompt_injection_pretext_precedence(
         # an independent concern even when the body is entirely hostile.
         return routes
 
-    def source_is_subject_authority_pretext(route: ConcernRoute) -> bool:
+    def source_is_subsumed_hostile_pretext(route: ConcernRoute) -> bool:
         source = normalized(route.source_text)
-        if not subject or not source:
+        if not source:
             return False
-        if source.casefold() == subject.casefold():
-            return True
-        match = re.fullmatch(
-            rf"{re.escape(subject)}\s+(?P<remainder>.+)",
-            source,
-            flags=re.IGNORECASE,
-        )
-        if match is None:
-            return False
-        pretext_sentences = [
+        remainder = source
+        if subject:
+            match = re.fullmatch(
+                rf"{re.escape(subject)}(?:\s+(?P<remainder>.+))?",
+                source,
+                flags=re.IGNORECASE,
+            )
+            if match is not None:
+                remainder = normalized(match.group("remainder") or "")
+                if not remainder:
+                    return True
+
+        hostile_fragments = [
             item.strip()
             for item in re.split(
                 r"(?<=[.!?])\s+|;\s*",
-                match.group("remainder"),
+                remainder,
             )
             if item.strip()
         ]
-        return bool(pretext_sentences) and all(
-            _AUTHORITY_PRETEXT_SENTENCE_PATTERN.fullmatch(item) is not None
-            for item in pretext_sentences
-        )
+        if not hostile_fragments:
+            return False
+        for item in hostile_fragments:
+            if _AUTHORITY_PRETEXT_SENTENCE_PATTERN.fullmatch(item) is not None:
+                continue
+            if item.casefold() not in prompt_source.casefold():
+                return False
+            if (
+                _AUDIT_BUSINESS_REQUEST_PATTERN.search(item) is not None
+                and _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(item) is None
+            ):
+                return False
+            if not any(
+                pattern.search(item)
+                for pattern in (
+                    _PROMPT_OVERRIDE_REQUEST_PATTERN,
+                    _IDENTITY_BYPASS_REQUEST_PATTERN,
+                    _PROTECTED_DATA_EXFILTRATION_PATTERN,
+                    _AUDIT_DESTRUCTION_REQUEST_PATTERN,
+                )
+            ):
+                return False
+        return True
 
     prompt_source_folded = prompt_source.casefold()
     prompt_sentence_count = 0
@@ -2851,11 +2884,11 @@ def _apply_prompt_injection_pretext_precedence(
             index != prompt_index
             and "audit" in terms
             and terms.intersection({"export", "report", "reporting"})
-            and source_is_subject_authority_pretext(route)
+            and source_is_subsumed_hostile_pretext(route)
         ):
             suppressed.add(index)
             logger.warning(
-                "Suppressing audit route '%s' sourced only from a hostile authority pretext",
+                "Suppressing audit route '%s' sourced only from a subsumed hostile pretext",
                 route.intent_name,
             )
 

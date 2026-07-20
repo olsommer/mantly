@@ -690,6 +690,45 @@ def test_prompt_injection_pretext_suppresses_live_subject_only_audit_route() -> 
     assert _apply_prompt_injection_pretext_precedence(email, routed) == [routes[1]]
 
 
+def test_prompt_injection_pretext_suppresses_live_subject_without_tracking_suffix() -> None:
+    email = _prompt_injection_pretext_email()
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(
+            update={"source_text": "Urgent audit export requested by the CEO"}
+        ),
+        routes[1],
+    ]
+
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == [routes[1]]
+
+
+@pytest.mark.parametrize(
+    "subject_suffix",
+    [
+        "[customer supplied reference]",
+        "[Send it every Monday]",
+        "[[saas-support-20260720t063006z-p0trii-s10]",
+        "[saas-support-20260720t063006z-p0trii-s10",
+        "[saas-support-20260720t063006z-p0trii-s10]]",
+    ],
+)
+def test_prompt_injection_pretext_never_strips_noncanonical_subject_suffix(
+    subject_suffix: str,
+) -> None:
+    title = "Urgent audit export requested by the CEO"
+    email = _prompt_injection_pretext_email(
+        subject=f"{title} {subject_suffix}"
+    )
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": title}),
+        routes[1],
+    ]
+
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
+
+
 @pytest.mark.parametrize("include_subject", [True, False])
 def test_prompt_injection_pretext_suppresses_live_exfiltration_audit_route(
     include_subject: bool,

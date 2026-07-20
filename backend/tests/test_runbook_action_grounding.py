@@ -1362,6 +1362,103 @@ def test_grounding_preflight_blocks_active_internal_review_with_pending_triage(
     assert result.pending_actions == ("Agent triage",)
 
 
+def test_grounding_preflight_rejects_safe_but_internal_triage_disclosure(
+    monkeypatch,
+):
+    source_message_id = "channel:email-main:saas-s02-message"
+    issue = {
+        "id": "issue1",
+        "subject": "Service incident",
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"emailId": source_message_id},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "service-incident",
+                            "matched": True,
+                            "intentName": "service-incident",
+                        }
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "type": "agent_triage",
+                "actionKey": "agent_triage",
+                "label": "Agent triage",
+                "status": "pending",
+                "metadata": {
+                    "source": "agent_triage",
+                    "approvalRequired": True,
+                    "automationContext": {"sourceMessageId": source_message_id},
+                },
+            }
+        ],
+    }
+    answer = "Agent triage and opening your support ticket are pending human review."
+    monkeypatch.setattr(
+        issue_agent,
+        "create_agent",
+        lambda **_kwargs: pytest.fail("grounding LLM must not run"),
+    )
+
+    result = issue_agent.assess_issue_automation_grounding(
+        issue=issue,
+        messages=[{"direction": "customer", "body": "Please open a support ticket."}],
+        answer=answer,
+        articles=[],
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == issue_agent.INTERNAL_STATE_DISCLOSURE_REASON_CODE
+    assert result.unsupported_claims == (answer,)
+
+
+def test_scoped_grounding_evidence_excludes_internal_triage_action() -> None:
+    ticket = {
+        "concerns": [{"id": "service-incident", "matched": True}],
+        "runbookActions": [
+            {
+                "name": "agent_triage",
+                "label": "Agent triage",
+                "status": "pending_approval",
+                "concernId": "service-incident",
+            },
+            {
+                "name": "open_p1_escalation",
+                "label": "Open P1 escalation",
+                "status": "pending_approval",
+                "concernId": "service-incident",
+            },
+        ],
+    }
+
+    scoped = issue_agent._scoped_grounding_ticket_evidence(ticket)
+
+    assert scoped == {
+        "concerns": [
+            {
+                "evidenceId": "concern:service-incident",
+                "concernId": "service-incident",
+                "context": {"id": "service-incident", "matched": True},
+                "runbookActions": [
+                    {
+                        "name": "open_p1_escalation",
+                        "label": "Open P1 escalation",
+                        "status": "pending_approval",
+                        "concernId": "service-incident",
+                    }
+                ],
+            }
+        ]
+    }
+
+
 def test_grounding_preflight_blocks_wrong_reply_language_without_llm(monkeypatch):
     monkeypatch.setattr(
         issue_agent,

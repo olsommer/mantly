@@ -69,7 +69,7 @@ GROUNDING_MODEL_THINKING_BUDGET = 1024
 # headroom for both calls while retaining the same bounded, fail-closed deadline.
 GROUNDING_AGENT_DEADLINE_SECONDS = 120
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v8"
+GROUNDING_GATE_VERSION = "automation-grounding-v9"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
@@ -83,6 +83,7 @@ _GROUNDING_TICKET_SCOPED_KEYS = frozenset(
 )
 LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
 BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
+INTERNAL_STATE_DISCLOSURE_REASON_CODE = "internal_state_disclosure"
 _ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset(
     {
         "answered",
@@ -2787,7 +2788,11 @@ def _automatic_runbook_action_context(
             continue
         if concern_ids and is_runbook_action and execution_concern_id not in concern_ids:
             continue
-        name = _string_from(proposed.get("name") or execution.get("actionKey"))
+        name = (
+            "agent_triage"
+            if is_pending_agent_triage
+            else _string_from(proposed.get("name") or execution.get("actionKey"))
+        )
         label = _string_from(proposed.get("label") or execution.get("label") or name)
         concern_id = execution_concern_id
         runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
@@ -2899,6 +2904,30 @@ def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
     return ticket
 
 
+def _is_internal_agent_triage_action(action: dict[str, Any]) -> bool:
+    """Identify approval guard state that must never become customer content."""
+    return _string_from(action.get("name")).lower().replace("-", "_") == "agent_triage"
+
+
+def _customer_answer_ticket_context(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal guard-only actions from the response generator context."""
+    customer_ticket = dict(ticket)
+    raw_actions = ticket.get("runbookActions")
+    if not isinstance(raw_actions, list):
+        return customer_ticket
+    customer_actions = [
+        action
+        for raw_action in raw_actions
+        if (action := _record_from(raw_action))
+        and not _is_internal_agent_triage_action(action)
+    ]
+    if customer_actions:
+        customer_ticket["runbookActions"] = customer_actions
+    else:
+        customer_ticket.pop("runbookActions", None)
+    return customer_ticket
+
+
 def _global_grounding_ticket_evidence(ticket: dict[str, Any]) -> dict[str, Any]:
     """Keep concern-scoped runbook facts outside the global ``ticket`` evidence ID."""
     return {key: value for key, value in ticket.items() if key not in _GROUNDING_TICKET_SCOPED_KEYS}
@@ -2928,6 +2957,7 @@ def _scoped_grounding_ticket_evidence(
                 if (
                     (action := _record_from(raw_action))
                     and _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
+                    and not _is_internal_agent_triage_action(action)
                 )
             ]
             grounding_context = {
@@ -4991,6 +5021,158 @@ def _clean_action_repair_artifacts(answer: str, *, language: str) -> str:
     return cleaned.strip()
 
 
+_INTERNAL_AGENT_TRIAGE_DISCLOSURE_RE = re.compile(
+    r"\b(?:agent(?:en)?[\s_-]*triage|internal[\s_-]+triage|"
+    r"triage[\s_-]+(?:interne|interno|interna)|"
+    r"triaje[\s_-]+(?:interno|interna|del[\s_-]+agente))\b",
+    re.IGNORECASE,
+)
+
+
+def _internal_agent_triage_actions(
+    runbook_actions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        action
+        for raw_action in runbook_actions
+        if (action := _record_from(raw_action))
+        and _is_internal_agent_triage_action(action)
+    )
+
+
+def _internal_agent_triage_disclosures(
+    answer: str,
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return answer units that expose an internal agent-triage workflow."""
+
+    internal_actions = _internal_agent_triage_actions(runbook_actions)
+    subject_patterns = tuple(
+        re.compile(
+            r"(?<!\w)"
+            + r"[\s_-]+".join(
+                re.escape(part)
+                for part in re.split(r"[\s_-]+", value)
+                if part
+            )
+            + r"(?!\w)",
+            re.IGNORECASE,
+        )
+        for action in internal_actions
+        for value in (
+            _string_from(action.get("label")),
+            _string_from(action.get("name")),
+        )
+        if value
+    )
+
+    def exposes_internal_triage(text: str) -> bool:
+        return bool(
+            _INTERNAL_AGENT_TRIAGE_DISCLOSURE_RE.search(text)
+            or any(pattern.search(text) for pattern in subject_patterns)
+        )
+
+    units = _grounding_answer_units(answer)
+    if not units:
+        return (answer.strip()[:500],) if answer.strip() and exposes_internal_triage(answer) else ()
+    return tuple(
+        text[:500]
+        for unit in units
+        if (text := _string_from(unit.get("text")))
+        and exposes_internal_triage(text)
+    )
+
+
+def _customer_prior_agent_context(
+    runs: list[dict[str, Any]],
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Drop old generated answers that could reintroduce internal workflow prose."""
+    return [
+        item
+        for item in _agent_chat_context(runs)
+        if not _internal_agent_triage_disclosures(
+            _string_from(item.get("answer")),
+            runbook_actions=runbook_actions,
+        )
+    ]
+
+
+def _strip_internal_agent_triage_disclosures(
+    answer: str,
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> str:
+    """Remove safe-but-internal triage status units before customer exposure.
+
+    Pending agent triage remains available to the action-state guard so an LLM
+    cannot claim that internal work has started. It is not a customer concern or
+    runbook action, though, and therefore must not be narrated in the reply.
+    """
+
+    internal_actions = _internal_agent_triage_actions(runbook_actions)
+    if not answer.strip() or not internal_actions:
+        return answer.strip()
+
+    def is_standalone_internal_status(unit_text: str, action: dict[str, Any]) -> bool:
+        for value in (
+            _string_from(action.get("label")),
+            _string_from(action.get("name")),
+        ):
+            if not value:
+                continue
+            subject_pattern = r"[\s_-]+".join(
+                re.escape(part)
+                for part in re.split(r"[\s_-]+", value)
+                if part
+            )
+            if re.fullmatch(
+                r"\s*(?:(?:additionally|also|currently|furthermore|moreover|"
+                r"please\s+note(?:\s+that)?)[,:]?\s+)?"
+                r"(?:the\s+pending\s+action\s*\(\s*"
+                + subject_pattern
+                + r"\s*\)|(?:the\s+)?"
+                + subject_pattern
+                + r")\s+(?:is|remains)\s+(?:currently\s+)?"
+                r"(?:pending(?:\s+(?:human\s+review|approval))?|"
+                r"awaiting\s+(?:human\s+review|approval)|"
+                r"under\s+human\s+review|unconfirmed)"
+                r"(?:\s+and\s+is\s+not\s+confirmed\s+as\s+started\s+or\s+completed)?"
+                r"[.!?]*\s*",
+                unit_text,
+                re.IGNORECASE,
+            ):
+                return True
+        return False
+
+    removable_spans = [
+        (int(unit.get("start", 0)), int(unit.get("end", 0)))
+        for unit in _grounding_answer_units(answer)
+        if any(
+            is_standalone_internal_status(
+                _string_from(unit.get("text")),
+                action,
+            )
+            for action in internal_actions
+        )
+    ]
+    if not removable_spans:
+        return answer.strip()
+    cursor = 0
+    retained: list[str] = []
+    for start, end in removable_spans:
+        retained.append(answer[cursor:start])
+        cursor = end
+    retained.append(answer[cursor:])
+    cleaned = "".join(retained)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned.strip()
+
+
 def repair_issue_automation_answer_action_state(
     *,
     issue: dict[str, Any],
@@ -5043,6 +5225,10 @@ def repair_issue_automation_answer_action_state(
         ),
     )
     repaired = _clean_action_repair_artifacts(repaired, language=language)
+    repaired = _strip_internal_agent_triage_disclosures(
+        repaired,
+        runbook_actions=guard_actions,
+    )
     repaired = _append_required_secret_delivery_guidance(
         ticket=ticket,
         answer=repaired,
@@ -5067,6 +5253,10 @@ def repair_issue_automation_answer_action_state(
         else clean_answer
     )
     candidate = _clean_action_repair_artifacts(candidate, language=language)
+    candidate = _strip_internal_agent_triage_disclosures(
+        candidate,
+        runbook_actions=guard_actions,
+    )
     # Notices are derived after the first repair pass, so make the exact final
     # customer text pass the same deterministic guard before grounding sees it.
     final_check = check_pending_action_claims(
@@ -5082,7 +5272,10 @@ def repair_issue_automation_answer_action_state(
         tool_evidence=_automatic_tool_evidence_records(ticket),
         repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
     )
-    return _clean_action_repair_artifacts(final_repair, language=language)
+    return _strip_internal_agent_triage_disclosures(
+        _clean_action_repair_artifacts(final_repair, language=language),
+        runbook_actions=guard_actions,
+    )
 
 
 def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:
@@ -5657,13 +5850,14 @@ def draft_issue_automation_answer(
             _automatic_ticket_context(issue),
             safety_assessment,
         )
+        customer_ticket_context = _customer_answer_ticket_context(ticket_context)
         allowed_business_identifiers = _allowed_business_identifiers(
             messages=messages,
-            ticket=ticket_context,
+            ticket=customer_ticket_context,
             articles=articles,
         )
         user_prompt = _AUTOMATION_USER_TEMPLATE.format(
-            ticket=_json(ticket_context),
+            ticket=_json(customer_ticket_context),
             account_intelligence=_json(
                 _automatic_account_context(
                     account_context,
@@ -5675,7 +5869,12 @@ def draft_issue_automation_answer(
             messages=_json(_automatic_message_context(messages)),
             reply_language=reply_language_name,
             knowledge_articles=_json(_article_context(articles)),
-            prior_agent_answers=_json(_agent_chat_context(prior_agent_runs)),
+            prior_agent_answers=_json(
+                _customer_prior_agent_context(
+                    prior_agent_runs,
+                    runbook_actions=ticket_context.get("runbookActions", []),
+                )
+            ),
             question=(question.strip() or "Prepare the best support answer and next step.")[:4_000],
         )
         clean_repair_obligations = tuple(
@@ -6118,6 +6317,24 @@ def assess_issue_automation_grounding(
             answer_obligations=answer_obligations,
             pending_action_claims=pending_action_check.claims,
             pending_actions=pending_action_check.pending_actions,
+        )
+    internal_state_disclosures = _internal_agent_triage_disclosures(
+        answer,
+        runbook_actions=ticket_evidence.get("runbookActions", []),
+    )
+    if internal_state_disclosures:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=INTERNAL_STATE_DISCLOSURE_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            unsupported_claims=internal_state_disclosures,
+            error="Candidate answer exposes internal agent-triage workflow state",
         )
     allowed_business_identifiers = _allowed_business_identifiers(
         messages=messages,

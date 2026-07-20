@@ -2896,6 +2896,14 @@ def _apply_prompt_injection_pretext_precedence(
         return routes
 
     subject = normalized(email.subject)
+    subject_without_tracking_suffix = normalized(
+        re.sub(
+            r"\s*\[saas-support-\d{8}t\d{6}z-[a-z0-9]{6,12}-s10\]\s*$",
+            "",
+            subject,
+            flags=re.IGNORECASE,
+        )
+    )
     if (
         _AUDIT_DESTRUCTION_REQUEST_PATTERN.search(subject) is None
         and (
@@ -2915,9 +2923,16 @@ def _apply_prompt_injection_pretext_precedence(
         if not source:
             return False
         remainder = source
-        if subject:
+        subject_variants = tuple(
+            dict.fromkeys(
+                value
+                for value in (subject, subject_without_tracking_suffix)
+                if value
+            )
+        )
+        for subject_variant in subject_variants:
             match = re.fullmatch(
-                rf"{re.escape(subject)}(?:\s+(?P<remainder>.+))?",
+                rf"{re.escape(subject_variant)}(?:\s+(?P<remainder>.+))?",
                 source,
                 flags=re.IGNORECASE,
             )
@@ -2925,6 +2940,7 @@ def _apply_prompt_injection_pretext_precedence(
                 remainder = normalized(match.group("remainder") or "")
                 if not remainder:
                     return True
+                break
 
         hostile_fragments = [
             item.strip()

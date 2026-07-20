@@ -1825,6 +1825,59 @@ def test_automation_prompt_does_not_receive_unrelated_account_signal_body(
     assert "issue-other" not in prompts[0]
 
 
+def test_automation_prompt_hides_internal_triage_but_keeps_customer_runbook_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(config_module, "read_config", lambda: {})
+    monkeypatch.setattr(llm_module, "resolve_effective_config", lambda config, _tenant, _project: config)
+    monkeypatch.setattr(llm_module, "create_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(usage_module, "llm_stage", lambda _stage: nullcontext())
+    monkeypatch.setattr(usage_module, "record_usage_from_result", lambda *_args, **_kwargs: None)
+
+    class FakeAutomationAgent:
+        def invoke(self, inputs: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+            assert config["run_name"] == "issue_automation_answer"
+            prompts.append(inputs["messages"][0]["content"])
+            return {
+                "structured_response": AutomationAnswerOutput(
+                    answer="Your shipment is in transit.",
+                    confidence="medium",
+                )
+            }
+
+    monkeypatch.setattr(issue_agent, "create_agent", lambda **_kwargs: FakeAutomationAgent())
+
+    result = issue_agent.draft_issue_automation_answer(
+        issue=_shipment_tool_issue_with_pending_actions(),
+        messages=[{"direction": "customer", "body": "Where is my shipment?"}],
+        question="Prepare the shipment-status answer.",
+        articles=[],
+        prior_agent_runs=[
+            {
+                "id": "old-internal",
+                "summary": "Agent triage is pending human review.",
+            },
+            {
+                "id": "old-customer-safe",
+                "summary": "The earlier shipment lookup was inconclusive.",
+            },
+        ],
+        tenant_id="tenant-1",
+        project_id="project-1",
+        fallback_answer="Human review required.",
+        fallback_confidence="low",
+    )
+
+    assert result.answer == "Your shipment is in transit."
+    assert len(prompts) == 1
+    assert "Agent triage" not in prompts[0]
+    assert "agent_triage" not in prompts[0]
+    assert "old-internal" not in prompts[0]
+    assert "old-customer-safe" in prompts[0]
+    assert "Open ticket" in prompts[0]
+
+
 def test_grounding_parent_deadline_covers_slow_two_pass_provider_execution() -> None:
     assert issue_agent.GROUNDING_AGENT_DEADLINE_SECONDS == 120
     assert issue_agent.GROUNDING_AGENT_DEADLINE_SECONDS >= (
@@ -2370,6 +2423,69 @@ def test_action_state_repair_ignores_unscoped_pending_triage() -> None:
     )
 
     assert repaired == answer
+
+
+def test_action_state_repair_removes_internal_triage_pending_disclosure() -> None:
+    answer = (
+        "The authentication incident is under investigation. "
+        "Additionally, agent triage is pending human review. "
+        "The incident began at 2026-07-19T07:40:00Z."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=_shipment_tool_issue_with_pending_actions(),
+        messages=[{"direction": "customer", "body": "What is the incident status?"}],
+        answer=answer,
+    )
+
+    assert repaired == (
+        "The authentication incident is under investigation. "
+        "The incident began at 2026-07-19T07:40:00Z."
+    )
+    assert "agent triage" not in repaired.casefold()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Agent triage and opening your support ticket are pending human review.",
+        (
+            "Do not touch the leaking battery, keep it away from heat, and agent "
+            "triage is pending human review."
+        ),
+    ],
+)
+def test_internal_triage_cleanup_preserves_mixed_customer_content(answer: str) -> None:
+    ticket = issue_agent._automatic_ticket_context(_shipment_tool_issue_with_pending_actions())
+
+    cleaned = issue_agent._strip_internal_agent_triage_disclosures(
+        answer,
+        runbook_actions=ticket["runbookActions"],
+    )
+
+    assert cleaned == answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "- Agent triage is pending human review.",
+        'Internal note: "Agent triage is pending human review."',
+        "Die Agenten-Triage wartet auf menschliche Prüfung.",
+        "Le triage interne reste en attente d’un contrôle humain.",
+    ],
+)
+def test_internal_triage_disclosure_detection_covers_formatting_and_locales(
+    answer: str,
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(_shipment_tool_issue_with_pending_actions())
+
+    disclosures = issue_agent._internal_agent_triage_disclosures(
+        answer,
+        runbook_actions=ticket["runbookActions"],
+    )
+
+    assert disclosures == (answer,)
 
 
 def test_action_state_repair_uses_concern_review_state_without_scoping_generic_triage() -> None:

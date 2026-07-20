@@ -207,9 +207,31 @@ runbooks:
   - key: fulfillment-partial-shipment
     purpose: Reconcile package facts and prepare missing-unit investigation or refund review.
     proposed_actions: [open_missing_unit_investigation, request_refund]
+    response_rules:
+      - >-
+        A false separate_parcel_confirmed lookup result proves only that no
+        second parcel is confirmed. Never infer or claim from that negative
+        evidence that units are missing.
+    required_guidance:
+      - >-
+        State the ordered units, every confirmed tracking number, and whether a
+        second parcel is confirmed only from the successful order lookup.
+      - >-
+        If no second parcel is confirmed, state explicitly that this does not
+        prove any units are missing.
   - key: fulfillment-b2b-sla
     purpose: Prepare P1 operations triage and separate commercial SLA review.
     proposed_actions: [open_p1_incident, request_executive_escalation, request_sla_credit]
+    required_guidance:
+      - >-
+        Address affected order IDs and quantities separately: repeat every
+        supplied value and explicitly request each missing field.
+      - >-
+        State the campaign deadline exactly when supplied; otherwise ask for
+        the deadline.
+      - >-
+        State the reported operational impact when supplied; otherwise ask for
+        the impact.
   - key: fulfillment-return-refund
     purpose: Explain the return route and prepare authorization and refund review.
     proposed_actions: [request_return_authorization, request_refund]

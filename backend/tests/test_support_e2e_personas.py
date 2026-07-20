@@ -349,6 +349,39 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
     assert fulfillment_runbooks[
         "fulfillment-delivery-exception"
     ].required_read_only_tools == ["fixture_shipment_zf_88310"]
+    assert fulfillment_runbooks["fulfillment-partial-shipment"].response_rules == [
+        (
+            "A false separate_parcel_confirmed lookup result proves only that no "
+            "second parcel is confirmed. Never infer or claim from that negative "
+            "evidence that units are missing."
+        )
+    ]
+    assert fulfillment_runbooks[
+        "fulfillment-partial-shipment"
+    ].required_guidance == [
+        (
+            "State the ordered units, every confirmed tracking number, and whether a "
+            "second parcel is confirmed only from the successful order lookup."
+        ),
+        (
+            "If no second parcel is confirmed, state explicitly that this does not "
+            "prove any units are missing."
+        ),
+    ]
+    assert fulfillment_runbooks["fulfillment-b2b-sla"].required_guidance == [
+        (
+            "Address affected order IDs and quantities separately: repeat every "
+            "supplied value and explicitly request each missing field."
+        ),
+        (
+            "State the campaign deadline exactly when supplied; otherwise ask for "
+            "the deadline."
+        ),
+        (
+            "State the reported operational impact when supplied; otherwise ask for "
+            "the impact."
+        ),
+    ]
     assert saas_cases["S03"].expected.minimum_concern_count == 1
     assert sum(
         len(concern.answer_obligations) for concern in saas_cases["S03"].concerns
@@ -488,6 +521,42 @@ def test_e04_seeds_subsumption_and_required_lookup_contracts() -> None:
     assert {tool["name"] for tool in frontmatter["tools"]} == {
         "fixture_shipment_zf_88310"
     }
+
+
+def test_fulfillment_reply_quality_constraints_reach_runtime_runbooks() -> None:
+    persona = next(
+        item for item in load_personas(PERSONA_DIR) if item.id == "fulfillment"
+    )
+    runbooks = {runbook.key: runbook for runbook in persona.runbooks}
+    partial_shipment = yaml.safe_load(
+        build_intent_content(
+            persona,
+            "fulfillment-partial-shipment",
+            "https://api.mantly.io",
+        ).split("---", 2)[1]
+    )
+    b2b_sla = yaml.safe_load(
+        build_intent_content(
+            persona,
+            "fulfillment-b2b-sla",
+            "https://api.mantly.io",
+        ).split("---", 2)[1]
+    )
+
+    assert partial_shipment["response"]["response_rules"][1:] == runbooks[
+        "fulfillment-partial-shipment"
+    ].response_rules
+    assert partial_shipment["response"]["required_guidance"] == runbooks[
+        "fulfillment-partial-shipment"
+    ].required_guidance
+    assert len(partial_shipment["response"]["required_guidance"]) == 2
+    assert partial_shipment["response"]["required_guidance"][1].endswith(
+        "does not prove any units are missing."
+    )
+    assert b2b_sla["response"]["required_guidance"] == runbooks[
+        "fulfillment-b2b-sla"
+    ].required_guidance
+    assert len(b2b_sla["response"]["required_guidance"]) == 3
 
 
 def test_pending_actions_must_belong_to_a_matched_runbook() -> None:

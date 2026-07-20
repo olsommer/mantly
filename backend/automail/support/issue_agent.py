@@ -1822,6 +1822,7 @@ def _uncovered_knowledge_request_items(
     items: tuple[dict[str, str], ...],
     answer: str,
     assessments: list[KnowledgeRequestItemAssessment],
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
 ) -> tuple[dict[str, str], ...]:
     """Accept only unique exact answer spans with enough item-specific topic proof."""
     assessments_by_id: dict[str, list[KnowledgeRequestItemAssessment]] = {}
@@ -1834,7 +1835,10 @@ def _uncovered_knowledge_request_items(
         if len(candidates) != 1:
             uncovered.append(item)
             continue
-        excerpt = candidates[0].answer_excerpt.strip()
+        excerpt = _strip_internal_citation_markers(
+            candidates[0].answer_excerpt,
+            internal_citation_ids=internal_citation_ids,
+        ).strip()
         if not excerpt or excerpt not in answer or not _knowledge_request_excerpt_matches(item, excerpt):
             uncovered.append(item)
     return tuple(uncovered)
@@ -1857,12 +1861,14 @@ def _repair_knowledge_request_item_coverage(
     question: str,
     items: tuple[dict[str, str], ...],
     assessments: list[KnowledgeRequestItemAssessment],
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
 ) -> tuple[str, tuple[dict[str, str], ...]]:
     """Fail closed per omitted item by appending one explicit evidence-unknown result."""
     uncovered = _uncovered_knowledge_request_items(
         items=items,
         answer=answer,
         assessments=assessments,
+        internal_citation_ids=internal_citation_ids,
     )
     if not uncovered:
         return answer, ()
@@ -2907,17 +2913,121 @@ def _automatic_account_context(
     return safe
 
 
+_LABELED_INTERNAL_CITATION_MARKER_RE = re.compile(
+    r"""
+    (?P<leading>[ \t]*)
+    (?:
+        \(\s*(?P<paren_label>
+            cited\s+as|citation(?:\s+(?:id|reference))?|source\s+id|evidence\s+id
+        )\s*(?::|\#)?\s*(?P<paren_value>[^()\r\n]{1,160}?)\s*\)
+        |
+        \[\s*(?P<bracket_label>
+            cited\s+as|citation(?:\s+(?:id|reference))?|source\s+id|evidence\s+id
+        )\s*(?::|\#)?\s*(?P<bracket_value>[^\[\]\r\n]{1,160}?)\s*\]
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_BARE_INTERNAL_CITATION_MARKER_RE = re.compile(
+    r"(?P<leading>[ \t]*)(?:\(\s*(?P<paren>[^()\s]{1,160})\s*\)|\[\s*(?P<bracket>[^\[\]\s]{1,160})\s*\])"
+)
+_INTERNAL_REFERENCE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{1,159}")
+_INTERNAL_REFERENCE_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_INTERNAL_REFERENCE_HASH_RE = re.compile(r"[0-9a-f]{32,128}", re.IGNORECASE)
+_INTERNAL_REFERENCE_NAMESPACE_RE = re.compile(
+    r"(?:article|citation|context|evidence|knowledge|source|tool):[A-Za-z0-9._:/-]{1,150}",
+    re.IGNORECASE,
+)
+_READABLE_BUSINESS_REFERENCE_RE = re.compile(r"[A-Z][A-Z0-9]{1,31}-[0-9]{1,32}")
+
+
+def _unquote_internal_reference(value: str) -> str:
+    clean = value.strip()
+    if len(clean) >= 2 and clean[0] == clean[-1] and clean[0] in {'"', "'", "`"}:
+        return clean[1:-1].strip()
+    return clean
+
+
+def _looks_like_opaque_internal_reference(value: str) -> bool:
+    """Recognize opaque runtime IDs without treating readable citations as internal."""
+    if _INTERNAL_REFERENCE_UUID_RE.fullmatch(value):
+        return True
+    if _INTERNAL_REFERENCE_HASH_RE.fullmatch(value):
+        return True
+    if _INTERNAL_REFERENCE_NAMESPACE_RE.fullmatch(value):
+        return True
+    return bool(
+        len(value) == 15
+        and value.isascii()
+        and value.isalnum()
+        and value.lower() == value
+        and any(char.isalpha() for char in value)
+        and any(char.isdigit() for char in value)
+    )
+
+
+def _looks_like_readable_business_reference(value: str) -> bool:
+    """Keep incident, order, ticket, and standards references visible to readers."""
+    return bool(_READABLE_BUSINESS_REFERENCE_RE.fullmatch(value))
+
+
+def _strip_internal_citation_markers(
+    value: str,
+    *,
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Remove machine citation markers while preserving readable source prose."""
+    known_ids = {
+        clean.casefold()
+        for raw_id in internal_citation_ids
+        if (clean := _unquote_internal_reference(_string_from(raw_id)))
+    }
+
+    def is_internal(raw_value: str) -> bool:
+        candidate = _unquote_internal_reference(raw_value)
+        if not candidate or not _INTERNAL_REFERENCE_TOKEN_RE.fullmatch(candidate):
+            return False
+        if _looks_like_readable_business_reference(candidate):
+            return False
+        return candidate.casefold() in known_ids or _looks_like_opaque_internal_reference(candidate)
+
+    def strip_labeled(match: re.Match[str]) -> str:
+        marker_value = match.group("paren_value") or match.group("bracket_value") or ""
+        return "" if is_internal(marker_value) else match.group(0)
+
+    def strip_bare(match: re.Match[str]) -> str:
+        marker_value = match.group("paren") or match.group("bracket") or ""
+        candidate = _unquote_internal_reference(marker_value)
+        return (
+            ""
+            if candidate.casefold() in known_ids
+            and not _looks_like_readable_business_reference(candidate)
+            else match.group(0)
+        )
+
+    clean = _LABELED_INTERNAL_CITATION_MARKER_RE.sub(strip_labeled, value)
+    return _BARE_INTERNAL_CITATION_MARKER_RE.sub(strip_bare, clean)
+
+
 def _clean_answer(
     value: str,
     *,
     messages: list[dict[str, Any]] | None = None,
     signer_name: str = "",
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
 ) -> str:
     clean = value.strip()
     if clean.startswith("```"):
         clean = clean.strip("`").strip()
         if clean.lower().startswith("text"):
             clean = clean[4:].strip()
+    clean = _strip_internal_citation_markers(
+        clean,
+        internal_citation_ids=internal_citation_ids,
+    )
     return clean_reply_signoff(
         clean[:6000],
         messages=messages,
@@ -3422,10 +3532,15 @@ def _is_isolated_service_incident_temporal_answer(
                 )
             )
             if status.casefold() == "investigating":
-                patterns.append(
-                    rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
-                    rf"affecting\s+the\s+{escaped_region}\s+{escaped_service}\s+service,\s+"
-                    rf"and\s+started\s+at\s+{timestamp}\.?"
+                patterns.extend(
+                    (
+                        rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
+                        rf"affecting\s+the\s+{escaped_region}\s+{escaped_service}\s+service,\s+"
+                        rf"and\s+started\s+at\s+{timestamp}\.?",
+                        rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
+                        rf"affecting\s+the\s+{escaped_service}\s+service\s+in\s+(?:the\s+)?"
+                        rf"{escaped_region}(?:\s+region)?,\s+and\s+started\s+at\s+{timestamp}\.?",
+                    )
                 )
         if any(re.fullmatch(pattern, linked_text, flags=re.IGNORECASE) for pattern in patterns):
             return True
@@ -4592,21 +4707,6 @@ def draft_issue_agent_answer(
             raise ValueError("Knowledge agent returned no structured response")
         if not workspace.read_paths:
             raise ValueError("Knowledge agent did not inspect the workspace")
-        answer = _clean_answer(
-            structured.answer,
-            messages=messages,
-        )
-        if not answer:
-            raise ValueError("Issue agent returned an empty answer")
-        answer, uncovered_request_items = _repair_knowledge_request_item_coverage(
-            answer=answer,
-            question=clean_question,
-            items=request_items,
-            assessments=structured.request_item_assessments,
-        )
-        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
-        if missing_safety:
-            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
         citation_ids = workspace.validated_citation_ids(
             structured.citation_ids,
             structured.citation_paths,
@@ -4615,6 +4715,23 @@ def draft_issue_agent_answer(
             structured.citation_ids,
             structured.citation_paths,
         )
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+            internal_citation_ids=citation_ids,
+        )
+        if not answer:
+            raise ValueError("Issue agent returned an empty answer")
+        answer, uncovered_request_items = _repair_knowledge_request_item_coverage(
+            answer=answer,
+            question=clean_question,
+            items=request_items,
+            assessments=structured.request_item_assessments,
+            internal_citation_ids=citation_ids,
+        )
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
+        if missing_safety:
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
         truncated_citation_ids = workspace.truncated_citation_ids(citation_ids)
         confidence = structured.confidence
         articles_by_id = {
@@ -4949,17 +5066,6 @@ def draft_issue_automation_answer(
         structured = response.get("structured_response") if isinstance(response, dict) else None
         if not isinstance(structured, AutomationAnswerOutput):
             raise ValueError("Issue automation returned no structured response")
-        answer = _clean_answer(
-            structured.answer,
-            messages=messages,
-        )
-        if not answer:
-            raise ValueError("Issue automation returned an empty answer")
-        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
-        if missing_safety:
-            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
-        if _detected_supported_language(answer) != reply_language:
-            raise ValueError(f"Automatic answer language mismatch: expected {reply_language_name}")
         available_ids = {_string_from(article.get("id")) for article in articles if _string_from(article.get("id"))}
         citation_ids = tuple(
             dict.fromkeys(
@@ -4968,6 +5074,18 @@ def draft_issue_automation_answer(
                 if article_id in available_ids
             )
         )
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+            internal_citation_ids=citation_ids,
+        )
+        if not answer:
+            raise ValueError("Issue automation returned an empty answer")
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
+        if missing_safety:
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
+        if _detected_supported_language(answer) != reply_language:
+            raise ValueError(f"Automatic answer language mismatch: expected {reply_language_name}")
         confidence = structured.confidence
         if confidence == "high" and not citation_ids:
             confidence = "medium"

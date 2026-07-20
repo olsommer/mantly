@@ -646,14 +646,18 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
             "cat knowledge/articles/0001--shipping-policy.json",
         ],
         output=KnowledgeAgentOutput(
-            answer="Your parcel should arrive within seven business days. Please send the tracking number if it remains delayed.",
+            answer=(
+                "Your parcel should arrive within seven business days. "
+                "(Cited as shipping-policy) Please send the tracking number if it remains delayed."
+            ),
             confidence="high",
             citation_ids=["shipping-policy", "shipping-policy"],
             citation_paths=["knowledge/articles/0001--shipping-policy.json"],
             missing_information=[" Tracking number "],
             request_item_assessments=[
                 _knowledge_request_assessment(
-                    "Your parcel should arrive within seven business days."
+                    "Your parcel should arrive within seven business days. "
+                    "(Cited as shipping-policy)"
                 )
             ],
         ),
@@ -663,6 +667,10 @@ def test_draft_uses_create_agent_structured_output_and_validated_citation(
     result = _draft()
 
     assert result.generation_mode == "knowledge_agent"
+    assert result.answer == (
+        "Your parcel should arrive within seven business days. "
+        "Please send the tracking number if it remains delayed."
+    )
     assert result.confidence == "high"
     assert result.citation_ids == ("shipping-policy",)
     assert result.missing_information == ("Tracking number",)
@@ -1069,6 +1077,72 @@ def test_draft_removes_terminal_thank_you_closing(
     assert result.answer == "The motor claim is ready for lawyer review."
 
 
+@pytest.mark.parametrize(
+    ("answer", "citation_ids", "expected"),
+    [
+        (
+            "The statutory capital is CHF 20,000. (Cited as 8v3vkmkgmsk7s03)",
+            (),
+            "The statutory capital is CHF 20,000.",
+        ),
+        (
+            "Use the reviewed policy [Citation ID: shipping-policy].",
+            ("shipping-policy",),
+            "Use the reviewed policy.",
+        ),
+        (
+            "The rule applies [shipping-policy] in this case.",
+            ("shipping-policy",),
+            "The rule applies in this case.",
+        ),
+        (
+            "The lookup succeeded. (Evidence ID: tool:concern-1:matter_lookup)",
+            (),
+            "The lookup succeeded.",
+        ),
+        (
+            "The request concerns (INC-204).",
+            ("INC-204",),
+            "The request concerns (INC-204).",
+        ),
+        (
+            "The protocol is identified for readers as (Citation ID: RFC-9110).",
+            ("RFC-9110",),
+            "The protocol is identified for readers as (Citation ID: RFC-9110).",
+        ),
+    ],
+)
+def test_clean_answer_removes_only_internal_citation_markers(
+    answer: str,
+    citation_ids: tuple[str, ...],
+    expected: str,
+) -> None:
+    assert (
+        issue_agent._clean_answer(
+            answer,
+            internal_citation_ids=citation_ids,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Swiss law supports this result (cited as Swiss Code of Obligations, Art. 772).",
+        "The protocol is identified for readers as (Citation ID: RFC-9110).",
+        "The standard defines the behavior [Smith 2024, p. 17].",
+        "See RFC 9110, section 9.2, for the human-readable source.",
+        "The customer described order 8v3vkmkgmsk7s03 in parentheses (order reference).",
+        "The phrase is cited as precedent in the submission.",
+    ],
+)
+def test_clean_answer_preserves_human_readable_citations_and_business_prose(
+    answer: str,
+) -> None:
+    assert issue_agent._clean_answer(answer) == answer
+
+
 def test_draft_real_agent_completes_at_configured_tool_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1176,6 +1250,29 @@ def test_draft_rejects_hallucinated_citations_and_downgrades_high_confidence(
     assert result.confidence == "medium"
 
 
+def test_draft_does_not_strip_business_reference_claimed_as_unvalidated_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = "The request concerns (INC-204)."
+    _patch_agent_dependencies(
+        monkeypatch,
+        commands=["cat README.md request.json ticket/ticket.json"],
+        output=KnowledgeAgentOutput(
+            answer=answer,
+            confidence="high",
+            citation_ids=["INC-204"],
+            request_item_assessments=[_knowledge_request_assessment(answer)],
+        ),
+    )
+
+    result = _draft()
+
+    assert result.generation_mode == "knowledge_agent"
+    assert result.answer == answer
+    assert result.citation_ids == ()
+    assert result.confidence == "medium"
+
+
 def test_draft_downgrades_high_confidence_for_unreviewed_citation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1234,9 +1331,18 @@ def test_automation_draft_uses_structured_selected_citations(
             captured.update(inputs=inputs, config=config)
             return {
                 "structured_response": AutomationAnswerOutput(
-                    answer="Your parcel should arrive within seven business days.",
+                    answer=(
+                        "The request concerns (INC-204). "
+                        "Your parcel should arrive within seven business days. "
+                        "[Citation reference: shipping-policy]"
+                    ),
                     confidence="high",
-                    citation_ids=["shipping-policy", "invented-policy", "shipping-policy"],
+                    citation_ids=[
+                        "shipping-policy",
+                        "INC-204",
+                        "invented-policy",
+                        "shipping-policy",
+                    ],
                     missing_information=["Tracking number"],
                 )
             }
@@ -1259,7 +1365,10 @@ def test_automation_draft_uses_structured_selected_citations(
         fallback_confidence="low",
     )
 
-    assert result.answer == "Your parcel should arrive within seven business days."
+    assert result.answer == (
+        "The request concerns (INC-204). "
+        "Your parcel should arrive within seven business days."
+    )
     assert result.confidence == "high"
     assert result.generation_mode == "llm"
     assert result.citation_ids == ("shipping-policy",)
@@ -4489,6 +4598,10 @@ def test_grounding_does_not_override_not_covered_fixture_tool_timestamp(
             "This incident is currently under investigation, affecting the EU authentication "
             "service, and started at 2026-07-19T07:40:00Z."
         ),
+        (
+            "This incident is currently under investigation, affecting the authentication "
+            "service in the EU region, and started at 2026-07-19T07:40:00Z."
+        ),
     ],
 )
 def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
@@ -4615,6 +4728,31 @@ def test_grounding_service_incident_timestamp_recovery_requires_answered_output(
         (
             "This incident is currently under review, affecting the EU authentication service, "
             "and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the authentication "
+            "service in the US region, and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the billing service in "
+            "the EU region, and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the authentication "
+            "service in the EU region, and the service started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the authentication "
+            "service in the EU region, and started at 2026-07-19T07:40:00Z, while an SLA credit "
+            "is being approved."
+        ),
+        (
+            "This incident is currently under review, affecting the authentication service in "
+            "the EU region, and started at 2026-07-19T07:40:00Z."
+        ),
+        (
+            "This incident is currently under investigation, affecting the authentication "
+            "service in the EU region, and started at 2026-07-19T08:40:00Z."
         ),
     ],
 )

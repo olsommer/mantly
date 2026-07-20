@@ -11566,6 +11566,106 @@ def _agent_auto_send_blocked_reason(
     return "" if grounding_verified else "grounding_check_failed"
 
 
+_GROUNDING_REPAIR_INLINE_NOUN_FRAGMENT_RE = re.compile(
+    r"(?P<terminal>[.!?])(?P<before>[ \t]+)"
+    r"(?P<fragment>[A-Z][A-Za-z'-]*(?:[ \t]+[A-Za-z][A-Za-z'-]*){0,3})\."
+    r"(?P<after>[ \t]+)(?P<next>[A-Z][^.!?\n]{0,300}[.!?])"
+)
+_GROUNDING_REPAIR_WORD_RE = re.compile(r"[A-Za-z]+(?:['-][A-Za-z]+)*")
+_GROUNDING_REPAIR_NOUN_CLAIM_RE = re.compile(
+    r"(?:A|An)\s+"
+    r"(?P<noun>[A-Za-z][A-Za-z'-]*(?:[ \t]+[A-Za-z][A-Za-z'-]*){0,3})\."
+)
+_GROUNDING_REPAIR_SAFE_NOUN_REDUCTIONS = frozenset(
+    {
+        (("return", "reference"), ("reference",)),
+    }
+)
+_GROUNDING_REPAIR_UNAVAILABLE_STATE_RE = re.compile(
+    r"\b(?:is|are|was|were|remain|remains)\s+(?:still\s+)?(?:"
+    r"not\s+(?:yet\s+)?(?:available|confirmed|established|issued|known|provided)|"
+    r"pending|unavailable|unconfirmed|unknown)\b|"
+    r"\b(?:has|have)\s+not\s+(?:yet\s+)?been\s+"
+    r"(?:confirmed|established|issued|provided)\b|"
+    r"\bcannot\s+(?:yet\s+)?be\s+(?:confirmed|established|issued|provided)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_grounding_repair_orphan_fragments(
+    answer: str,
+    *,
+    unsupported_claims: tuple[str, ...],
+) -> str:
+    """Remove only inline noun fragments left from rejected answer units.
+
+    A coverage rewrite can occasionally reduce a rejected noun phrase to one
+    bare noun immediately before a combined unavailable-state replacement.
+    Require an explicitly safe noun reduction, then require that noun to be the
+    final conjunct of the replacement. Line headings, multiword phrases, and
+    substantive sentences remain untouched; grounding still validates the
+    resulting answer.
+    """
+
+    unsupported_noun_phrases = tuple(
+        words
+        for claim in unsupported_claims
+        if (
+            match := _GROUNDING_REPAIR_NOUN_CLAIM_RE.fullmatch(claim.strip())
+        )
+        and (
+            words := tuple(
+                word.casefold()
+                for word in _GROUNDING_REPAIR_WORD_RE.findall(match.group("noun"))
+            )
+        )
+    )
+    if not answer or not unsupported_noun_phrases:
+        return answer
+
+    def replace(match: re.Match[str]) -> str:
+        fragment_words = tuple(
+            word.casefold()
+            for word in _GROUNDING_REPAIR_WORD_RE.findall(match.group("fragment"))
+        )
+        if not any(
+            (noun_phrase, fragment_words)
+            in _GROUNDING_REPAIR_SAFE_NOUN_REDUCTIONS
+            for noun_phrase in unsupported_noun_phrases
+        ):
+            return match.group(0)
+        next_sentence = match.group("next")
+        unavailable_state = _GROUNDING_REPAIR_UNAVAILABLE_STATE_RE.search(next_sentence)
+        subject = next_sentence[: unavailable_state.start()] if unavailable_state else ""
+        subject_words = (
+            tuple(
+                word.casefold()
+                for word in _GROUNDING_REPAIR_WORD_RE.findall(subject)
+            )
+            if unavailable_state
+            else ()
+        )
+        if (
+            not unavailable_state
+            or len(subject_words) < len(fragment_words)
+            or subject_words[-len(fragment_words) :] != fragment_words
+            or not re.search(
+                rf"\band[ \t]+{re.escape(match.group('fragment'))}[ \t]*$",
+                subject,
+                re.IGNORECASE,
+            )
+        ):
+            return match.group(0)
+        return match.group("terminal") + match.group("before") + next_sentence
+
+    cleaned = answer
+    while True:
+        updated = _GROUNDING_REPAIR_INLINE_NOUN_FRAGMENT_RE.sub(replace, cleaned)
+        if updated == cleaned:
+            return cleaned
+        cleaned = updated
+
+
 def _record_agent_message(
     *,
     issue_id: str,
@@ -12081,6 +12181,10 @@ def _create_issue_agent_answer(
                     issue=issue,
                     messages=messages,
                     answer=draft.answer,
+                )
+                answer = _clean_grounding_repair_orphan_fragments(
+                    answer,
+                    unsupported_claims=grounding_assessment.unsupported_claims,
                 )
                 confidence = draft.confidence
                 if draft.requires_human:

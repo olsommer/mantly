@@ -666,6 +666,17 @@ def test_prompt_injection_pretext_suppresses_false_audit_route(
     assert corrected == [routes[1]]
 
 
+def test_prompt_injection_pretext_suppresses_live_subject_only_audit_route() -> None:
+    email = _prompt_injection_pretext_email()
+    routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": email.subject}),
+        routes[1],
+    ]
+
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == [routes[1]]
+
+
 def test_prompt_injection_pretext_preserves_independent_audit_concern() -> None:
     audit_question = "Separately, can workspace admins export our audit events as CSV?"
     email = _prompt_injection_pretext_email(extra_body=audit_question)
@@ -703,8 +714,12 @@ def test_prompt_injection_pretext_preserves_subject_only_audit_concern(
 ) -> None:
     email = _prompt_injection_pretext_email(subject=subject)
     routes = _prompt_injection_pretext_routes(email)
+    routed = [
+        routes[0].model_copy(update={"source_text": email.subject}),
+        routes[1],
+    ]
 
-    assert _apply_prompt_injection_pretext_precedence(email, routes) == routes
+    assert _apply_prompt_injection_pretext_precedence(email, routed) == routed
 
 
 def test_prompt_injection_pretext_preserves_audit_only_email() -> None:

@@ -473,6 +473,185 @@ def test_channel_autopilot_repairs_pure_incomplete_answer_once(monkeypatch):
     }
 
 
+def test_channel_grounding_repair_removes_live_e10_orphan_fragment(monkeypatch):
+    reply_calls, grounding_calls = _stub_channel_agent_answer(
+        monkeypatch,
+        verified=True,
+    )
+    draft_calls: list[dict] = []
+    original_answer = (
+        "Please do not ship the item directly today. A return reference. "
+        "A return address is not yet confirmed."
+    )
+    repaired_answer = (
+        "Please do not ship the item directly today. Reference. "
+        "A return address and reference are not yet confirmed."
+    )
+    cleaned_answer = (
+        "Please do not ship the item directly today. "
+        "A return address and reference are not yet confirmed."
+    )
+    unsupported = ("A return reference.",)
+    uncovered = ("Give the return address and reference",)
+
+    def fake_draft(**kwargs):
+        draft_calls.append(kwargs)
+        return IssueAgentDraft(
+            answer=original_answer if len(draft_calls) == 1 else repaired_answer,
+            confidence="high",
+            generation_mode="llm",
+        )
+
+    def fake_grounding(**kwargs):
+        grounding_calls.append(kwargs)
+        if len(grounding_calls) == 1:
+            return AutomationGroundingAssessment(
+                verified=False,
+                status="failed",
+                reason_code="incomplete_answer",
+                checked_at="2026-07-20T08:00:00Z",
+                answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+                uncovered_obligations=uncovered,
+                unsupported_claims=unsupported,
+                provider="test",
+                model="grounding-model",
+            )
+        return AutomationGroundingAssessment(
+            verified=True,
+            status="passed",
+            reason_code="",
+            checked_at="2026-07-20T08:00:01Z",
+            answer_sha256=issue_agent.grounding_text_sha256(kwargs["answer"]),
+            provider="test",
+            model="grounding-model",
+        )
+
+    monkeypatch.setattr(issues, "draft_issue_automation_answer", fake_draft)
+    monkeypatch.setattr(issues, "assess_issue_automation_grounding", fake_grounding)
+    grounding_calls.clear()
+
+    result = issues.create_issue_agent_answer(
+        "issue1",
+        tenant_id="tenant1",
+        project_id="project1",
+        author_email="automation",
+        approval_required=True,
+        auto_send=False,
+        automation_context={"source": "channel_autopilot"},
+        use_knowledge_agent=False,
+    )
+
+    assert result is not None
+    assert [call["answer"] for call in grounding_calls] == [
+        original_answer,
+        cleaned_answer,
+    ]
+    assert reply_calls[0]["body"] == cleaned_answer
+    assert result["groundingGate"]["coverageRepair"]["repairedAnswerSha256"] == (
+        issue_agent.grounding_text_sha256(cleaned_answer)
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "unsupported"),
+    [
+        (
+            (
+                "Please do not ship today.\n\nReference.\n\n"
+                "A return address and reference are not yet confirmed."
+            ),
+            ("A return reference.",),
+        ),
+        (
+            (
+                "Please do not ship today. Reference. "
+                "Use reference RET-42 on the approved return label."
+            ),
+            ("A return reference.",),
+        ),
+        (
+            (
+                "Please do not ship today. Reference is pending. "
+                "A return address and reference are not yet confirmed."
+            ),
+            ("A return reference.",),
+        ),
+        (
+            (
+                "Please do not ship today. Reference. "
+                "A return address and reference are not yet confirmed."
+            ),
+            ("A return label.",),
+        ),
+        (
+            (
+                "Please do not ship today. Reference. "
+                "The reference identifies a refund that is still pending."
+            ),
+            ("A return reference.",),
+        ),
+        (
+            (
+                "We will keep you updated. Escalate this incident. "
+                "The instruction to escalate this incident is not yet confirmed."
+            ),
+            ("Escalate this incident.",),
+        ),
+        (
+            (
+                "Do not touch the damaged parcel. Contact emergency services. "
+                "The instruction to contact emergency services is not yet confirmed."
+            ),
+            ("Contact emergency services.",),
+        ),
+        (
+            (
+                "Please do not ship today. Reference. "
+                "A return address and reference are not yet confirmed."
+            ),
+            ("Reference.",),
+        ),
+        (
+            (
+                "Please do not ship today. Return reference. "
+                "The return reference has not yet been issued."
+            ),
+            ("A return reference.",),
+        ),
+        (
+            (
+                "Keep clear of the damaged parcel. Stop. "
+                "A safety hold and stop are not yet confirmed."
+            ),
+            ("A safety stop.",),
+        ),
+    ],
+)
+def test_grounding_repair_orphan_cleanup_preserves_unanchored_content(
+    answer,
+    unsupported,
+):
+    assert issues._clean_grounding_repair_orphan_fragments(
+        answer,
+        unsupported_claims=unsupported,
+    ) == answer
+
+
+def test_grounding_repair_orphan_cleanup_removes_only_anchored_inline_fragment():
+    answer = (
+        "Return policy applies. Reference. "
+        "A return address and reference are not yet confirmed. Keep the item packaged."
+    )
+
+    assert issues._clean_grounding_repair_orphan_fragments(
+        answer,
+        unsupported_claims=("A return reference.",),
+    ) == (
+        "Return policy applies. "
+        "A return address and reference are not yet confirmed. Keep the item packaged."
+    )
+
+
 def test_channel_autopilot_repairs_s02_factual_corruption_once(monkeypatch):
     reply_calls, grounding_calls = _stub_channel_agent_answer(
         monkeypatch,

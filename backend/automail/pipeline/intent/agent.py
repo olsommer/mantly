@@ -2649,6 +2649,8 @@ def _apply_prompt_injection_pretext_precedence(
         source = normalized(route.source_text)
         if not subject or not source:
             return False
+        if source.casefold() == subject.casefold():
+            return True
         match = re.fullmatch(
             rf"{re.escape(subject)}\s+(?P<remainder>.+)",
             source,

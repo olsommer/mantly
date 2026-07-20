@@ -17,6 +17,7 @@ import re
 import string
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1362,8 +1363,11 @@ def _pending_action_audit(
     issue: dict[str, Any], expected_action_names: list[str]
 ) -> tuple[bool, bool, dict[str, Any], set[str]]:
     actions = [item for item in issue.get("actionExecutions") or [] if isinstance(item, dict)]
-    actual = {_action_name(item) for item in actions if _action_name(item)}
-    expected = set(expected_action_names)
+    actual_names = [_action_name(item) for item in actions if _action_name(item)]
+    actual_counts = Counter(actual_names)
+    expected_counts = Counter(expected_action_names)
+    actual = set(actual_counts)
+    expected = set(expected_counts)
     unsafe_statuses = {
         _action_name(item): str(item.get("status") or "")
         for item in actions
@@ -1378,11 +1382,18 @@ def _pending_action_audit(
     evidence = {
         "expected": sorted(expected),
         "actual": sorted(actual),
+        "expectedCounts": dict(sorted(expected_counts.items())),
+        "actualCounts": dict(sorted(actual_counts.items())),
+        "duplicates": {
+            name: count
+            for name, count in sorted(actual_counts.items())
+            if count > expected_counts.get(name, 0)
+        },
         "unsafeStatuses": unsafe_statuses,
         "unsafeWebhooks": unsafe_webhooks,
     }
     return (
-        expected == actual and not unsafe_statuses,
+        expected_counts == actual_counts and not unsafe_statuses,
         not unsafe_webhooks,
         evidence,
         actual,
@@ -1624,6 +1635,14 @@ def _run_follow_ups(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for index, follow_up in enumerate(case.follow_ups, start=1):
+        before_issue = _fetch_issue(api, target, original_issue_id)
+        before_action_instances = {
+            str(action.get("id") or ""): _action_name(action)
+            for action in before_issue.get("actionExecutions") or []
+            if isinstance(action, dict)
+            and str(action.get("id") or "")
+            and _action_name(action)
+        }
         message_id = f"e2e-msg-{token}-f{index}"
         event_id = f"e2e-event-{token}-f{index}"
         payload = _message_payload(
@@ -1694,6 +1713,16 @@ def _run_follow_ups(
                 if not source_matches(source_message_id):
                     stale_pending_reply_ids.append(str(reply.get("id") or ""))
         approval_state_fresh = not stale_pending_reply_ids
+        after_action_instances = {
+            str(action.get("id") or ""): _action_name(action)
+            for action in issue.get("actionExecutions") or []
+            if isinstance(action, dict)
+            and str(action.get("id") or "")
+            and _action_name(action)
+        }
+        action_instances_unchanged = (
+            before_action_instances == after_action_instances
+        )
         results.append(
             {
                 "id": follow_up.id,
@@ -1704,7 +1733,15 @@ def _run_follow_ups(
                 "stalePendingReplyIds": stale_pending_reply_ids,
                 "supersededReplyIds": superseded_reply_ids,
                 "approvalStateFresh": approval_state_fresh,
-                "passed": same_ticket and bool(issue_id) and approval_state_fresh,
+                "actionInstancesBefore": before_action_instances,
+                "actionInstancesAfter": after_action_instances,
+                "actionInstancesUnchanged": action_instances_unchanged,
+                "passed": (
+                    same_ticket
+                    and bool(issue_id)
+                    and approval_state_fresh
+                    and action_instances_unchanged
+                ),
             }
         )
     return results

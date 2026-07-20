@@ -69,7 +69,7 @@ GROUNDING_MODEL_THINKING_BUDGET = 1024
 # headroom for both calls while retaining the same bounded, fail-closed deadline.
 GROUNDING_AGENT_DEADLINE_SECONDS = 120
 GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v9"
+GROUNDING_GATE_VERSION = "automation-grounding-v10"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
@@ -2735,6 +2735,28 @@ def _automatic_runbook_concern_context(
     return [], [], {}
 
 
+def _bounded_scope_values(*values: Any) -> tuple[str, ...]:
+    """Normalize bounded singular/list scope metadata without inventing IDs."""
+
+    normalized: list[str] = []
+    for value in values:
+        raw_values = value if isinstance(value, list) else [value]
+        for raw_value in raw_values[:20]:
+            clean_value = _string_from(raw_value)
+            if clean_value and clean_value not in normalized:
+                normalized.append(clean_value)
+    return tuple(normalized)
+
+
+def _runbook_action_concern_ids(action: dict[str, Any]) -> tuple[str, ...]:
+    return _bounded_scope_values(
+        action.get("concernIds"),
+        action.get("concern_ids"),
+        action.get("concernId"),
+        action.get("concern_id"),
+    )
+
+
 def _automatic_runbook_action_context(
     issue: dict[str, Any],
     *,
@@ -2764,18 +2786,20 @@ def _automatic_runbook_action_context(
             continue
         automation_context = _record_from(metadata.get("automationContext") or metadata.get("automation_context"))
         # Channel-created actions keep their message scope in automationContext.
-        execution_source_message_ids = {
-            value
-            for value in (
-                _string_from(metadata.get("sourceMessageId") or metadata.get("source_message_id")),
-                _string_from(metadata.get("emailId") or metadata.get("email_id")),
-                _string_from(metadata.get("messageId") or metadata.get("message_id")),
-                _string_from(automation_context.get("sourceMessageId") or automation_context.get("source_message_id")),
-                _string_from(automation_context.get("emailId") or automation_context.get("email_id")),
-                _string_from(automation_context.get("messageId") or automation_context.get("message_id")),
+        execution_source_message_ids = set(
+            _bounded_scope_values(
+                metadata.get("sourceMessageIds"),
+                metadata.get("source_message_ids"),
+                metadata.get("sourceMessageId") or metadata.get("source_message_id"),
+                metadata.get("emailId") or metadata.get("email_id"),
+                metadata.get("messageId") or metadata.get("message_id"),
+                automation_context.get("sourceMessageIds"),
+                automation_context.get("source_message_ids"),
+                automation_context.get("sourceMessageId") or automation_context.get("source_message_id"),
+                automation_context.get("emailId") or automation_context.get("email_id"),
+                automation_context.get("messageId") or automation_context.get("message_id"),
             )
-            if value
-        }
+        )
         result = _record_from(execution.get("result"))
         proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
         execution_concern_id = _string_from(
@@ -2784,9 +2808,19 @@ def _automatic_runbook_action_context(
             or proposed.get("concernId")
             or proposed.get("concern_id")
         )
+        proposed_payload = _record_from(proposed.get("payload"))
+        execution_concern_ids = _bounded_scope_values(
+            metadata.get("concernIds"),
+            metadata.get("concern_ids"),
+            proposed.get("concernIds"),
+            proposed.get("concern_ids"),
+            proposed_payload.get("concernIds"),
+            proposed_payload.get("concern_ids"),
+            execution_concern_id,
+        )
         if source_message_id and source_message_id not in execution_source_message_ids:
             continue
-        if concern_ids and is_runbook_action and execution_concern_id not in concern_ids:
+        if concern_ids and is_runbook_action and not concern_ids.intersection(execution_concern_ids):
             continue
         name = (
             "agent_triage"
@@ -2794,7 +2828,9 @@ def _automatic_runbook_action_context(
             else _string_from(proposed.get("name") or execution.get("actionKey"))
         )
         label = _string_from(proposed.get("label") or execution.get("label") or name)
-        concern_id = execution_concern_id
+        concern_id = execution_concern_id or (
+            execution_concern_ids[0] if execution_concern_ids else ""
+        )
         runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
         if status == "pending" and metadata.get("approvalRequired") is True:
             action_context = {
@@ -2804,6 +2840,8 @@ def _automatic_runbook_action_context(
             }
             if concern_id:
                 action_context["concernId"] = concern_id
+            if len(execution_concern_ids) > 1:
+                action_context["concernIds"] = list(execution_concern_ids)
             if runbook:
                 action_context["runbook"] = runbook
             context.append(action_context)
@@ -2824,6 +2862,8 @@ def _automatic_runbook_action_context(
             }
             if concern_id:
                 action_context["concernId"] = concern_id
+            if len(execution_concern_ids) > 1:
+                action_context["concernIds"] = list(execution_concern_ids)
             if runbook:
                 action_context["runbook"] = runbook
             if error:
@@ -2884,6 +2924,8 @@ def _automatic_runbook_action_context(
         }
         if concern_id:
             action_context["concernId"] = concern_id
+        if len(execution_concern_ids) > 1:
+            action_context["concernIds"] = list(execution_concern_ids)
         if runbook:
             action_context["runbook"] = runbook
         if concern_id and name:
@@ -2956,7 +2998,7 @@ def _scoped_grounding_ticket_evidence(
                 for raw_action in actions
                 if (
                     (action := _record_from(raw_action))
-                    and _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
+                    and concern_id in _runbook_action_concern_ids(action)
                     and not _is_internal_agent_triage_action(action)
                 )
             ]
@@ -3472,6 +3514,81 @@ _ATOMIC_RECENT_CHANGE_QUESTION_RE = re.compile(
     r"does\s+the\s+lookup\s+show\??$",
     re.IGNORECASE,
 )
+_ATOMIC_HTTP_RESPONSE_CODE_QUESTION_RE = re.compile(
+    r"^(?:What\s+(?:(?:exact|current)\s+)*"
+    r"(?:(?:HTTP|webhook)\s+)?(?:response\s+code|status\s+code|code)\s+"
+    r"does\s+the\s+lookup\s+show"
+    r"|What\s+does\s+the\s+lookup\s+show\s+as\s+the\s+"
+    r"(?:(?:exact|current)\s+)*(?:(?:HTTP|webhook)\s+)?"
+    r"(?:response\s+code|status\s+code|code))\??$",
+    re.IGNORECASE,
+)
+_ATOMIC_WEBHOOK_STATUS_QUESTION_RE = re.compile(
+    r"^What\s+(?:(?:exact|current)\s+)*status\s+does\s+the\s+lookup\s+show\??$",
+    re.IGNORECASE,
+)
+_HTTP_RESPONSE_CODE_RE = re.compile(r"^[1-5]\d{2}$")
+_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_QUESTION_PATTERNS = (
+    re.compile(
+        r"^(?:(?:first\s+)?(?:look\s+up|check|review)\s+"
+        r"(?:the\s+)?current\s+matter\s+and\s+)?"
+        r"(?:say|state|report|confirm|tell\s+me)\s+(?:whether|if)\s+"
+        r"(?:the\s+)?substantive\s+discussion\s+is\s+"
+        r"(?:(?:already|currently)\s+)?paused\s*[.?!]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:is\s+(?:the\s+)?substantive\s+discussion\s+"
+        r"(?:(?:already|currently)\s+)?paused"
+        r"|has\s+(?:the\s+)?substantive\s+discussion\s+"
+        r"(?:(?:already|currently)\s+)?been\s+paused)\s*[.?!]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_DIRECT_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_RE = re.compile(
+    r"\bsubstantive\s+discussion\s+"
+    r"(?:(?:is|remains?)\s+)?not\s+"
+    r"(?:(?:already|currently|presently|yet)\s+)?paused\b"
+    r"|\bsubstantive\s+discussion\s+has\s+not\s+been\s+paused\b",
+    re.IGNORECASE,
+)
+_UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE = re.compile(
+    r"[?\"\u2018\u2019\u201c\u201d]|"
+    r"\b(?:according|actually|allegedly|apparently|appears?|assuming|assumption|believ(?:e|es|ed)|"
+    r"claim(?:s|ed)?|contrary|could|counterfactual|except|false|hypothetical|incorrect|instead|"
+    r"if|likely|may|might|perhaps|possibly|probably|rather|report(?:s|ed|edly)?|theory|"
+    r"said|says?|seem(?:s|ed)?|suggest(?:s|ed)?|unclear|uncertain|"
+    r"unconfirmed|unless|unknown|untrue|wrong|"
+    r"unverified|whether)\b|"
+    r"\bper\s+(?:the\s+)?(?:client|customer|user)\b|"
+    r"\b(?:logs?|sources?)\s+(?:claim|report|suggest)(?:s|ed)?\b|"
+    r"\b(?:(?:can|could|did|does)(?:not|n't|\s+not)|fail(?:s|ed)?\s+to)\s+"
+    r"(?:confirm|establish|prove|show)\b",
+    re.IGNORECASE,
+)
+_NON_AFFIRMATIVE_HTTP_RESPONSE_CODE_RE = re.compile(
+    r"\b(?:according|allegedly|apparently|assuming|assumption|counterfactual|"
+    r"hypothetical|if|reportedly|theory|unless)\b|"
+    r"\bper\s+(?:the\s+)?(?:client|customer|user)\b|"
+    r"\b(?:client|customer|logs?|monitoring\s+system|sources?|user)\s+"
+    r"(?:claim(?:s|ed)?|report(?:s|ed)?|said|says?|suggest(?:s|ed)?)\b|"
+    r"\bit\s+(?:appears?|seems?)\b|"
+    r"\b(?:(?:can|could|did|does)(?:not|n't|\s+not)|fail(?:s|ed)?\s+to)\s+"
+    r"(?:confirm|establish|prove|return|show)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE = re.compile(
+    r"\b(?:the\s+)?substantive\s+discussion\s+"
+    r"(?:(?:is|was|remains?)\s+(?:(?:already|currently|still)\s+)?paused"
+    r"|(?:has|had)\s+been\s+(?:(?:already|currently|still)\s+)?paused)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_LINKED_PAUSE_REVERSAL_RE = re.compile(
+    r"\b(?:discussion|it)\s+"
+    r"(?:(?:is|was|remains?)\s+(?:(?:already|currently|still)\s+)?paused"
+    r"|(?:has|had)\s+been\s+(?:(?:already|currently|still)\s+)?paused)\b",
+    re.IGNORECASE,
+)
 _ATOMIC_LOOKUP_SAFE_VALUE_RE = re.compile(
     r"^[\w][\w &'()/+\-]{0,159}$",
     re.UNICODE,
@@ -3712,6 +3829,221 @@ def _atomic_recent_change_requirements(
     return requirements
 
 
+def _tool_record_exact_scalars(
+    record: dict[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    """Return bounded exact scalar paths, unwrapping only trusted fixture rows."""
+
+    is_fixture = _string_from(record.get("name")).startswith("fixture_")
+    entries: list[tuple[str, str]] = []
+    for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
+        path = raw_path
+        value = raw_value
+        fixture_scalar = (
+            _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
+            if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+            else None
+        )
+        if fixture_scalar is not None:
+            path = fixture_scalar.group("path")
+            value = fixture_scalar.group("value")
+        exact_path = path.casefold().replace("-", "_")
+        clean_value = " ".join(value.split())[:500]
+        if exact_path and clean_value:
+            entries.append((exact_path, clean_value))
+    return tuple(entries)
+
+
+def _atomic_http_response_code_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    obligation_id: str,
+    question: str,
+) -> dict[str, Any] | None:
+    """Bind an exact status question to one successful read-only HTTP code."""
+
+    explicit_code_question = (
+        _ATOMIC_HTTP_RESPONSE_CODE_QUESTION_RE.fullmatch(question.strip())
+        is not None
+    )
+    generic_webhook_status_question = (
+        _ATOMIC_WEBHOOK_STATUS_QUESTION_RE.fullmatch(question.strip()) is not None
+    )
+    if (
+        not concern_id
+        or not obligation_id
+        or not (explicit_code_question or generic_webhook_status_question)
+    ):
+        return None
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern_is_webhook = any(
+        _string_from(concern.get("id")) == concern_id
+        and "webhook" in _string_from(concern.get("runbook")).casefold()
+        for raw_concern in concerns
+        if (concern := _record_from(raw_concern))
+    )
+    values: dict[str, set[str]] = {}
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        if (
+            generic_webhook_status_question
+            and not concern_is_webhook
+            and "webhook" not in _string_from(record.get("name")).casefold()
+        ):
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        for exact_path, clean_value in _tool_record_exact_scalars(record):
+            if exact_path != "response_code" or _HTTP_RESPONSE_CODE_RE.fullmatch(clean_value) is None:
+                continue
+            values.setdefault(clean_value, set()).add(evidence_id)
+    if len(values) != 1:
+        return None
+    value, evidence_ids = next(iter(values.items()))
+    return {
+        "obligationId": obligation_id,
+        "concernId": concern_id,
+        "question": question,
+        "path": "response_code",
+        "value": value,
+        "evidenceIds": frozenset(evidence_ids),
+    }
+
+
+def _atomic_http_response_code_requirements(
+    ticket: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return exact HTTP-code requirements keyed by answer obligation ID."""
+
+    requirements: dict[str, dict[str, Any]] = {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+        raw_obligations = concern.get("answerObligations")
+        obligations = raw_obligations if isinstance(raw_obligations, list) else []
+        for raw_obligation in obligations:
+            obligation = _record_from(raw_obligation)
+            obligation_id = _string_from(
+                obligation.get("id") or obligation.get("obligationId") or obligation.get("obligation_id")
+            )
+            question = _string_from(obligation.get("question"))
+            requirement = _atomic_http_response_code_requirement(
+                ticket=ticket,
+                concern_id=concern_id,
+                obligation_id=obligation_id,
+                question=question,
+            )
+            if requirement is not None:
+                requirements[obligation_id] = requirement
+    return requirements
+
+
+def _explicit_http_response_codes(text: str) -> frozenset[str]:
+    """Extract only three-digit codes explicitly described as HTTP responses."""
+
+    patterns = (
+        r"(?<!\d)(?P<code>[1-5]\d{2})(?!\d)\s+"
+        r"(?:HTTP\s+)?(?:response(?:\s+code)?|status)\b",
+        r"\b(?:HTTP\s+)?(?:response\s+code|status)\s+"
+        r"(?:is|was|of|:)\s*(?<!\d)(?P<code>[1-5]\d{2})(?!\d)",
+        r"\b(?:lookup|endpoint|webhook)\b[^.!?]{0,160}\b"
+        r"(?:returns?|returned|reports?|reported|shows?|showed|responds?|"
+        r"responded|is\s+returning|was\s+returning)\b[^.!?]{0,40}"
+        r"(?<!\d)(?P<code>[1-5]\d{2})(?!\d)",
+    )
+    return frozenset(
+        match.group("code")
+        for pattern in patterns
+        for match in re.finditer(pattern, text, re.IGNORECASE)
+    )
+
+
+def _unit_affirmatively_states_http_response_code(unit: str, value: str) -> bool:
+    """Accept only a direct, non-hedged statement of the exact HTTP code."""
+
+    candidate = " ".join(unit.strip().split())
+    explicit_codes = _explicit_http_response_codes(candidate)
+    clauses = tuple(
+        clause.strip()
+        for clause in re.split(
+            r"\s*(?:;|,\s*(?:but|however)\s+|\s+but\s+)\s*",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    )
+    code_clauses = tuple(
+        clause
+        for clause in clauses
+        if value in _explicit_http_response_codes(clause)
+    )
+    if (
+        _HTTP_RESPONSE_CODE_RE.fullmatch(value) is None
+        or re.search(rf"(?<!\d){re.escape(value)}(?!\d)", candidate) is None
+        or _NON_AFFIRMATIVE_HTTP_RESPONSE_CODE_RE.search(candidate) is not None
+        or re.search(
+            r"\b(?:HTTP|endpoint|lookup|webhook)\b|\bresponse\s+code\b",
+            candidate,
+            re.IGNORECASE,
+        )
+        is None
+        or value not in explicit_codes
+        or explicit_codes != {value}
+        or len(code_clauses) != 1
+        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(code_clauses[0]) is not None
+        or any(
+            _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(clause) is None
+            for clause in clauses
+            if clause != code_clauses[0]
+        )
+        or "?" in candidate
+    ):
+        return False
+    code = re.escape(value)
+    patterns = (
+        rf"\b(?:the\s+)?(?:lookup(?:\s+result)?|endpoint|webhook|request)\b"
+        rf"[^.!?]{{0,160}}\b(?:returns?|returned|reports?|reported|shows?|showed|"
+        rf"responds?|responded|is\s+returning|was\s+returning|is|was)\b"
+        rf"[^.!?]{{0,40}}(?<!\d){code}(?!\d)\b",
+        rf"\b(?:the\s+)?(?:exact\s+)?(?:(?:HTTP|webhook)\s+)?"
+        rf"(?:response\s+)?(?:code|status)\s+(?:is|was|of|:)\s*"
+        rf"(?<!\d){code}(?!\d)\b",
+        rf"(?<!\d){code}(?!\d)\s+(?:HTTP\s+)?(?:response(?:\s+code)?|status)\b",
+        rf"\bfailing\s+with\s+(?:(?:an?|the)\s+)?(?<!\d){code}(?!\d)\s+response\b",
+    )
+    return any(re.search(pattern, candidate, re.IGNORECASE) is not None for pattern in patterns)
+
+
+def _answer_affirmatively_states_http_response_code(answer: str, value: str) -> bool:
+    return any(
+        _unit_affirmatively_states_http_response_code(
+            _string_from(unit.get("text")),
+            value,
+        )
+        for unit in _grounding_answer_units(answer)
+    )
+
+
+def _missing_atomic_http_response_code_requirements(
+    ticket: dict[str, Any],
+    answer: str,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        requirement
+        for requirement in _atomic_http_response_code_requirements(ticket).values()
+        if not _answer_affirmatively_states_http_response_code(
+            answer,
+            _string_from(requirement.get("value")),
+        )
+    )
+
+
 def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> bool:
     """Accept only an explicit affirmative lookup-to-value assertion."""
 
@@ -3844,6 +4176,158 @@ def _append_missing_atomic_recent_change_facts(
         if section
     )
     return "\n\n".join(sections)
+
+
+def _append_missing_atomic_http_response_code_facts(
+    ticket: dict[str, Any],
+    answer: str,
+) -> str:
+    """Append one exact safe HTTP code when the corrected draft still omits it."""
+
+    clean_answer = answer.strip()
+    if not clean_answer:
+        return answer
+    requirements = _missing_atomic_http_response_code_requirements(
+        ticket,
+        clean_answer,
+    )
+    answer_units = _grounding_answer_units(clean_answer)
+    for requirement in requirements:
+        value = _string_from(requirement.get("value"))
+        conflicting_codes = {
+            code
+            for unit in answer_units
+            for code in _explicit_http_response_codes(
+                _string_from(unit.get("text"))
+            )
+            if code != value
+        }
+        if conflicting_codes:
+            return answer
+        if any(
+            re.search(rf"(?<!\d){re.escape(value)}(?!\d)", unit_text) is not None
+            and not _unit_affirmatively_states_http_response_code(unit_text, value)
+            for unit in answer_units
+            if (unit_text := _string_from(unit.get("text")))
+        ):
+            # Never turn a hedged, negated, or contradictory statement into a
+            # second definitive statement. Let grounding fail closed instead.
+            return answer
+    additions = tuple(
+        dict.fromkeys(
+            "The lookup shows a " + _string_from(requirement.get("value")) + " response code."
+            for requirement in requirements
+            if _string_from(requirement.get("value"))
+        )
+    )
+    if not additions:
+        return answer
+    lines = clean_answer.splitlines()
+    signoff_index = next(
+        (
+            index
+            for index in range(max(0, len(lines) - 4), len(lines))
+            if _TERMINAL_ENGLISH_REPLY_CLOSING_RE.fullmatch(lines[index].strip())
+        ),
+        None,
+    )
+    if signoff_index is None:
+        return clean_answer + "\n\n" + "\n\n".join(additions)
+    body = "\n".join(lines[:signoff_index]).rstrip()
+    signoff = "\n".join(lines[signoff_index:]).strip()
+    return "\n\n".join(section for section in (body, "\n\n".join(additions), signoff) if section)
+
+
+def _is_false_substantive_discussion_pause_question(question: str) -> bool:
+    return any(
+        pattern.fullmatch(question.strip()) is not None
+        for pattern in _FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_QUESTION_PATTERNS
+    )
+
+
+def _unit_directly_states_substantive_discussion_not_paused(unit: str) -> bool:
+    """Recognize only a direct current false-state statement."""
+
+    clean_unit = " ".join(unit.strip().split())
+    return bool(
+        clean_unit
+        and _DIRECT_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(clean_unit)
+        and _UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE.search(clean_unit) is None
+        and _AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(clean_unit) is None
+    )
+
+
+def _tool_backed_false_pause_state_answers_obligation(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Resolve only an exact linked `substantive_discussion_paused=false` fact."""
+
+    if not concern_id or not answer_unit_ids or not _is_false_substantive_discussion_pause_question(question):
+        return False
+    values: set[str] = set()
+    false_evidence_ids: set[str] = set()
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        is_fixture = _string_from(record.get("name")).startswith("fixture_")
+        for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
+            path = raw_path
+            value = raw_value
+            fixture_scalar = (
+                _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
+                if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+                else None
+            )
+            if fixture_scalar is not None:
+                path = fixture_scalar.group("path")
+                value = fixture_scalar.group("value")
+            normalized_path = path.casefold().replace("-", "_")
+            if normalized_path != "substantive_discussion_paused":
+                continue
+            normalized_value = " ".join(value.split()).casefold()
+            values.add(normalized_value)
+            if normalized_value == "false":
+                false_evidence_ids.add(evidence_id)
+    if values != {"false"} or not false_evidence_ids:
+        return False
+    linked_texts = tuple(
+        _string_from(expected_units.get(unit_id, {}).get("text"))
+        for unit_id in answer_unit_ids
+        if _string_from(expected_units.get(unit_id, {}).get("text"))
+    )
+    joined_linked_text = " ".join(linked_texts)
+    if (
+        not linked_texts
+        or _UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE.search(joined_linked_text)
+        or re.search(r"\bnot\s+true\b", joined_linked_text, re.IGNORECASE)
+        or _AFFIRMATIVE_LINKED_PAUSE_REVERSAL_RE.search(joined_linked_text)
+        or any(
+            _AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(text)
+            for text in linked_texts
+        )
+    ):
+        return False
+    return any(
+        _unit_directly_states_substantive_discussion_not_paused(text)
+        and bool(supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(false_evidence_ids))
+        for unit_id, text in (
+            (
+                unit_id,
+                _string_from(expected_units.get(unit_id, {}).get("text")),
+            )
+            for unit_id in answer_unit_ids
+        )
+        if text
+    )
 
 
 def _temporal_fact_tokens(value: str) -> frozenset[str]:
@@ -4620,7 +5104,7 @@ def _pending_action_obligation_notices(
     pending_concern_ids = {
         concern_id
         for action in pending_actions
-        if (concern_id := _string_from(action.get("concernId") or action.get("concern_id")))
+        for concern_id in _runbook_action_concern_ids(action)
     }
     notices: list[str] = []
     seen_subjects: set[frozenset[str]] = set()
@@ -4718,7 +5202,7 @@ def _pending_action_obligation_notices(
             concern_actions = [
                 action
                 for action in actions
-                if _string_from(action.get("concernId") or action.get("concern_id")) == concern_id
+                if concern_id in _runbook_action_concern_ids(action)
             ]
             for action_question in action_obligation_parts(question):
                 append_notice_for_question(action_question, concern_actions, concern_id)
@@ -4792,13 +5276,13 @@ def _separate_pending_action_notices(
     by_concern: dict[str, list[dict[str, Any]]] = {}
     for raw_action in actions:
         action = _record_from(raw_action)
-        concern_id = _string_from(action.get("concernId") or action.get("concern_id"))
-        if (
-            not concern_id
-            or _string_from(action.get("status")).lower().replace("-", "_") != "pending_approval"
-        ):
+        action_concern_ids = _runbook_action_concern_ids(action)
+        if not action_concern_ids or _string_from(action.get("status")).lower().replace(
+            "-", "_"
+        ) != "pending_approval":
             continue
-        by_concern.setdefault(concern_id, []).append(action)
+        for concern_id in action_concern_ids:
+            by_concern.setdefault(concern_id, []).append(action)
 
     answer_units = tuple(
         match.group(0).strip()
@@ -5319,16 +5803,20 @@ def _successful_action_evidence_ids_by_concern(
 ) -> dict[str, frozenset[str]]:
     """Index exact successful tool/action evidence under its originating concern."""
     evidence_by_concern: dict[str, set[str]] = {}
-    for evidence_id, (concern_id, _record) in _successful_action_evidence_records_by_id(ticket).items():
-        evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+    for evidence_id, (
+        concern_ids,
+        _record,
+    ) in _successful_action_evidence_records_by_id(ticket).items():
+        for concern_id in concern_ids:
+            evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
     return {concern_id: frozenset(evidence_ids) for concern_id, evidence_ids in evidence_by_concern.items()}
 
 
 def _successful_action_evidence_records_by_id(
     ticket: dict[str, Any],
-) -> dict[str, tuple[str, dict[str, Any]]]:
+) -> dict[str, tuple[frozenset[str], dict[str, Any]]]:
     """Index every durable action/tool record by its exact scoped evidence ID."""
-    evidence_records: dict[str, tuple[str, dict[str, Any]]] = {}
+    evidence_records: dict[str, tuple[frozenset[str], dict[str, Any]]] = {}
     concerns = ticket.get("concerns")
     if isinstance(concerns, list):
         for raw_concern in concerns:
@@ -5343,22 +5831,25 @@ def _successful_action_evidence_records_by_id(
                     record,
                     concern_id=concern_id,
                 ):
-                    evidence_records[evidence_id] = (concern_id, record)
+                    evidence_records[evidence_id] = (
+                        frozenset({concern_id}),
+                        record,
+                    )
 
     raw_actions = ticket.get("runbookActions")
     if isinstance(raw_actions, list):
         for raw_action in raw_actions:
             action = _record_from(raw_action)
-            concern_id = _string_from(action.get("concernId") or action.get("concern_id"))
+            concern_ids = frozenset(_runbook_action_concern_ids(action))
             evidence_id = _string_from(action.get("evidenceId"))
-            if concern_id and _is_durable_successful_runbook_action(action):
-                evidence_records[evidence_id] = (concern_id, action)
+            if concern_ids and _is_durable_successful_runbook_action(action):
+                evidence_records[evidence_id] = (concern_ids, action)
 
     return evidence_records
 
 
 def _matching_successful_action_evidence_ids(
-    evidence_records: dict[str, tuple[str, dict[str, Any]]],
+    evidence_records: dict[str, tuple[frozenset[str], dict[str, Any]]],
     *,
     concern_id: str,
     expected_action_text: str,
@@ -5366,8 +5857,9 @@ def _matching_successful_action_evidence_ids(
     """Return same-concern evidence whose action and target match one obligation."""
     return frozenset(
         evidence_id
-        for evidence_id, (record_concern_id, record) in evidence_records.items()
-        if record_concern_id == concern_id and action_record_matches_expected_text(record, expected_action_text)
+        for evidence_id, (record_concern_ids, record) in evidence_records.items()
+        if concern_id in record_concern_ids
+        and action_record_matches_expected_text(record, expected_action_text)
     )
 
 
@@ -5997,6 +6489,17 @@ def draft_issue_automation_answer(
                         + _json(_string_from(requirement.get("value")))
                         + "."
                     )
+                for requirement in _missing_atomic_http_response_code_requirements(
+                    ticket_context,
+                    first_answer,
+                ):
+                    correction_reasons.append(
+                        "In a standalone sentence, explicitly answer "
+                        + _json(_string_from(requirement.get("question")))
+                        + " using the exact read-only HTTP response code "
+                        + _json(_string_from(requirement.get("value")))
+                        + "."
+                    )
                 if correction_reasons:
                     correction_prompt = (
                         f"{user_prompt}\n\n"
@@ -6047,6 +6550,10 @@ def draft_issue_automation_answer(
         )
         if reply_language == "en":
             answer = _append_missing_atomic_recent_change_facts(
+                ticket_context,
+                answer,
+            )
+            answer = _append_missing_atomic_http_response_code_facts(
                 ticket_context,
                 answer,
             )
@@ -6662,6 +7169,7 @@ def assess_issue_automation_grounding(
         atomic_recent_change_requirements = _atomic_recent_change_requirements(
             ticket_evidence
         )
+        atomic_http_response_code_requirements = _atomic_http_response_code_requirements(ticket_evidence)
         deterministically_resolved_obligation_ids: set[str] = set()
         clean_obligation_assessments: list[dict[str, Any]] = []
         uncovered_obligations: list[str] = []
@@ -6762,6 +7270,22 @@ def assess_issue_automation_grounding(
             ):
                 resolution = "answered"
                 deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and obligation_kind == "customer_question"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _tool_backed_false_pause_state_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
             atomic_recent_change = atomic_recent_change_requirements.get(obligation_id)
             if atomic_recent_change is not None:
                 required_value = _string_from(atomic_recent_change.get("value"))
@@ -6775,6 +7299,32 @@ def assess_issue_automation_grounding(
                 )
                 exact_fact_is_linked = requested_resolution == "answered" and any(
                     _atomic_lookup_unit_affirmatively_states_value(
+                        _string_from(expected_units.get(unit_id, {}).get("text")),
+                        required_value,
+                    )
+                    and bool(
+                        supported_unit_evidence_ids.get(
+                            unit_id,
+                            frozenset(),
+                        ).intersection(required_evidence_ids)
+                    )
+                    for unit_id in answer_unit_ids
+                )
+                if not exact_fact_is_linked:
+                    resolution = "not_covered"
+            atomic_http_response_code = atomic_http_response_code_requirements.get(obligation_id)
+            if atomic_http_response_code is not None:
+                required_value = _string_from(atomic_http_response_code.get("value"))
+                required_evidence_ids = frozenset(
+                    _string_from(evidence_id)
+                    for evidence_id in atomic_http_response_code.get(
+                        "evidenceIds",
+                        frozenset(),
+                    )
+                    if _string_from(evidence_id)
+                )
+                exact_fact_is_linked = requested_resolution == "answered" and any(
+                    _unit_affirmatively_states_http_response_code(
                         _string_from(expected_units.get(unit_id, {}).get("text")),
                         required_value,
                     )

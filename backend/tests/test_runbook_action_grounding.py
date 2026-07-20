@@ -36,6 +36,11 @@ def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypat
         return issues._normalize_action_execution(stored)
 
     monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(
+        issues,
+        "_list_all",
+        lambda *_args, **_kwargs: [stored] if stored else [],
+    )
     monkeypatch.setattr(issues, "create_issue_action_execution", fake_create)
     intent_result = {
         "actions": [
@@ -92,6 +97,12 @@ def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypat
     assert created[0]["action_type"] == "runbook_webhook"
     assert created[0]["metadata"]["source"] == "runbook"
     assert created[0]["metadata"]["approvalRequired"] is True
+    assert created[0]["idempotency_key"].startswith(
+        "runbook:issue1:message1:"
+    )
+    assert created[0]["idempotency_key"].endswith(
+        created[0]["metadata"]["proposalFingerprint"]
+    )
     assert created[0]["result"]["proposedAction"] == {
         "type": "runbook_webhook",
         "name": "open_ticket",
@@ -111,6 +122,131 @@ def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypat
         "concernId": "primary",
         "runbook": "",
     }
+
+
+def test_pending_equivalent_runbook_action_is_reused_across_followup_messages(
+    monkeypatch,
+):
+    records: list[dict] = []
+
+    def intent_result(concern_id: str, *, webhook: str) -> dict:
+        return {
+            "concerns": [
+                {
+                    "concernId": concern_id,
+                    "intentName": "saas-webhook-recovery",
+                    "outcome": {
+                        "actions": [
+                            {
+                                "name": "rotate_signing_secret",
+                                "label": "Rotate Signing Secret",
+                                "type": "button",
+                                "webhook": webhook,
+                                "method": "POST",
+                                "payload": {"accountId": "ACME-4421"},
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+
+    def fake_create(_issue_id: str, **kwargs):
+        record = {
+            "id": f"execution{len(records) + 1}",
+            "issue": "issue1",
+            "action_key": kwargs["action_key"],
+            "label": kwargs["label"],
+            "type": kwargs["action_type"],
+            "status": kwargs["status"],
+            "requested_by": kwargs["requested_by"],
+            "result": kwargs["result"],
+            "metadata": kwargs["metadata"],
+        }
+        records.append(record)
+        return issues._normalize_action_execution(record)
+
+    def fake_patch(path: str, data: dict):
+        execution_id = path.rsplit("/", 1)[-1]
+        record = next(item for item in records if item["id"] == execution_id)
+        record.update(data)
+        return record
+
+    monkeypatch.setattr(issues, "_first", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        issues,
+        "_list_all",
+        lambda *_args, **_kwargs: list(reversed(records)),
+    )
+    monkeypatch.setattr(issues, "_patch", fake_patch)
+    monkeypatch.setattr(issues, "create_issue_action_execution", fake_create)
+
+    first = issues._prepare_runbook_action_approvals(
+        issue_id="issue1",
+        intent_result=intent_result(
+            "initial-action-request",
+            webhook="https://actions.invalid/rotate",
+        ),
+        source_message_id="message1",
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+    followup = issues._prepare_runbook_action_approvals(
+        issue_id="issue1",
+        intent_result=intent_result(
+            "followup-status",
+            webhook="https://actions.invalid/rotate",
+        ),
+        source_message_id="message2",
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert [item["id"] for item in first] == ["execution1"]
+    assert [item["id"] for item in followup] == ["execution1"]
+    assert len(records) == 1
+    assert records[0]["metadata"]["sourceMessageId"] == "message2"
+    assert records[0]["metadata"]["sourceMessageIds"] == ["message1", "message2"]
+    assert records[0]["metadata"]["concernId"] == "followup-status"
+    assert records[0]["metadata"]["concernIds"] == [
+        "initial-action-request",
+        "followup-status",
+    ]
+    assert records[0]["result"]["proposedAction"]["concernIds"] == [
+        "initial-action-request",
+        "followup-status",
+    ]
+
+    records[0]["status"] = "success"
+    records[0]["metadata"]["approved"] = True
+    records[0]["metadata"]["reviewStatus"] = "approved"
+    repeated_after_completion = issues._prepare_runbook_action_approvals(
+        issue_id="issue1",
+        intent_result=intent_result(
+            "later-action-request",
+            webhook="https://actions.invalid/rotate",
+        ),
+        source_message_id="message3",
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert [item["id"] for item in repeated_after_completion] == ["execution2"]
+    assert len(records) == 2
+
+    distinct = issues._prepare_runbook_action_approvals(
+        issue_id="issue1",
+        intent_result=intent_result(
+            "different-config",
+            webhook="https://actions.invalid/rotate-v2",
+        ),
+        source_message_id="message4",
+        tenant_id="tenant1",
+        project_id="project1",
+    )
+
+    assert [item["id"] for item in distinct] == ["execution3"]
+    assert len(records) == 3
 
 
 def _pending_runbook_execution(*, action_type: str = "runbook_webhook") -> dict:

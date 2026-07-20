@@ -38,6 +38,193 @@ def test_runbook_actions_remain_scoped_to_concern_instances():
     assert proposals[1]["payload"]["concernId"] == "buy-product"
 
 
+def test_equivalent_same_runbook_actions_merge_concern_scope():
+    intent_result = {
+        "concerns": [
+            {
+                "concernId": "webhook-diagnosis",
+                "intentName": "saas-webhook-recovery",
+                "outcome": {
+                    "actions": [
+                        _action("rotate_signing_secret"),
+                        _action("replay_webhook_events"),
+                    ]
+                },
+            },
+            {
+                "concernId": "requested-recovery",
+                "intentName": "saas-webhook-recovery",
+                "outcome": {
+                    "actions": [
+                        _action("rotate_signing_secret"),
+                        _action("replay_webhook_events"),
+                    ]
+                },
+            },
+            {
+                "concernId": "secret-offer",
+                "intentName": "saas-webhook-recovery",
+                "outcome": {
+                    "actions": [
+                        _action("rotate_signing_secret"),
+                        _action("replay_webhook_events"),
+                    ]
+                },
+            },
+        ]
+    }
+
+    proposals = issues._runbook_action_proposals(intent_result)
+
+    assert [item["name"] for item in proposals] == [
+        "rotate_signing_secret",
+        "replay_webhook_events",
+    ]
+    for proposal in proposals:
+        assert proposal["concernId"] == "webhook-diagnosis"
+        assert proposal["concernIds"] == [
+            "webhook-diagnosis",
+            "requested-recovery",
+            "secret-offer",
+        ]
+        assert proposal["payload"]["concernIds"] == proposal["concernIds"]
+
+
+def test_same_runbook_action_keeps_distinct_executable_configs():
+    first = _action("replay_webhook_events")
+    first["payload"] = {"endpointId": "wh_orders_prod"}
+    second = _action("replay_webhook_events")
+    second["payload"] = {"endpointId": "wh_invoices_prod"}
+    intent_result = {
+        "concerns": [
+            {
+                "concernId": "orders-webhook",
+                "intentName": "saas-webhook-recovery",
+                "outcome": {"actions": [first]},
+            },
+            {
+                "concernId": "invoices-webhook",
+                "intentName": "saas-webhook-recovery",
+                "outcome": {"actions": [second]},
+            },
+        ]
+    }
+
+    proposals = issues._runbook_action_proposals(intent_result)
+
+    assert len(proposals) == 2
+    assert [item["payload"]["endpointId"] for item in proposals] == [
+        "wh_orders_prod",
+        "wh_invoices_prod",
+    ]
+
+
+def test_merged_action_scope_is_visible_to_every_owned_concern():
+    issue = {
+        "aiRuns": [
+            {
+                "source": "channel:email-main",
+                "metadata": {"sourceMessageId": "message-1"},
+                "intentResult": {
+                    "concerns": [
+                        {
+                            "concernId": "webhook-diagnosis",
+                            "matched": True,
+                            "intentName": "saas-webhook-recovery",
+                            "outcome": {},
+                        },
+                        {
+                            "concernId": "requested-recovery",
+                            "matched": True,
+                            "intentName": "saas-webhook-recovery",
+                            "outcome": {},
+                        },
+                    ]
+                },
+            }
+        ],
+        "actionExecutions": [
+            {
+                "id": "action-1",
+                "type": "runbook_webhook",
+                "status": "pending",
+                "metadata": {
+                    "source": "runbook",
+                    "approvalRequired": True,
+                    "sourceMessageId": "message-1",
+                    "concernId": "webhook-diagnosis",
+                    "concernIds": [
+                        "webhook-diagnosis",
+                        "requested-recovery",
+                    ],
+                    "runbook": "saas-webhook-recovery",
+                },
+                "result": {
+                    "proposedAction": {
+                        "name": "rotate_signing_secret",
+                        "label": "Rotate signing secret",
+                        "concernId": "webhook-diagnosis",
+                        "concernIds": [
+                            "webhook-diagnosis",
+                            "requested-recovery",
+                        ],
+                    }
+                },
+            }
+        ],
+    }
+
+    ticket = issue_agent._automatic_ticket_context(issue)
+    action = ticket["runbookActions"][0]
+    scoped = issue_agent._scoped_grounding_ticket_evidence(ticket)
+
+    assert action["concernIds"] == [
+        "webhook-diagnosis",
+        "requested-recovery",
+    ]
+    scoped_actions = {
+        concern["concernId"]: concern.get("runbookActions", [])
+        for concern in scoped["concerns"]
+    }
+    assert [item["name"] for item in scoped_actions["webhook-diagnosis"]] == [
+        "rotate_signing_secret"
+    ]
+    assert [item["name"] for item in scoped_actions["requested-recovery"]] == [
+        "rotate_signing_secret"
+    ]
+
+
+def test_successful_merged_action_evidence_is_scoped_to_every_concern():
+    evidence_id = "action:execution-1"
+    ticket = {
+        "runbookActions": [
+            {
+                "name": "rotate_signing_secret",
+                "label": "Rotate signing secret",
+                "status": "success",
+                "applied": True,
+                "webhookResult": {"status": "ok"},
+                "proof": {"status": "success", "reference": "ROT-42"},
+                "evidenceId": evidence_id,
+                "concernId": "webhook-diagnosis",
+                "concernIds": [
+                    "webhook-diagnosis",
+                    "requested-recovery",
+                ],
+            }
+        ]
+    }
+
+    evidence_by_concern = issue_agent._successful_action_evidence_ids_by_concern(
+        ticket
+    )
+
+    assert evidence_by_concern == {
+        "webhook-diagnosis": frozenset({evidence_id}),
+        "requested-recovery": frozenset({evidence_id}),
+    }
+
+
 def test_same_runbook_open_ticket_actions_merge_into_one_approval():
     first = _action("open_ticket")
     first["initialValue"] = "Verify the return address and authorization."

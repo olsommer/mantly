@@ -1373,11 +1373,12 @@ def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict
                 }
             )
     merged: list[dict[str, Any]] = []
-    open_ticket_indexes: dict[tuple[str, ...], int] = {}
+    proposal_indexes: dict[str, int] = {}
     for proposal in proposals:
-        if _string_from(proposal.get("name")).lower().replace("-", "_") != "open_ticket":
-            merged.append(proposal)
-            continue
+        is_open_ticket = (
+            _string_from(proposal.get("name")).lower().replace("-", "_")
+            == "open_ticket"
+        )
         proposal_payload = _record_from(proposal.get("payload"))
         action_name = _string_from(proposal.get("name"))
         action_payload_keys = {
@@ -1396,19 +1397,18 @@ def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict
                 "runbook",
             }
         }
-        merge_key = (
-            _string_from(proposal.get("runbook")),
-            _string_from(proposal.get("webhook")),
-            _string_from(proposal.get("method")),
-            _string_from(proposal.get("actionType")),
-            json.dumps(static_payload, ensure_ascii=False, sort_keys=True, default=str),
-            json.dumps(_record_from(proposal.get("query")), ensure_ascii=False, sort_keys=True, default=str),
-            json.dumps(_record_from(proposal.get("body")), ensure_ascii=False, sort_keys=True, default=str),
-            json.dumps(_record_from(proposal.get("headers")), ensure_ascii=False, sort_keys=True, default=str),
+        merge_payload = static_payload if is_open_ticket else {
+            key: value
+            for key, value in proposal_payload.items()
+            if key not in {"concernId", "concernIds"}
+        }
+        merge_key = _runbook_action_proposal_fingerprint(
+            proposal,
+            payload=merge_payload,
         )
-        existing_index = open_ticket_indexes.get(merge_key)
+        existing_index = proposal_indexes.get(merge_key)
         if existing_index is None:
-            open_ticket_indexes[merge_key] = len(merged)
+            proposal_indexes[merge_key] = len(merged)
             merged.append(proposal)
             continue
 
@@ -1426,29 +1426,192 @@ def _runbook_action_proposals(intent_result: dict[str, Any] | None) -> list[dict
         existing["concernIds"] = concern_ids
         existing_payload = _record_from(existing.get("payload"))
         incoming_payload = _record_from(proposal.get("payload"))
-        action_name = _string_from(existing.get("name"))
-        action_payload_key = action_name.lower().replace("-", "_")
-        tasks = list(
-            dict.fromkeys(
-                value
-                for value in (
-                    _string_from(
-                        existing_payload.get(action_name)
-                        or existing_payload.get(action_payload_key)
-                    ),
-                    _string_from(
-                        incoming_payload.get(action_name)
-                        or incoming_payload.get(action_payload_key)
-                    ),
+        if is_open_ticket:
+            action_name = _string_from(existing.get("name"))
+            action_payload_key = action_name.lower().replace("-", "_")
+            tasks = list(
+                dict.fromkeys(
+                    value
+                    for value in (
+                        _string_from(
+                            existing_payload.get(action_name)
+                            or existing_payload.get(action_payload_key)
+                        ),
+                        _string_from(
+                            incoming_payload.get(action_name)
+                            or incoming_payload.get(action_payload_key)
+                        ),
+                    )
+                    if value
                 )
-                if value
             )
-        )
-        if tasks:
-            existing_payload[action_payload_key] = "\n\n".join(tasks)[:4_000]
+            if tasks:
+                existing_payload[action_payload_key] = "\n\n".join(tasks)[:4_000]
         existing_payload["concernIds"] = concern_ids
         existing["payload"] = existing_payload
     return merged
+
+
+def _runbook_action_proposal_fingerprint(
+    proposed_action: dict[str, Any],
+    *,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    """Hash one action's executable configuration without message/concern scope."""
+
+    clean_payload = dict(
+        _record_from(proposed_action.get("payload"))
+        if payload is None
+        else payload
+    )
+    clean_payload.pop("concernId", None)
+    clean_payload.pop("concernIds", None)
+    canonical = {
+        "type": _string_from(proposed_action.get("type")),
+        "name": _string_from(proposed_action.get("name")),
+        "label": _string_from(proposed_action.get("label")),
+        "actionType": _string_from(proposed_action.get("actionType")),
+        "webhook": _string_from(proposed_action.get("webhook")),
+        "method": _string_from(proposed_action.get("method")).upper(),
+        "payload": clean_payload,
+        "query": _record_from(proposed_action.get("query")),
+        "body": _record_from(proposed_action.get("body")),
+        "headers": _record_from(proposed_action.get("headers")),
+        "runbook": _string_from(proposed_action.get("runbook")),
+    }
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _runbook_action_scope_values(
+    proposed_action: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+) -> list[str]:
+    clean_metadata = metadata or {}
+    return list(
+        dict.fromkeys(
+            clean_value
+            for raw_value in (
+                *(_parse(clean_metadata.get("concernIds"), list) or []),
+                _string_from(clean_metadata.get("concernId")),
+                *(_parse(proposed_action.get("concernIds"), list) or []),
+                _string_from(proposed_action.get("concernId")),
+            )
+            if (clean_value := _string_from(raw_value))
+        )
+    )
+
+
+def _runbook_action_record_matches(
+    record: dict[str, Any],
+    *,
+    proposal_fingerprint: str,
+) -> bool:
+    metadata = _parse(record.get("metadata"), dict)
+    result = _parse(record.get("result"), dict)
+    existing_proposal = _record_from(
+        result.get("proposedAction") or metadata.get("proposedAction")
+    )
+    return bool(
+        existing_proposal
+        and _runbook_action_proposal_fingerprint(existing_proposal)
+        == proposal_fingerprint
+    )
+
+
+def _pending_runbook_action_matches(
+    record: dict[str, Any],
+    *,
+    proposal_fingerprint: str,
+) -> bool:
+    metadata = _parse(record.get("metadata"), dict)
+    return bool(
+        _string_from(record.get("status")).lower() == "pending"
+        and metadata.get("approvalRequired") is True
+        and metadata.get("approved") is not True
+        and _string_from(metadata.get("reviewStatus")).lower() in {"", "pending"}
+        and _runbook_action_record_matches(
+            record,
+            proposal_fingerprint=proposal_fingerprint,
+        )
+    )
+
+
+def _merge_pending_runbook_action_scope(
+    record: dict[str, Any],
+    *,
+    proposed_action: dict[str, Any],
+    proposal_fingerprint: str,
+    source_message_id: str,
+) -> dict[str, Any]:
+    """Move an equivalent pending approval to the latest message without duplicating it."""
+
+    metadata = _parse(record.get("metadata"), dict)
+    result = _parse(record.get("result"), dict)
+    existing_proposal = dict(
+        _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
+    )
+    concern_ids = list(
+        dict.fromkeys(
+            [
+                *_runbook_action_scope_values(existing_proposal, metadata),
+                *_runbook_action_scope_values(proposed_action),
+            ]
+        )
+    )
+    explicit_concern_ids = bool(
+        _parse(metadata.get("concernIds"), list)
+        or _parse(existing_proposal.get("concernIds"), list)
+        or _parse(proposed_action.get("concernIds"), list)
+    )
+    merged_concern_ids = concern_ids if explicit_concern_ids or len(concern_ids) > 1 else []
+    source_message_ids = list(
+        dict.fromkeys(
+            clean_value
+            for raw_value in (
+                *(_parse(metadata.get("sourceMessageIds"), list) or []),
+                _string_from(metadata.get("sourceMessageId")),
+                source_message_id,
+            )
+            if (clean_value := _string_from(raw_value))
+        )
+    )
+    latest_concern_id = _string_from(proposed_action.get("concernId")) or _string_from(
+        metadata.get("concernId")
+    )
+
+    existing_payload = dict(_record_from(existing_proposal.get("payload")))
+    if latest_concern_id:
+        existing_proposal["concernId"] = latest_concern_id
+        existing_payload["concernId"] = latest_concern_id
+    if merged_concern_ids:
+        existing_proposal["concernIds"] = merged_concern_ids
+        existing_payload["concernIds"] = merged_concern_ids
+    existing_proposal["payload"] = existing_payload
+
+    merged_metadata = {
+        **metadata,
+        "sourceMessageId": source_message_id,
+        "sourceMessageIds": source_message_ids,
+        "concernId": latest_concern_id,
+        "concernIds": merged_concern_ids,
+        "proposalFingerprint": proposal_fingerprint,
+        "proposedAction": existing_proposal,
+    }
+    merged_result = {**result, "proposedAction": existing_proposal}
+    if merged_metadata == metadata and merged_result == result:
+        return record
+    patched = _patch(
+        f"/api/collections/support_action_executions/records/{_string_from(record.get('id'))}",
+        {"metadata": merged_metadata, "result": merged_result},
+    )
+    return {**record, **patched}
 
 
 def _prepare_runbook_action_approvals(
@@ -1461,9 +1624,26 @@ def _prepare_runbook_action_approvals(
 ) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     proposals = _runbook_action_proposals(intent_result)
+    pending_candidates = (
+        _list_all(
+            "support_action_executions",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    "status='pending'"
+                ),
+            ),
+            sort="-created",
+        )
+        if proposals
+        else []
+    )
     for proposed_action in proposals:
         concern_id = _string_from(proposed_action.get("concernId")) or "primary"
         runbook = _string_from(proposed_action.get("runbook")) or "runbook"
+        proposal_fingerprint = _runbook_action_proposal_fingerprint(proposed_action)
         action_key = _key_from(
             f"runbook:{source_message_id}:{concern_id}:{runbook}:"
             f"{_string_from(proposed_action.get('name'))}"
@@ -1479,6 +1659,11 @@ def _prepare_runbook_action_approvals(
                 ),
             ),
         )
+        if existing and not _runbook_action_record_matches(
+            existing,
+            proposal_fingerprint=proposal_fingerprint,
+        ):
+            existing = None
         if not existing and len(proposals) == 1:
             # Resume pre-multi-concern partial runs without preparing the same
             # business action under the newer concern-scoped key.
@@ -1496,7 +1681,34 @@ def _prepare_runbook_action_approvals(
                     ),
                 ),
             )
+            if existing and not _runbook_action_record_matches(
+                existing,
+                proposal_fingerprint=proposal_fingerprint,
+            ):
+                existing = None
+        if not existing:
+            existing = next(
+                (
+                    record
+                    for record in pending_candidates
+                    if _pending_runbook_action_matches(
+                        record,
+                        proposal_fingerprint=proposal_fingerprint,
+                    )
+                ),
+                None,
+            )
         if existing:
+            if _pending_runbook_action_matches(
+                existing,
+                proposal_fingerprint=proposal_fingerprint,
+            ):
+                existing = _merge_pending_runbook_action_scope(
+                    existing,
+                    proposed_action=proposed_action,
+                    proposal_fingerprint=proposal_fingerprint,
+                    source_message_id=source_message_id,
+                )
             prepared.append(_normalize_action_execution(existing))
             continue
         execution = create_issue_action_execution(
@@ -1518,14 +1730,29 @@ def _prepare_runbook_action_approvals(
                 "approved": False,
                 "reviewStatus": "pending",
                 "sourceMessageId": source_message_id,
+                "sourceMessageIds": [source_message_id] if source_message_id else [],
                 "concernId": concern_id,
                 "concernIds": _parse(proposed_action.get("concernIds"), list),
                 "runbook": runbook,
                 "runbookAction": _string_from(proposed_action.get("name")),
                 "proposedAction": proposed_action,
+                "proposalFingerprint": proposal_fingerprint,
             },
+            idempotency_key=(
+                f"runbook:{issue_id}:{source_message_id}:{proposal_fingerprint}"
+            ),
         )
         if execution:
+            if _pending_runbook_action_matches(
+                execution,
+                proposal_fingerprint=proposal_fingerprint,
+            ):
+                execution = _merge_pending_runbook_action_scope(
+                    execution,
+                    proposed_action=proposed_action,
+                    proposal_fingerprint=proposal_fingerprint,
+                    source_message_id=source_message_id,
+                )
             prepared.append(execution)
     return prepared
 

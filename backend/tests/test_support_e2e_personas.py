@@ -945,6 +945,21 @@ def test_live_runner_requires_exact_pending_action_set() -> None:
     assert safe_with_extra is True
     assert evidence["actual"] == ["request_export", "request_workspace_deletion"]
 
+    duplicate, safe_duplicate, duplicate_evidence, _actual = _pending_action_audit(
+        {
+            "actionExecutions": [
+                action("request_export"),
+                action("request_export"),
+            ]
+        },
+        ["request_export"],
+    )
+    assert duplicate is False
+    assert safe_duplicate is True
+    assert duplicate_evidence["expectedCounts"] == {"request_export": 1}
+    assert duplicate_evidence["actualCounts"] == {"request_export": 2}
+    assert duplicate_evidence["duplicates"] == {"request_export": 2}
+
 
 def test_live_runner_preflight_rejects_active_automation_rule() -> None:
     class FakeApi:

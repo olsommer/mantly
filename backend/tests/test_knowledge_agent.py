@@ -4947,6 +4947,515 @@ def _recent_change_grounding_issue(
     return issue
 
 
+def _http_response_code_grounding_issue(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    response_facts: Any = None,
+    evidence_concern_id: str = "webhook",
+) -> dict[str, Any]:
+    issue = _issue_with_grounding_obligations(
+        concern_id="webhook",
+        questions=[
+            (
+                "webhook:status",
+                "What exact status does the lookup show?",
+            )
+        ],
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    tool_evidence = {
+        "name": "fixture_saas_webhook_acme_orders",
+        "method": method,
+        "status": status,
+        "responseFacts": response_facts
+        or [
+            {
+                "path": "fixture_evidence.result.1",
+                "value": "status: failing",
+            },
+            {
+                "path": "fixture_evidence.result.2",
+                "value": "response_code: 401",
+            },
+        ],
+    }
+    if evidence_concern_id == "webhook":
+        concern["outcome"]["toolEvidence"] = [tool_evidence]
+    else:
+        issue["aiRuns"][0]["intentResult"]["concerns"].append(
+            {
+                "concernId": evidence_concern_id,
+                "matched": True,
+                "intentName": "other-runbook",
+                "outcome": {"toolEvidence": [tool_evidence]},
+            }
+        )
+    return issue
+
+
+def _false_pause_grounding_issue(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    response_facts: Any = None,
+    evidence_concern_id: str = "conflict",
+) -> dict[str, Any]:
+    issue = _issue_with_grounding_obligations(
+        concern_id="conflict",
+        questions=[
+            (
+                "conflict:pause-state",
+                ("Look up the current matter and say whether substantive discussion is already paused."),
+            )
+        ],
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    tool_evidence = {
+        "name": "fixture_matter_mat_2026_221",
+        "method": method,
+        "status": status,
+        "responseFacts": response_facts
+        or [
+            {
+                "path": "fixture_evidence.result.1",
+                "value": "status: open",
+            },
+            {
+                "path": "fixture_evidence.result.2",
+                "value": "substantive_discussion_paused: false",
+            },
+        ],
+    }
+    if evidence_concern_id == "conflict":
+        concern["outcome"]["toolEvidence"] = [tool_evidence]
+    else:
+        issue["aiRuns"][0]["intentResult"]["concerns"].append(
+            {
+                "concernId": evidence_concern_id,
+                "matched": True,
+                "intentName": "other-runbook",
+                "outcome": {"toolEvidence": [tool_evidence]},
+            }
+        )
+    return issue
+
+
+def test_atomic_http_response_code_grounding_rejects_omitted_exact_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=_http_response_code_grounding_issue(),
+        answer="Our lookup shows that the endpoint is currently failing.",
+        resolutions=[("webhook:status", "answered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "response_facts",
+    [
+        {"response_code": 401},
+        [
+            {
+                "path": "fixture_evidence.result.2",
+                "value": "response_code: 401",
+            }
+        ],
+    ],
+    ids=("native", "fixture-wrapper"),
+)
+def test_atomic_http_response_code_grounding_accepts_exact_linked_code(
+    monkeypatch: pytest.MonkeyPatch,
+    response_facts: Any,
+) -> None:
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=_http_response_code_grounding_issue(response_facts=response_facts),
+        answer="The lookup shows a 401 response code.",
+        resolutions=[("webhook:status", "answered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _http_response_code_grounding_issue(method="POST"),
+        _http_response_code_grounding_issue(status="failed"),
+        _http_response_code_grounding_issue(evidence_concern_id="other"),
+        _http_response_code_grounding_issue(response_facts={"status": "failing"}),
+        _http_response_code_grounding_issue(response_facts={"response_code": 99}),
+        _http_response_code_grounding_issue(
+            response_facts=[
+                {"path": "response_code", "value": 401},
+                {"path": "response_code", "value": 403},
+            ]
+        ),
+        _http_response_code_grounding_issue(
+            response_facts={"audit": {"response_code": 401}}
+        ),
+        _issue_with_grounding_obligations(
+            concern_id="account",
+            questions=[
+                ("account:status", "What current status does the lookup show?")
+            ],
+            tool_evidence=[
+                {
+                    "name": "fixture_account_status",
+                    "method": "GET",
+                    "status": "success",
+                    "responseFacts": {"response_code": 401},
+                }
+            ],
+        ),
+    ],
+    ids=(
+        "post",
+        "failed",
+        "foreign",
+        "missing",
+        "invalid",
+        "ambiguous",
+        "nested-foreign-path",
+        "unrelated-generic-status",
+    ),
+)
+def test_atomic_http_response_code_requires_unambiguous_read_only_fact(
+    issue: dict[str, Any],
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._atomic_http_response_code_requirements(ticket) == {}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The lookup may show a 401 response code.",
+        "The lookup does not show a 401 response code.",
+        "Is the response code 401?",
+        "The lookup shows a 401 response code, but that is incorrect.",
+        "If the lookup is correct, the response code is 401.",
+        "According to the customer, the response code is 401.",
+        "The lookup failed to establish that the response code is 401.",
+        "The replay task status is 401.",
+        "In a counterfactual scenario, the response code is 401.",
+        "Per the customer, the response code is 401.",
+        "In theory, the response code is 401.",
+        "On the assumption the report is accurate, the response code is 401.",
+        "The customer reported that the response code is 401.",
+        "Apparently the response code is 401.",
+        "Reportedly the response code is 401.",
+        "Allegedly the response code is 401.",
+        "The logs suggest that the response code is 401.",
+        "Sources report that the response code is 401.",
+        "The monitoring system reported that the response code is 401.",
+        "It seems that the response code is 401.",
+        "It appears that the response code is 401.",
+    ],
+    ids=(
+        "hedged",
+        "negated",
+        "interrogative",
+        "reversed",
+        "conditional",
+        "reported",
+        "not-established",
+        "unrelated-task-status",
+        "counterfactual",
+        "per-customer",
+        "theory",
+        "assumption",
+        "customer-reported",
+        "apparently",
+        "reportedly",
+        "allegedly",
+        "logs-suggest",
+        "sources-report",
+        "monitoring-reported",
+        "it-seems",
+        "it-appears",
+    ),
+)
+def test_atomic_http_response_code_append_fails_closed_on_nonaffirmative_code(
+    answer: str,
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(_http_response_code_grounding_issue())
+
+    assert not issue_agent._unit_affirmatively_states_http_response_code(
+        answer,
+        "401",
+    )
+    assert issue_agent._missing_atomic_http_response_code_requirements(
+        ticket,
+        answer,
+    )
+    assert issue_agent._append_missing_atomic_http_response_code_facts(ticket, answer) == answer
+
+
+def test_atomic_http_response_code_append_repairs_omission_idempotently() -> None:
+    ticket = issue_agent._automatic_ticket_context(_http_response_code_grounding_issue())
+    answer = "Our lookup shows that the endpoint is currently failing."
+
+    repaired = issue_agent._append_missing_atomic_http_response_code_facts(
+        ticket,
+        answer,
+    )
+
+    assert repaired == answer + "\n\nThe lookup shows a 401 response code."
+    assert (
+        issue_agent._missing_atomic_http_response_code_requirements(
+            ticket,
+            repaired,
+        )
+        == ()
+    )
+    assert issue_agent._append_missing_atomic_http_response_code_facts(ticket, repaired) == repaired
+
+
+def test_atomic_http_response_code_append_rejects_conflicting_code() -> None:
+    ticket = issue_agent._automatic_ticket_context(
+        _http_response_code_grounding_issue()
+    )
+    answer = "The lookup shows a 403 response code."
+
+    assert (
+        issue_agent._append_missing_atomic_http_response_code_facts(ticket, answer)
+        == answer
+    )
+
+
+def test_atomic_http_response_code_accepts_unrelated_delivery_caveat() -> None:
+    assert issue_agent._unit_affirmatively_states_http_response_code(
+        "The lookup shows a 401 response code, but delivery remains unverified.",
+        "401",
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What exact HTTP status code does the lookup show?",
+        "What exact status code does the lookup show?",
+        "What exact response code does the lookup show?",
+    ],
+)
+def test_atomic_http_response_code_recognizes_explicit_code_questions(
+    question: str,
+) -> None:
+    issue = _http_response_code_grounding_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["answerObligations"][0][
+        "question"
+    ] = question
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert tuple(
+        requirement["value"]
+        for requirement in issue_agent._atomic_http_response_code_requirements(
+            ticket
+        ).values()
+    ) == ("401",)
+
+
+def test_grounding_overrides_false_pause_state_semantic_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_id = "tool:conflict:fixture_matter_mat_2026_221"
+    answer = "We have looked up the current matter, and it is open, with substantive discussion not currently paused."
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=_false_pause_grounding_issue(),
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+def test_false_pause_state_override_accepts_direct_native_boolean() -> None:
+    ticket = issue_agent._automatic_ticket_context(
+        _false_pause_grounding_issue(response_facts={"substantive_discussion_paused": False})
+    )
+
+    assert issue_agent._tool_backed_false_pause_state_answers_obligation(
+        ticket=ticket,
+        concern_id="conflict",
+        question=("Look up the current matter and say whether substantive discussion is already paused."),
+        answer_unit_ids=("u001",),
+        expected_units={"u001": {"text": "Substantive discussion is not currently paused."}},
+        supported_unit_evidence_ids={"u001": frozenset({"tool:conflict:fixture_matter_mat_2026_221"})},
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Substantive discussion may not currently be paused.",
+        "We cannot confirm whether substantive discussion is paused.",
+        "Substantive discussion is not currently paused?",
+        'The customer says "substantive discussion is not currently paused."',
+        "Substantive discussion is not currently paused, but that is false.",
+        "Substantive discussion is currently paused.",
+        "Substantive discussion will not be paused.",
+        "Substantive discussion was not paused.",
+        "Substantive discussion had not been paused.",
+        "If the lookup is correct, substantive discussion is not currently paused.",
+        "According to the customer, substantive discussion is not currently paused.",
+        "The tool doesn't establish that substantive discussion is not currently paused.",
+        "In a counterfactual scenario, substantive discussion is not currently paused.",
+        "Per the customer, substantive discussion is not currently paused.",
+        "In theory, substantive discussion is not currently paused.",
+        "Reportedly, substantive discussion is not currently paused.",
+        "Allegedly, substantive discussion is not currently paused.",
+    ],
+    ids=(
+        "hedged",
+        "unconfirmed",
+        "interrogative",
+        "quoted",
+        "reversed",
+        "affirmative",
+        "future",
+        "stale-past",
+        "stale-past-perfect",
+        "conditional",
+        "reported",
+        "not-established",
+        "counterfactual",
+        "per-customer",
+        "theory",
+        "reportedly",
+        "allegedly",
+    ),
+)
+def test_false_pause_state_override_requires_direct_nonconflicting_answer(
+    answer: str,
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(_false_pause_grounding_issue())
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question=("Look up the current matter and say whether substantive discussion is already paused."),
+            answer_unit_ids=("u001",),
+            expected_units={"u001": {"text": answer}},
+            supported_unit_evidence_ids={"u001": frozenset({"tool:conflict:fixture_matter_mat_2026_221"})},
+        )
+        is False
+    )
+
+
+def test_false_pause_state_override_rejects_conflict_in_second_linked_unit() -> None:
+    ticket = issue_agent._automatic_ticket_context(_false_pause_grounding_issue())
+    evidence_id = "tool:conflict:fixture_matter_mat_2026_221"
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question=("Look up the current matter and say whether substantive discussion is already paused."),
+            answer_unit_ids=("u001", "u002"),
+            expected_units={
+                "u001": {"text": "Substantive discussion is not currently paused."},
+                "u002": {"text": "Actually, it is paused."},
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset({evidence_id}),
+                "u002": frozenset({evidence_id}),
+            },
+        )
+        is False
+    )
+
+
+def test_false_pause_state_override_accepts_pending_action_caveat() -> None:
+    ticket = issue_agent._automatic_ticket_context(_false_pause_grounding_issue())
+
+    assert issue_agent._tool_backed_false_pause_state_answers_obligation(
+        ticket=ticket,
+        concern_id="conflict",
+        question=(
+            "Look up the current matter and say whether substantive discussion "
+            "is already paused."
+        ),
+        answer_unit_ids=("u001",),
+        expected_units={
+            "u001": {
+                "text": (
+                    "Substantive discussion is not currently paused, but pausing "
+                    "it is pending review."
+                )
+            }
+        },
+        supported_unit_evidence_ids={
+            "u001": frozenset(
+                {"tool:conflict:fixture_matter_mat_2026_221"}
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _false_pause_grounding_issue(method="POST"),
+        _false_pause_grounding_issue(status="failed"),
+        _false_pause_grounding_issue(evidence_concern_id="other"),
+        _false_pause_grounding_issue(response_facts={"substantive_discussion_paused": True}),
+        _false_pause_grounding_issue(response_facts={"substantive_discussion_paused": "no"}),
+        _false_pause_grounding_issue(
+            response_facts=[
+                {"path": "substantive_discussion_paused", "value": False},
+                {"path": "substantive_discussion_paused", "value": True},
+            ]
+        ),
+        _false_pause_grounding_issue(response_facts={"audit": {"substantive_discussion_paused": False}}),
+    ],
+    ids=(
+        "post",
+        "failed",
+        "foreign",
+        "true",
+        "non-boolean",
+        "ambiguous",
+        "nested-foreign-path",
+    ),
+)
+def test_false_pause_state_override_requires_exact_unambiguous_read_only_fact(
+    issue: dict[str, Any],
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question=("Look up the current matter and say whether substantive discussion is already paused."),
+            answer_unit_ids=("u001",),
+            expected_units={"u001": {"text": "Substantive discussion is not currently paused."}},
+            supported_unit_evidence_ids={"u001": frozenset({"tool:conflict:fixture_matter_mat_2026_221"})},
+        )
+        is False
+    )
+
+
 def test_automation_draft_retries_once_with_missing_atomic_recent_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

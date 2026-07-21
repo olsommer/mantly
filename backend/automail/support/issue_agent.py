@@ -3380,6 +3380,10 @@ def grounding_text_sha256(value: str) -> str:
 
 
 _BUSINESS_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{6,62}[A-Za-z0-9](?![A-Za-z0-9@])")
+_SEPARATOR_BOUND_BUSINESS_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{1,78}[A-Za-z0-9]"
+    r"(?![A-Za-z0-9@])"
+)
 _BUSINESS_IDENTIFIER_DURATION_WORDS = {
     "day",
     "days",
@@ -3394,6 +3398,19 @@ _BUSINESS_IDENTIFIER_DURATION_WORDS = {
     "year",
     "years",
 }
+
+
+def _separator_bound_business_identifier_keys(value: str) -> frozenset[str]:
+    """Extract short or long letter-plus-digit IDs containing `-` or `_`."""
+
+    return frozenset(
+        re.sub(r"[^a-z0-9]+", "_", candidate.casefold()).strip("_")
+        for match in _SEPARATOR_BOUND_BUSINESS_IDENTIFIER_RE.finditer(value)
+        if (candidate := match.group(0))
+        and ("-" in candidate or "_" in candidate)
+        and any(character.isalpha() for character in candidate)
+        and any(character.isdigit() for character in candidate)
+    )
 
 
 def _business_identifiers(value: Any) -> tuple[str, ...]:
@@ -3628,6 +3645,18 @@ _DIRECT_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_RE = re.compile(
     r"(?:(?:is|remains?)\s+)?not\s+"
     r"(?:(?:already|currently|presently|yet)\s+)?paused\b"
     r"|\bsubstantive\s+discussion\s+has\s+not\s+been\s+paused\b",
+    re.IGNORECASE,
+)
+_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE = re.compile(
+    r"(?P<label>\b(?:the\s+)?substantive\s+discussion)\s+for\s+"
+    r"(?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79})"
+    r"(?=\s+(?:is|was|remains?|has|had)\b)",
+    re.IGNORECASE,
+)
+_PREFIXED_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE = re.compile(
+    r"\b(?:for|regarding)\s+(?:matter\s+)?"
+    r"(?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79})"
+    r"(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE = re.compile(
@@ -3959,7 +3988,10 @@ def _tool_record_exact_scalars(
         if fixture_scalar is not None:
             path = fixture_scalar.group("path")
             value = fixture_scalar.group("value")
-        exact_path = path.casefold().replace("-", "_")
+        exact_path = ".".join(
+            segment.strip().replace("-", "_")
+            for segment in path.casefold().split(".")
+        )
         clean_value = " ".join(value.split())[:500]
         if exact_path and clean_value:
             entries.append((exact_path, clean_value))
@@ -4002,6 +4034,12 @@ def _normalized_obligation_tokens(value: str) -> str:
     """Normalize one bounded English obligation for exact policy matching."""
 
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _runbook_requirement_policy_identity(value: str) -> str:
+    """Preserve every semantic symbol while normalizing case and whitespace."""
+
+    return " ".join(value.casefold().split())
 
 
 def _matter_status_found_evidence(
@@ -4582,6 +4620,59 @@ def _unit_directly_states_substantive_discussion_not_paused(unit: str) -> bool:
     )
 
 
+def _normalize_substantive_discussion_matter_scope(
+    unit: str,
+    *,
+    allowed_matter_keys: frozenset[str],
+) -> str | None:
+    """Remove only a matter qualifier bound to the unit's exact tool evidence."""
+
+    clean_unit = " ".join(unit.strip().split())
+    business_identifier_keys = frozenset(
+        re.sub(r"[^a-z0-9]+", "_", identifier.casefold()).strip("_")
+        for identifier in _business_identifiers(clean_unit)
+    ).union(_separator_bound_business_identifier_keys(clean_unit))
+    if business_identifier_keys and (
+        not allowed_matter_keys
+        or not business_identifier_keys.issubset(allowed_matter_keys)
+    ):
+        return None
+    prefixed_matches = tuple(
+        match
+        for match in _PREFIXED_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.finditer(
+            clean_unit
+        )
+        if any(character.isalpha() for character in match.group("matter_id"))
+        and any(character.isdigit() for character in match.group("matter_id"))
+    )
+    if prefixed_matches and (
+        not allowed_matter_keys
+        or any(
+            re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                match.group("matter_id").casefold(),
+            ).strip("_")
+            not in allowed_matter_keys
+            for match in prefixed_matches
+        )
+    ):
+        return None
+    matches = tuple(_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.finditer(clean_unit))
+    if not matches:
+        return clean_unit
+    if not allowed_matter_keys or any(
+        re.sub(r"[^a-z0-9]+", "_", match.group("matter_id").casefold()).strip("_")
+        not in allowed_matter_keys
+        for match in matches
+    ):
+        return None
+    return _SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.sub(
+        lambda match: match.group("label"),
+        clean_unit,
+    )
+
+
 def _tool_backed_false_pause_state_answers_obligation(
     *,
     ticket: dict[str, Any],
@@ -4595,40 +4686,112 @@ def _tool_backed_false_pause_state_answers_obligation(
 
     if not concern_id or not answer_unit_ids or not _is_false_substantive_discussion_pause_question(question):
         return False
+    scoped_records = tuple(
+        record
+        for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(
+            ticket
+        )
+        if evidence_concern_id == concern_id
+    )
+    raw_record_counts: dict[str, int] = {}
+    for record in scoped_records:
+        tool_name = _string_from(record.get("name"))
+        if tool_name:
+            raw_evidence_id = _tool_evidence_id(tool_name, concern_id=concern_id)
+            raw_record_counts[raw_evidence_id] = (
+                raw_record_counts.get(raw_evidence_id, 0) + 1
+            )
+
     values: set[str] = set()
     false_evidence_ids: set[str] = set()
-    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
-        if evidence_concern_id != concern_id:
-            continue
+    false_evidence_matter_keys: dict[str, set[str]] = {}
+    has_ambiguous_false_evidence_scope = False
+    has_unsafe_false_evidence = False
+    has_duplicate_false_candidate_evidence_id = False
+    for record in scoped_records:
         evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
         if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
             continue
-        is_fixture = _string_from(record.get("name")).startswith("fixture_")
-        for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
-            path = raw_path
-            value = raw_value
-            fixture_scalar = (
-                _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
-                if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
-                else None
-            )
-            if fixture_scalar is not None:
-                path = fixture_scalar.group("path")
-                value = fixture_scalar.group("value")
-            normalized_path = path.casefold().replace("-", "_")
-            if normalized_path != "substantive_discussion_paused":
+        if raw_record_counts.get(evidence_id) != 1:
+            has_duplicate_false_candidate_evidence_id = True
+            continue
+        tool_name = _string_from(record.get("name"))
+        normalized_tool_name = tool_name.casefold()
+        record_matter_keys: set[str] = set()
+        record_pause_values: set[str] = set()
+        record_has_exact_pause_fact = False
+        fixture_matter_prefix = "fixture_matter_"
+        if normalized_tool_name.startswith(fixture_matter_prefix):
+            fixture_matter_key = normalized_tool_name[len(fixture_matter_prefix) :]
+            if re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", fixture_matter_key):
+                record_matter_keys.add(fixture_matter_key)
+        for normalized_path, value in _tool_record_exact_scalars(record):
+            normalized_leaf_path = normalized_path.rsplit(".", 1)[-1]
+            if normalized_leaf_path == "matter_id":
+                matter_key = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+                if matter_key:
+                    record_matter_keys.add(matter_key)
+            if normalized_leaf_path != "substantive_discussion_paused":
                 continue
             normalized_value = " ".join(value.split()).casefold()
-            values.add(normalized_value)
-            if normalized_value == "false":
-                false_evidence_ids.add(evidence_id)
-    if values != {"false"} or not false_evidence_ids:
+            if normalized_value:
+                record_pause_values.add(normalized_value)
+                if normalized_path == "substantive_discussion_paused":
+                    record_has_exact_pause_fact = True
+        if not record_pause_values:
+            continue
+        values.update(record_pause_values)
+        if (
+            record.get("responseFactsTruncated") is True
+            or _tool_evidence_has_nonaffirmative_lookup_result(record)
+        ):
+            has_unsafe_false_evidence = True
+            continue
+        if record_pause_values != {"false"} or len(record_matter_keys) != 1:
+            has_ambiguous_false_evidence_scope = True
+            continue
+        if not record_has_exact_pause_fact:
+            continue
+        false_evidence_ids.add(evidence_id)
+        false_evidence_matter_keys[evidence_id] = record_matter_keys
+    all_false_evidence_matter_keys = {
+        matter_key
+        for matter_keys in false_evidence_matter_keys.values()
+        for matter_key in matter_keys
+    }
+    if (
+        values != {"false"}
+        or not false_evidence_ids
+        or len(all_false_evidence_matter_keys) != 1
+        or has_ambiguous_false_evidence_scope
+        or has_unsafe_false_evidence
+        or has_duplicate_false_candidate_evidence_id
+    ):
         return False
-    linked_texts = tuple(
-        _string_from(expected_units.get(unit_id, {}).get("text"))
+    linked_units = tuple(
+        (unit_id, _string_from(expected_units.get(unit_id, {}).get("text")))
         for unit_id in answer_unit_ids
         if _string_from(expected_units.get(unit_id, {}).get("text"))
     )
+    normalized_linked_units: list[tuple[str, str]] = []
+    for unit_id, text in linked_units:
+        linked_false_evidence_ids = supported_unit_evidence_ids.get(
+            unit_id,
+            frozenset(),
+        ).intersection(false_evidence_ids)
+        allowed_matter_keys = frozenset(
+            matter_key
+            for evidence_id in linked_false_evidence_ids
+            for matter_key in false_evidence_matter_keys.get(evidence_id, set())
+        )
+        normalized_text = _normalize_substantive_discussion_matter_scope(
+            text,
+            allowed_matter_keys=allowed_matter_keys,
+        )
+        if normalized_text is None:
+            return False
+        normalized_linked_units.append((unit_id, normalized_text))
+    linked_texts = tuple(text for _unit_id, text in normalized_linked_units)
     joined_linked_text = " ".join(linked_texts)
     if (
         not linked_texts
@@ -4644,14 +4807,7 @@ def _tool_backed_false_pause_state_answers_obligation(
     return any(
         _unit_directly_states_substantive_discussion_not_paused(text)
         and bool(supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(false_evidence_ids))
-        for unit_id, text in (
-            (
-                unit_id,
-                _string_from(expected_units.get(unit_id, {}).get("text")),
-            )
-            for unit_id in answer_unit_ids
-        )
-        if text
+        for unit_id, text in normalized_linked_units
     )
 
 
@@ -6579,6 +6735,591 @@ def _scoped_grounding_evidence_concerns(
     return {evidence_id: frozenset(concern_ids) for evidence_id, concern_ids in scoped.items()}
 
 
+def _tool_evidence_has_conflicting_scalar_facts(record: dict[str, Any]) -> bool:
+    """Reject one record that assigns different values to the same exact path."""
+
+    values_by_path: dict[str, set[str]] = {}
+    for path, value in _tool_record_exact_scalars(record):
+        normalized_value = " ".join(value.casefold().split())
+        if normalized_value:
+            values_by_path.setdefault(path, set()).add(normalized_value)
+    return any(len(values) > 1 for values in values_by_path.values())
+
+
+def _tool_evidence_has_nonaffirmative_lookup_result(record: dict[str, Any]) -> bool:
+    """Detect lookup vetoes even when a persisted fixture omitted the flag."""
+
+    if (
+        record.get("hasNonaffirmativeLookupResult") is True
+        or _has_nonaffirmative_lookup_result(record.get("responseFacts"))
+    ):
+        return True
+    return any(
+        path.rsplit(".", 1)[-1] in _LOOKUP_RESULT_SIGNAL_PATHS
+        and " ".join(value.casefold().split())
+        not in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+        for path, value in _tool_record_exact_scalars(record)
+    )
+
+
+def _read_only_tool_evidence_fingerprint(
+    record: dict[str, Any],
+    *,
+    concern_id: str,
+) -> tuple[str, tuple[str, str]] | None:
+    """Return one complete read-only fingerprint bound to its exact evidence ID."""
+
+    evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+    method = _string_from(record.get("method")).upper()
+    if (
+        not concern_id
+        or not evidence_id
+        or method not in {"GET", "HEAD"}
+        or record.get("responseFactsTruncated") is True
+        or _tool_evidence_has_nonaffirmative_lookup_result(record)
+        or _tool_evidence_has_conflicting_scalar_facts(record)
+    ):
+        return None
+    name = _string_from(record.get("name"))
+    canonical = json.dumps(
+        {
+            "hasAffirmativeReturnRefundFact": record.get("hasAffirmativeReturnRefundFact") is True,
+            "method": method,
+            "name": name,
+            "responseFacts": record.get("responseFacts"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return evidence_id, (name, canonical)
+
+
+def _read_only_tool_evidence_fingerprints(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[str, str]]:
+    """Fingerprint independently valid read-only records without concern IDs."""
+
+    candidates: dict[str, set[tuple[str, str]]] = {}
+    raw_record_counts: dict[str, int] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        name = _string_from(record.get("name"))
+        raw_evidence_id = (
+            _tool_evidence_id(name, concern_id=concern_id)
+            if concern_id and name
+            else ""
+        )
+        if raw_evidence_id:
+            raw_record_counts[raw_evidence_id] = (
+                raw_record_counts.get(raw_evidence_id, 0) + 1
+            )
+        fingerprint = _read_only_tool_evidence_fingerprint(
+            record,
+            concern_id=concern_id,
+        )
+        if fingerprint is None:
+            continue
+        evidence_id, canonical = fingerprint
+        candidates.setdefault(evidence_id, set()).add(canonical)
+    return {
+        evidence_id: next(iter(fingerprints))
+        for evidence_id, fingerprints in candidates.items()
+        if len(fingerprints) == 1 and raw_record_counts.get(evidence_id) == 1
+    }
+
+
+def _complete_read_only_tool_evidence_sets(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Return only nonempty concerns whose entire tool evidence set is safe."""
+
+    records_by_concern: dict[str, list[dict[str, Any]]] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if concern_id:
+            records_by_concern.setdefault(concern_id, []).append(record)
+
+    complete: dict[str, tuple[tuple[str, str], ...]] = {}
+    for concern_id, records in records_by_concern.items():
+        fingerprints: list[tuple[str, str]] = []
+        seen_evidence_ids: set[str] = set()
+        for record in records:
+            fingerprint = _read_only_tool_evidence_fingerprint(
+                record,
+                concern_id=concern_id,
+            )
+            if fingerprint is None:
+                fingerprints = []
+                break
+            evidence_id, canonical = fingerprint
+            if evidence_id in seen_evidence_ids:
+                fingerprints = []
+                break
+            seen_evidence_ids.add(evidence_id)
+            fingerprints.append(canonical)
+        if fingerprints:
+            complete[concern_id] = tuple(sorted(fingerprints))
+    return complete
+
+
+def _runbook_requirement_concern(
+    ticket: dict[str, Any],
+    obligation: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the exact matched concern that owns one repeated requirement."""
+
+    if _string_from(obligation.get("kind")) != "runbook_requirement":
+        return {}
+    concern_id = _string_from(obligation.get("concernId"))
+    policy_identity = _runbook_requirement_policy_identity(
+        _string_from(obligation.get("question"))
+    )
+    if not concern_id or not policy_identity:
+        return {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and _string_from(candidate.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or not _string_from(concern.get("runbook")):
+        return {}
+    raw_guidance = concern.get("requiredGuidance")
+    if not isinstance(raw_guidance, list):
+        return {}
+    guidance_matches = [
+        guidance
+        for raw_item in raw_guidance
+        if (guidance := _string_from(raw_item))
+        and _runbook_requirement_policy_identity(guidance) == policy_identity
+    ]
+    return concern if len(guidance_matches) == 1 else {}
+
+
+def _runbook_rebinding_policy_fingerprint(
+    concern: dict[str, Any],
+) -> tuple[str, frozenset[str], tuple[str, ...]] | None:
+    """Return the policy parts that constrain one shared response statement."""
+
+    runbook = _runbook_requirement_policy_identity(
+        _string_from(concern.get("runbook"))
+    )
+    if concern.get("matched") is not True or not runbook:
+        return None
+    normalized_fields: dict[str, tuple[str, ...]] = {}
+    for field_name in ("forbiddenClaims", "replyRequirements", "requiredGuidance"):
+        raw_items = concern.get(field_name)
+        if raw_items is None:
+            normalized_fields[field_name] = ()
+            continue
+        if not isinstance(raw_items, list):
+            return None
+        normalized_items = tuple(
+            _runbook_requirement_policy_identity(_string_from(raw_item))
+            for raw_item in raw_items
+        )
+        if any(not item for item in normalized_items):
+            return None
+        normalized_fields[field_name] = normalized_items
+    forbidden_claims = set(normalized_fields["forbiddenClaims"])
+    forbidden_claims.update(
+        requirement
+        for requirement in normalized_fields["replyRequirements"]
+        if re.match(
+            r"^(?:do\s+not|don't|must\s+not|never)\b",
+            requirement,
+            re.IGNORECASE,
+        )
+    )
+    return (
+        runbook,
+        frozenset(forbidden_claims),
+        normalized_fields["requiredGuidance"],
+    )
+
+
+def _runbook_rebinding_source_policy_covers_target(
+    *,
+    source_concern: dict[str, Any],
+    target_fingerprint: tuple[str, frozenset[str], tuple[str, ...]],
+) -> bool:
+    """Allow only a source whose prohibitions are at least as strict."""
+
+    source_fingerprint = _runbook_rebinding_policy_fingerprint(source_concern)
+    if source_fingerprint is None:
+        return False
+    source_runbook, source_prohibitions, source_guidance = source_fingerprint
+    target_runbook, target_prohibitions, target_guidance = target_fingerprint
+    return bool(
+        source_runbook == target_runbook
+        and source_guidance == target_guidance
+        and target_prohibitions.issubset(source_prohibitions)
+    )
+
+
+def _durable_successful_runbook_action_concern_ids(
+    ticket: dict[str, Any],
+) -> frozenset[str]:
+    """Return every concern touched by a durable successful mutation."""
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    return frozenset(
+        concern_id
+        for raw_action in actions
+        if (action := _record_from(raw_action))
+        and _is_durable_successful_runbook_action(action)
+        for concern_id in _runbook_action_concern_ids(action)
+    )
+
+
+_RUNBOOK_REBINDING_MAX_RAW_ACTION_EXECUTIONS = 500
+
+
+def _raw_issue_durable_runbook_action_concern_ids(
+    issue: dict[str, Any],
+) -> frozenset[str] | None:
+    """Scan raw actions beyond prompt bounds, or disable rebinding if ambiguous."""
+
+    raw_actions = issue.get("actionExecutions")
+    if raw_actions is None:
+        return frozenset()
+    if (
+        not isinstance(raw_actions, list)
+        or len(raw_actions) > _RUNBOOK_REBINDING_MAX_RAW_ACTION_EXECUTIONS
+    ):
+        return None
+
+    durable_concern_ids: set[str] = set()
+    seen_execution_ids: set[str] = set()
+    for raw_action in raw_actions:
+        if not isinstance(raw_action, dict):
+            return None
+        execution_id = _string_from(raw_action.get("id"))
+        if execution_id:
+            if execution_id in seen_execution_ids:
+                return None
+            seen_execution_ids.add(execution_id)
+
+        metadata = _record_from(raw_action.get("metadata"))
+        status = _string_from(raw_action.get("status")).lower()
+        execution_type = _string_from(raw_action.get("type")).lower()
+        execution_source = _string_from(metadata.get("source")).lower()
+        is_runbook_action = (
+            execution_type == "runbook_webhook" or execution_source == "runbook"
+        )
+        if status != "success" or not is_runbook_action:
+            continue
+
+        result = _record_from(raw_action.get("result"))
+        result_proposed = _record_from(result.get("proposedAction"))
+        metadata_proposed = _record_from(metadata.get("proposedAction"))
+        proposed = result_proposed or metadata_proposed
+        proposed_payload = _record_from(proposed.get("payload"))
+        result_proposed_payload = _record_from(result_proposed.get("payload"))
+        metadata_proposed_payload = _record_from(metadata_proposed.get("payload"))
+        automation_context = _record_from(
+            metadata.get("automationContext")
+            or metadata.get("automation_context")
+        )
+        raw_scope_ids: list[str] = []
+        for scope_source in (
+            metadata,
+            result_proposed,
+            metadata_proposed,
+            proposed_payload,
+            result_proposed_payload,
+            metadata_proposed_payload,
+            automation_context,
+        ):
+            for key in ("concernIds", "concern_ids", "concernId", "concern_id"):
+                raw_value = scope_source.get(key)
+                if raw_value is None:
+                    continue
+                raw_values = raw_value if isinstance(raw_value, list) else [raw_value]
+                if len(raw_values) > 20:
+                    return None
+                for raw_scope_id in raw_values:
+                    if not isinstance(raw_scope_id, str) or not raw_scope_id.strip():
+                        return None
+                    clean_scope_id = raw_scope_id.strip()
+                    if clean_scope_id not in raw_scope_ids:
+                        raw_scope_ids.append(clean_scope_id)
+        if not raw_scope_ids or len(raw_scope_ids) > 20:
+            return None
+
+        normalization_metadata = dict(metadata)
+        normalization_metadata["concernId"] = raw_scope_ids[0]
+        normalization_metadata["concernIds"] = raw_scope_ids
+        normalization_action = dict(raw_action)
+        normalization_action["metadata"] = normalization_metadata
+        normalized_actions = _automatic_runbook_action_context(
+            {"actionExecutions": [normalization_action]},
+        )
+        if len(normalized_actions) != 1:
+            return None
+        normalized_action = normalized_actions[0]
+        normalized_concern_ids = _runbook_action_concern_ids(normalized_action)
+        if (
+            not normalized_concern_ids
+            or not _is_durable_successful_runbook_action(normalized_action)
+            or not set(raw_scope_ids).issubset(normalized_concern_ids)
+        ):
+            return None
+        durable_concern_ids.update(raw_scope_ids)
+    return frozenset(durable_concern_ids)
+
+
+_RUNBOOK_REBINDING_TOOL_SUFFIX_RE = re.compile(
+    r"(?:^|_)(?P<identifier>[a-z]{2,12}(?:_\d[a-z0-9]*)+)$"
+)
+
+
+def _runbook_rebinding_read_only_tool_identifier_keys(
+    concern: dict[str, Any],
+) -> frozenset[str]:
+    """Return IDs independently bound by safe read-only facts or fixture names."""
+
+    concern_id = _string_from(concern.get("id"))
+    identifiers: set[str] = set()
+    raw_tools = concern.get("toolEvidence")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    for raw_tool in tools:
+        tool = _record_from(raw_tool)
+        if (
+            not tool
+            or _read_only_tool_evidence_fingerprint(
+                tool,
+                concern_id=concern_id,
+            )
+            is None
+        ):
+            continue
+        for _path, value in _tool_record_exact_scalars(tool):
+            identifiers.update(_separator_bound_business_identifier_keys(value))
+        normalized_tool_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            _string_from(tool.get("name")).casefold(),
+        ).strip("_")
+        fixture_match = _RUNBOOK_REBINDING_TOOL_SUFFIX_RE.search(
+            normalized_tool_name
+        )
+        if fixture_match is not None and normalized_tool_name.startswith("fixture_"):
+            identifiers.add(fixture_match.group("identifier"))
+    return frozenset(identifiers)
+
+
+def _runbook_rebinding_identifiers_are_unambiguous(
+    reused_identifiers: frozenset[str],
+    available_identifiers: frozenset[str],
+) -> bool:
+    """Require an exact match within every reused identifier family."""
+
+    if not reused_identifiers:
+        return True
+    reused_families = {
+        identifier.split("_", 1)[0]
+        for identifier in reused_identifiers
+    }
+    same_family_available = frozenset(
+        identifier
+        for identifier in available_identifiers
+        if identifier.split("_", 1)[0] in reused_families
+    )
+    return same_family_available == reused_identifiers
+
+
+def _duplicate_runbook_requirement_rebinding_proof(
+    *,
+    ticket: dict[str, Any],
+    target_obligation: dict[str, Any],
+    target_assessment: dict[str, Any],
+    originally_answered_assessments: tuple[dict[str, Any], ...],
+    expected_obligations: dict[str, dict[str, Any]],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    scoped_evidence_concerns: dict[str, frozenset[str]],
+    read_only_tool_fingerprints: dict[str, tuple[str, str]],
+    complete_read_only_tool_evidence_sets: dict[
+        str,
+        tuple[tuple[str, str], ...],
+    ],
+    durable_action_concern_ids: frozenset[str],
+) -> dict[str, tuple[str, ...]] | None:
+    """Rebind one repeated requirement to independently identical target evidence."""
+
+    target_concern = _runbook_requirement_concern(ticket, target_obligation)
+    target_concern_id = _string_from(target_obligation.get("concernId"))
+    target_runbook = _string_from(target_concern.get("runbook"))
+    target_policy_fingerprint = _runbook_rebinding_policy_fingerprint(
+        target_concern
+    )
+    target_policy_identity = _runbook_requirement_policy_identity(
+        _string_from(target_obligation.get("question"))
+    )
+    target_question_tokens = _normalized_obligation_tokens(
+        _string_from(target_obligation.get("question"))
+    )
+    target_unit_ids = tuple(
+        dict.fromkeys(
+            unit_id
+            for raw_unit_id in target_assessment.get("answerUnitIds", [])
+            if (unit_id := _string_from(raw_unit_id))
+        )
+    )
+    reused_business_identifiers = frozenset(
+        identifier
+        for unit_id in target_unit_ids
+        for identifier in _separator_bound_business_identifier_keys(
+            _string_from(expected_units.get(unit_id, {}).get("text"))
+        )
+    )
+    target_business_identifiers = (
+        _runbook_rebinding_read_only_tool_identifier_keys(target_concern)
+    )
+    if (
+        not target_concern
+        or not target_concern_id
+        or not target_runbook
+        or target_policy_fingerprint is None
+        or not target_policy_identity
+        or not target_question_tokens
+        or not target_unit_ids
+        or (
+            reused_business_identifiers
+            and not _runbook_rebinding_identifiers_are_unambiguous(
+                reused_business_identifiers,
+                target_business_identifiers
+            )
+        )
+        or target_concern_id in durable_action_concern_ids
+        or any(unit_id not in supported_unit_evidence_ids for unit_id in target_unit_ids)
+    ):
+        return None
+
+    question_is_lookup_bound = bool(
+        {"lookup", "tool"}.intersection(target_question_tokens.split())
+    )
+    candidate_proofs: list[dict[str, tuple[str, ...]]] = []
+    for source_assessment in originally_answered_assessments:
+        source_obligation_id = _string_from(source_assessment.get("obligationId"))
+        source_obligation = expected_obligations.get(source_obligation_id, {})
+        source_concern = _runbook_requirement_concern(ticket, source_obligation)
+        source_concern_id = _string_from(source_obligation.get("concernId"))
+        source_unit_ids = tuple(
+            dict.fromkeys(
+                unit_id
+                for raw_unit_id in source_assessment.get("answerUnitIds", [])
+                if (unit_id := _string_from(raw_unit_id))
+            )
+        )
+        source_evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id
+                for raw_evidence_id in source_assessment.get("evidenceIds", [])
+                if (evidence_id := _string_from(raw_evidence_id))
+            )
+        )
+        source_business_identifiers = (
+            _runbook_rebinding_read_only_tool_identifier_keys(source_concern)
+        )
+        if (
+            not source_concern
+            or not source_concern_id
+            or source_concern_id == target_concern_id
+            or source_concern_id in durable_action_concern_ids
+            or _string_from(source_concern.get("runbook")) != target_runbook
+            or not _runbook_rebinding_source_policy_covers_target(
+                source_concern=source_concern,
+                target_fingerprint=target_policy_fingerprint,
+            )
+            or _runbook_requirement_policy_identity(
+                _string_from(source_obligation.get("question"))
+            )
+            != target_policy_identity
+            or source_unit_ids != target_unit_ids
+            or (
+                reused_business_identifiers
+                and not _runbook_rebinding_identifiers_are_unambiguous(
+                    reused_business_identifiers,
+                    source_business_identifiers
+                )
+            )
+            or not source_evidence_ids
+        ):
+            continue
+
+        proof_by_unit: dict[str, tuple[str, ...]] = {}
+        for unit_id in target_unit_ids:
+            source_unit_evidence_ids = tuple(
+                evidence_id
+                for evidence_id in source_evidence_ids
+                if evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+            )
+            if not source_unit_evidence_ids:
+                proof_by_unit = {}
+                break
+            target_evidence_ids: list[str] = []
+            for source_evidence_id in source_unit_evidence_ids:
+                if scoped_evidence_concerns.get(source_evidence_id) != frozenset(
+                    {source_concern_id}
+                ):
+                    target_evidence_ids = []
+                    break
+                if source_evidence_id == _concern_grounding_evidence_id(source_concern_id):
+                    if question_is_lookup_bound:
+                        target_evidence_ids = []
+                        break
+                    source_evidence_set = complete_read_only_tool_evidence_sets.get(
+                        source_concern_id
+                    )
+                    if (
+                        not source_evidence_set
+                        or complete_read_only_tool_evidence_sets.get(target_concern_id)
+                        != source_evidence_set
+                    ):
+                        target_evidence_ids = []
+                        break
+                    target_evidence_id = _concern_grounding_evidence_id(target_concern_id)
+                else:
+                    source_fingerprint = read_only_tool_fingerprints.get(source_evidence_id)
+                    if source_fingerprint is None:
+                        target_evidence_ids = []
+                        break
+                    tool_name, _canonical = source_fingerprint
+                    target_evidence_id = _tool_evidence_id(
+                        tool_name,
+                        concern_id=target_concern_id,
+                    )
+                    if read_only_tool_fingerprints.get(target_evidence_id) != source_fingerprint:
+                        target_evidence_ids = []
+                        break
+                if scoped_evidence_concerns.get(target_evidence_id) != frozenset(
+                    {target_concern_id}
+                ):
+                    target_evidence_ids = []
+                    break
+                target_evidence_ids.append(target_evidence_id)
+            if not target_evidence_ids:
+                proof_by_unit = {}
+                break
+            proof_by_unit[unit_id] = tuple(dict.fromkeys(target_evidence_ids))
+        if proof_by_unit:
+            candidate_proofs.append(proof_by_unit)
+
+    unique_proofs = {
+        tuple((unit_id, evidence_ids) for unit_id, evidence_ids in proof.items()): proof
+        for proof in candidate_proofs
+    }
+    return next(iter(unique_proofs.values())) if len(unique_proofs) == 1 else None
+
+
 def grounding_context_snapshots(
     *,
     issue: dict[str, Any],
@@ -8190,6 +8931,94 @@ def assess_issue_automation_grounding(
                     if (evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids)
                 ]
             clean_obligation_assessments.append(clean_assessment)
+
+        # A combined answer can state one runbook rule once even when triage
+        # split the message into sibling concerns that activated the same
+        # runbook. Preserve every obligation and its evidence scope: reuse the
+        # unit only when a normally answered sibling has the exact requirement
+        # and each scoped proof can be rebound to independently identical target
+        # evidence. Never alias customer questions or mutation evidence.
+        originally_answered_assessments = tuple(
+            assessment
+            for assessment in clean_obligation_assessments
+            if assessment.get("resolution") == "answered"
+            and assessment.get("covered") is True
+        )
+        read_only_tool_fingerprints = _read_only_tool_evidence_fingerprints(
+            ticket_evidence
+        )
+        complete_read_only_tool_evidence_sets = (
+            _complete_read_only_tool_evidence_sets(ticket_evidence)
+        )
+        durable_action_concern_ids = _durable_successful_runbook_action_concern_ids(
+            ticket_evidence
+        )
+        raw_durable_action_concern_ids = (
+            _raw_issue_durable_runbook_action_concern_ids(issue)
+        )
+        runbook_rebinding_action_state_is_complete = (
+            raw_durable_action_concern_ids is not None
+        )
+        if raw_durable_action_concern_ids is not None:
+            durable_action_concern_ids = frozenset(
+                (*durable_action_concern_ids, *raw_durable_action_concern_ids)
+            )
+        clean_unit_assessments_by_id = {
+            _string_from(assessment.get("unitId")): assessment
+            for assessment in clean_unit_assessments
+            if _string_from(assessment.get("unitId"))
+        }
+        for clean_assessment in clean_obligation_assessments:
+            if not runbook_rebinding_action_state_is_complete:
+                continue
+            if clean_assessment.get("resolution") != "not_covered":
+                continue
+            obligation_id = _string_from(clean_assessment.get("obligationId"))
+            obligation = expected_obligations.get(obligation_id)
+            if obligation is None or _string_from(obligation.get("kind")) != "runbook_requirement":
+                continue
+            rebinding_proof = _duplicate_runbook_requirement_rebinding_proof(
+                ticket=ticket_evidence,
+                target_obligation=obligation,
+                target_assessment=clean_assessment,
+                originally_answered_assessments=originally_answered_assessments,
+                expected_obligations=expected_obligations,
+                expected_units=expected_units,
+                supported_unit_evidence_ids=supported_unit_evidence_ids,
+                scoped_evidence_concerns=scoped_grounding_evidence_concerns,
+                read_only_tool_fingerprints=read_only_tool_fingerprints,
+                complete_read_only_tool_evidence_sets=(
+                    complete_read_only_tool_evidence_sets
+                ),
+                durable_action_concern_ids=durable_action_concern_ids,
+            )
+            if rebinding_proof is None:
+                continue
+            rebound_evidence_ids: list[str] = []
+            for unit_id, evidence_ids in rebinding_proof.items():
+                supported_unit_evidence_ids[unit_id] = frozenset(
+                    (*supported_unit_evidence_ids[unit_id], *evidence_ids)
+                )
+                used_supported_evidence_ids.update(evidence_ids)
+                clean_unit_assessment = clean_unit_assessments_by_id.get(unit_id)
+                if clean_unit_assessment is not None:
+                    clean_unit_assessment["evidenceIds"] = list(
+                        dict.fromkeys(
+                            (
+                                *clean_unit_assessment.get("evidenceIds", []),
+                                *evidence_ids,
+                            )
+                        )
+                    )
+                rebound_evidence_ids.extend(evidence_ids)
+            clean_assessment.update(
+                {
+                    "resolution": "answered",
+                    "covered": True,
+                    "evidenceIds": list(dict.fromkeys(rebound_evidence_ids)),
+                }
+            )
+            deterministically_resolved_obligation_ids.add(obligation_id)
 
         # The evaluator intentionally has no model-selectable N/A state. Resolve
         # the exact matter-status fallback only after every sibling assessment

@@ -701,3 +701,1360 @@ def test_customer_questions_and_multi_concern_runbook_requirements_are_both_grou
         "answered",
         "pending_or_unavailable",
     }
+
+
+_REPEATED_INVOICE_GUIDANCE = (
+    "State the current invoice status and due date from the billing lookup.",
+    "State the billed amount and subscription amount from the billing lookup.",
+    "State that credit eligibility and amount remain unverified pending review.",
+)
+
+
+def _invoice_tool_evidence(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    billed_amount: str = "120",
+) -> dict[str, Any]:
+    return {
+        "name": "fixture_saas_invoice_inv_9012",
+        "method": method,
+        "status": status,
+        "responseFacts": [
+            {"path": "fixture_evidence.result.0", "value": "invoice_status: open"},
+            {"path": "fixture_evidence.result.1", "value": "due_date: 2026-08-15"},
+            {
+                "path": "fixture_evidence.result.2",
+                "value": f"billed_amount: {billed_amount}",
+            },
+            {"path": "fixture_evidence.result.3", "value": "subscription_amount: 100"},
+        ],
+    }
+
+
+def _conflicting_invoice_tool_evidence() -> dict[str, Any]:
+    evidence = _invoice_tool_evidence()
+    evidence["responseFacts"].append(
+        {
+            "path": "fixture_evidence.result.4",
+            "value": "invoice_status: paid",
+        }
+    )
+    return evidence
+
+
+def _whitespace_conflicting_invoice_tool_evidence() -> dict[str, Any]:
+    return {
+        "name": "fixture_saas_invoice_inv_9012",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {
+                "path": "fixture_evidence.result.0",
+                "value": "status: open",
+            },
+            {
+                "path": "fixture_evidence.result.1",
+                "value": "status : paid",
+            },
+        ],
+    }
+
+
+def _unflagged_nonaffirmative_invoice_tool_evidence(
+    *,
+    wrapped: bool,
+) -> dict[str, Any]:
+    return {
+        "name": "fixture_saas_invoice_inv_9012",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": (
+            [
+                {
+                    "path": "fixture_evidence.result.0",
+                    "value": "found: false",
+                },
+                {
+                    "path": "fixture_evidence.result.1",
+                    "value": "status: not_found",
+                },
+            ]
+            if wrapped
+            else [
+                {"path": "found", "value": False},
+                {"path": "status", "value": "not_found"},
+            ]
+        ),
+    }
+
+
+def _subscription_tool_evidence(
+    *,
+    subscription_amount: str = "100",
+) -> dict[str, Any]:
+    return {
+        "name": "fixture_saas_subscription_northwind",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {
+                "path": "fixture_evidence.result.0",
+                "value": "subscription_status: active",
+            },
+            {
+                "path": "fixture_evidence.result.1",
+                "value": f"subscription_amount: {subscription_amount}",
+            },
+        ],
+    }
+
+
+def _extra_tool_evidence(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    truncated: bool = False,
+    nonaffirmative: bool = False,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "name": "fixture_saas_risk_check",
+        "method": method,
+        "status": status,
+        "responseFacts": [
+            {
+                "path": "fixture_evidence.result.0",
+                "value": "risk_status: clear",
+            }
+        ],
+    }
+    if truncated:
+        evidence["responseFactsTruncated"] = True
+    if nonaffirmative:
+        evidence["hasNonaffirmativeLookupResult"] = True
+    return evidence
+
+
+def _invoice_concern(
+    concern_id: str,
+    *,
+    runbook: str = "saas-invoice-dispute",
+    guidance: tuple[str, ...] = _REPEATED_INVOICE_GUIDANCE,
+    tool_evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    outcome: dict[str, Any] = {
+        "requiredGuidance": list(guidance),
+    }
+    if tool_evidence is not None:
+        outcome["toolEvidence"] = tool_evidence
+    return {
+        "concernId": concern_id,
+        "matched": True,
+        "intentName": runbook,
+        "outcome": outcome,
+    }
+
+
+def _pending_runbook_action(concern_id: str) -> dict[str, Any]:
+    return {
+        "id": f"pending-{concern_id}",
+        "type": "runbook_webhook",
+        "status": "pending",
+        "metadata": {
+            "source": "runbook",
+            "approvalRequired": True,
+            "concernId": concern_id,
+        },
+        "result": {
+            "proposedAction": {
+                "name": "set_status",
+                "label": "Set status",
+            }
+        },
+    }
+
+
+def _successful_runbook_action(concern_id: str) -> dict[str, Any]:
+    return {
+        "id": f"success-{concern_id}",
+        "type": "runbook_webhook",
+        "status": "success",
+        "completedAt": "2026-07-21T10:00:00Z",
+        "metadata": {
+            "source": "runbook",
+            "concernId": concern_id,
+        },
+        "result": {
+            "proposedAction": {
+                "name": "set_status",
+                "label": "Set status",
+            },
+            "application": {
+                "applied": True,
+                "webhookResult": {
+                    "status": "ok",
+                    "response": {"status": "active"},
+                },
+            },
+        },
+    }
+
+
+def _repeated_policy_issue_with_actions(
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    guidance = _REPEATED_INVOICE_GUIDANCE[2]
+    issue = _issue(
+        *(
+            _invoice_concern(
+                concern_id,
+                guidance=(guidance,),
+                tool_evidence=[
+                    _invoice_tool_evidence(),
+                    _subscription_tool_evidence(),
+                ],
+            )
+            for concern_id in ("invoice-source", "invoice-target")
+        )
+    )
+    issue["actionExecutions"] = actions
+    return issue
+
+
+def _repeated_invoice_resolutions(
+    answer: str,
+    *,
+    source_concern_id: str,
+    target_concern_ids: tuple[str, ...],
+) -> list[tuple[str, str, list[str], list[str]]]:
+    units = issue_agent._grounding_answer_units(answer)
+    source_tool_id = (
+        f"tool:{source_concern_id}:fixture_saas_invoice_inv_9012"
+    )
+    resolutions: list[tuple[str, str, list[str], list[str]]] = []
+    for guidance_index in range(1, len(_REPEATED_INVOICE_GUIDANCE) + 1):
+        unit_id = units[0]["id"] if guidance_index < 3 else units[1]["id"]
+        source_evidence_id = (
+            source_tool_id
+            if guidance_index < 3
+            else f"concern:{source_concern_id}"
+        )
+        resolutions.append(
+            (
+                f"{source_concern_id}:required-guidance-{guidance_index}",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            )
+        )
+        resolutions.extend(
+            (
+                f"{target_concern_id}:required-guidance-{guidance_index}",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            )
+            for target_concern_id in target_concern_ids
+        )
+    return resolutions
+
+
+def test_repeated_runbook_requirements_rebind_to_exact_target_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concern_ids = ("invoice-source", "invoice-target-a", "invoice-target-b")
+    issue = _issue(
+        *(
+            _invoice_concern(
+                concern_id,
+                tool_evidence=(
+                    [_invoice_tool_evidence(), _subscription_tool_evidence()]
+                    if index % 2 == 0
+                    else [_subscription_tool_evidence(), _invoice_tool_evidence()]
+                ),
+            )
+            for index, concern_id in enumerate(concern_ids)
+        )
+    )
+    # Approval-pending mutations are state, not reusable proof, and do not make
+    # otherwise identical read-only concern evidence unsafe to rebind.
+    issue["actionExecutions"] = [_pending_runbook_action("invoice-target-b")]
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert ticket["runbookActions"][0]["status"] == "pending_approval"
+    assert issue_agent._durable_successful_runbook_action_concern_ids(ticket) == frozenset()
+    answer = (
+        "The invoice is open, due 2026-08-15, and was billed 120 instead "
+        "of the subscription amount of 100. Credit eligibility and amount "
+        "remain unverified pending review."
+    )
+    units = issue_agent._grounding_answer_units(answer)
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=_repeated_invoice_resolutions(
+            answer,
+            source_concern_id=concern_ids[0],
+            target_concern_ids=concern_ids[1:],
+        ),
+        verdict="not_grounded",
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert len(result.obligation_assessments) == 9
+    assert all(
+        assessment["resolution"] == "answered"
+        and assessment["covered"] is True
+        for assessment in result.obligation_assessments
+    )
+    assessment_by_id = {
+        assessment["obligationId"]: assessment
+        for assessment in result.obligation_assessments
+    }
+    for target_concern_id in concern_ids[1:]:
+        target_tool_id = (
+            f"tool:{target_concern_id}:fixture_saas_invoice_inv_9012"
+        )
+        assert assessment_by_id[
+            f"{target_concern_id}:required-guidance-1"
+        ]["evidenceIds"] == [target_tool_id]
+        assert assessment_by_id[
+            f"{target_concern_id}:required-guidance-2"
+        ]["evidenceIds"] == [target_tool_id]
+        assert assessment_by_id[
+            f"{target_concern_id}:required-guidance-3"
+        ]["evidenceIds"] == [f"concern:{target_concern_id}"]
+
+    unit_assessments = {
+        assessment["unitId"]: assessment
+        for assessment in result.unit_assessments
+    }
+    assert set(unit_assessments[units[0]["id"]]["evidenceIds"]) == {
+        f"tool:{concern_id}:fixture_saas_invoice_inv_9012"
+        for concern_id in concern_ids
+    }
+    assert set(unit_assessments[units[1]["id"]]["evidenceIds"]) == {
+        f"concern:{concern_id}" for concern_id in concern_ids
+    }
+
+
+@pytest.mark.parametrize("action_concern_id", ["invoice-source", "invoice-target"])
+def test_repeated_runbook_requirement_rebinding_fails_closed_for_durable_action(
+    monkeypatch: pytest.MonkeyPatch,
+    action_concern_id: str,
+) -> None:
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            guidance=(_REPEATED_INVOICE_GUIDANCE[2],),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+        _invoice_concern(
+            "invoice-target",
+            guidance=(_REPEATED_INVOICE_GUIDANCE[2],),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+    )
+    issue["actionExecutions"] = [_successful_runbook_action(action_concern_id)]
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent._durable_successful_runbook_action_concern_ids(ticket) == frozenset(
+        {action_concern_id}
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    target_assessment = next(
+        assessment
+        for assessment in result.obligation_assessments
+        if assessment["obligationId"] == "invoice-target:required-guidance-1"
+    )
+    assert target_assessment["resolution"] == "not_covered"
+    assert target_assessment.get("evidenceIds", []) == []
+
+
+@pytest.mark.parametrize("hidden_position", [10, 25], ids=("after-ten", "after-twenty-five"))
+def test_rebinding_raw_action_guard_finds_success_beyond_context_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    hidden_position: int,
+) -> None:
+    if hidden_position == 10:
+        prefix_actions = []
+        for index in range(10):
+            pending = _pending_runbook_action("invoice-source")
+            pending["id"] = f"pending-source-{index}"
+            prefix_actions.append(pending)
+    else:
+        prefix_actions = [
+            {"id": f"noise-{index}", "type": "noop", "status": "pending"}
+            for index in range(25)
+        ]
+    issue = _repeated_policy_issue_with_actions(
+        [*prefix_actions, _successful_runbook_action("invoice-target")]
+    )
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent._durable_successful_runbook_action_concern_ids(ticket) == frozenset()
+    assert issue_agent._raw_issue_durable_runbook_action_concern_ids(issue) == frozenset(
+        {"invoice-target"}
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+
+
+@pytest.mark.parametrize(
+    "guard_case",
+    (
+        "oversized-actions",
+        "missing-scope",
+        "oversized-scope",
+        "malformed-scope",
+    ),
+)
+def test_rebinding_raw_action_guard_disables_rebinding_when_scan_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+    guard_case: str,
+) -> None:
+    if guard_case == "oversized-actions":
+        actions = [
+            {"id": f"noise-{index}", "type": "noop", "status": "pending"}
+            for index in range(
+                issue_agent._RUNBOOK_REBINDING_MAX_RAW_ACTION_EXECUTIONS + 1
+            )
+        ]
+    else:
+        successful_action = _successful_runbook_action("invoice-target")
+        if guard_case == "missing-scope":
+            successful_action["metadata"].pop("concernId")
+        elif guard_case == "malformed-scope":
+            successful_action["metadata"]["concernIds"] = {
+                "unexpected": "shape"
+            }
+        else:
+            successful_action["metadata"]["concernIds"] = [
+                f"concern-{index}" for index in range(21)
+            ]
+        actions = [successful_action]
+    issue = _repeated_policy_issue_with_actions(actions)
+    assert issue_agent._raw_issue_durable_runbook_action_concern_ids(issue) is None
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+
+
+def test_rebinding_raw_action_guard_unions_conflicting_scope_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    successful_action = _successful_runbook_action("invoice-source")
+    proposed_action = successful_action["result"]["proposedAction"]
+    proposed_action["concernId"] = "invoice-target"
+    proposed_action["payload"] = {"concernId": "payload-target"}
+    successful_action["metadata"]["proposedAction"] = {
+        "concernId": "metadata-proposed-target"
+    }
+    issue = _repeated_policy_issue_with_actions([successful_action])
+
+    assert issue_agent._raw_issue_durable_runbook_action_concern_ids(
+        issue
+    ) == frozenset(
+        {
+            "invoice-source",
+            "invoice-target",
+            "payload-target",
+            "metadata-proposed-target",
+        }
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+
+
+@pytest.mark.parametrize(
+    "target_tool_evidence",
+    [
+        [_invoice_tool_evidence()],
+        [
+            _invoice_tool_evidence(),
+            _subscription_tool_evidence(),
+            _extra_tool_evidence(status="failed"),
+        ],
+        [
+            _invoice_tool_evidence(),
+            _subscription_tool_evidence(),
+            _extra_tool_evidence(method="POST"),
+        ],
+        [
+            _invoice_tool_evidence(),
+            _subscription_tool_evidence(),
+            _extra_tool_evidence(truncated=True),
+        ],
+        [
+            _invoice_tool_evidence(),
+            _subscription_tool_evidence(),
+            _extra_tool_evidence(nonaffirmative=True),
+        ],
+        [
+            _invoice_tool_evidence(),
+            _subscription_tool_evidence(subscription_amount="101"),
+        ],
+    ],
+    ids=(
+        "missing-tool",
+        "failed-extra",
+        "post-extra",
+        "truncated-extra",
+        "nonaffirmative-extra",
+        "conflicting-tool-facts",
+    ),
+)
+def test_concern_container_rebinding_requires_identical_complete_read_only_sets(
+    monkeypatch: pytest.MonkeyPatch,
+    target_tool_evidence: list[dict[str, Any]],
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[2]
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            guidance=(guidance,),
+            tool_evidence=[
+                _invoice_tool_evidence(),
+                _subscription_tool_evidence(),
+            ],
+        ),
+        _invoice_concern(
+            "invoice-target",
+            guidance=(guidance,),
+            tool_evidence=target_tool_evidence,
+        ),
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    target_assessment = next(
+        assessment
+        for assessment in result.obligation_assessments
+        if assessment["obligationId"] == "invoice-target:required-guidance-1"
+    )
+    assert target_assessment["resolution"] == "not_covered"
+    assert target_assessment.get("evidenceIds", []) == []
+
+
+@pytest.mark.parametrize(
+    "duplicate_record",
+    [
+        _invoice_tool_evidence(method="POST"),
+        _invoice_tool_evidence(status="failed"),
+        {**_invoice_tool_evidence(), "responseFactsTruncated": True},
+        {**_invoice_tool_evidence(), "hasNonaffirmativeLookupResult": True},
+        _invoice_tool_evidence(),
+    ],
+    ids=(
+        "post",
+        "failed",
+        "truncated",
+        "nonaffirmative",
+        "identical-safe",
+    ),
+)
+def test_tool_rebinding_rejects_any_duplicate_raw_evidence_id(
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate_record: dict[str, Any],
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            guidance=(guidance,),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+        _invoice_concern(
+            "invoice-target",
+            guidance=(guidance,),
+            tool_evidence=[_invoice_tool_evidence(), duplicate_record],
+        ),
+    )
+    answer = "The invoice is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:fixture_saas_invoice_inv_9012"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    target_assessment = next(
+        assessment
+        for assessment in result.obligation_assessments
+        if assessment["obligationId"] == "invoice-target:required-guidance-1"
+    )
+    assert target_assessment["resolution"] == "not_covered"
+    assert target_assessment.get("evidenceIds", []) == []
+
+
+@pytest.mark.parametrize("whitespace_variant", [False, True])
+def test_concern_container_rebinding_rejects_identical_internal_fact_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+    whitespace_variant: bool,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[2]
+    issue = _issue(
+        *(
+            _invoice_concern(
+                concern_id,
+                guidance=(guidance,),
+                tool_evidence=[
+                    _whitespace_conflicting_invoice_tool_evidence()
+                    if whitespace_variant
+                    else _conflicting_invoice_tool_evidence()
+                ],
+            )
+            for concern_id in ("invoice-source", "invoice-target")
+        )
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    target_assessment = next(
+        assessment
+        for assessment in result.obligation_assessments
+        if assessment["obligationId"] == "invoice-target:required-guidance-1"
+    )
+    assert target_assessment["resolution"] == "not_covered"
+    assert target_assessment.get("evidenceIds", []) == []
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=("direct", "fixture-wrapped"))
+def test_concern_container_rebinding_rejects_unflagged_nonaffirmative_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    wrapped: bool,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[2]
+    issue = _issue(
+        *(
+            _invoice_concern(
+                concern_id,
+                guidance=(guidance,),
+                tool_evidence=[
+                    _unflagged_nonaffirmative_invoice_tool_evidence(
+                        wrapped=wrapped
+                    )
+                ],
+            )
+            for concern_id in ("invoice-source", "invoice-target")
+        )
+    )
+    answer = "Credit eligibility and amount remain unverified pending review."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    target_assessment = next(
+        assessment
+        for assessment in result.obligation_assessments
+        if assessment["obligationId"] == "invoice-target:required-guidance-1"
+    )
+    assert target_assessment["resolution"] == "not_covered"
+    assert target_assessment.get("evidenceIds", []) == []
+
+
+@pytest.mark.parametrize(
+    ("target_runbook", "target_guidance", "target_tool"),
+    [
+        ("saas-other-runbook", _REPEATED_INVOICE_GUIDANCE, _invoice_tool_evidence()),
+        (
+            "saas-invoice-dispute",
+            (
+                "State a different invoice requirement.",
+                *_REPEATED_INVOICE_GUIDANCE[1:],
+            ),
+            _invoice_tool_evidence(),
+        ),
+        (
+            "saas-invoice-dispute",
+            _REPEATED_INVOICE_GUIDANCE,
+            _invoice_tool_evidence(billed_amount="121"),
+        ),
+        (
+            "saas-invoice-dispute",
+            _REPEATED_INVOICE_GUIDANCE,
+            _invoice_tool_evidence(method="POST"),
+        ),
+        (
+            "saas-invoice-dispute",
+            _REPEATED_INVOICE_GUIDANCE,
+            _invoice_tool_evidence(status="failed"),
+        ),
+        ("saas-invoice-dispute", _REPEATED_INVOICE_GUIDANCE, None),
+    ],
+    ids=(
+        "other-runbook",
+        "other-guidance",
+        "different-facts",
+        "post",
+        "failed",
+        "missing",
+    ),
+)
+def test_repeated_runbook_requirement_rebinding_rejects_nonidentical_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    target_runbook: str,
+    target_guidance: tuple[str, ...],
+    target_tool: dict[str, Any] | None,
+) -> None:
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+        _invoice_concern(
+            "invoice-target",
+            runbook=target_runbook,
+            guidance=target_guidance,
+            tool_evidence=[] if target_tool is None else [target_tool],
+        ),
+    )
+    answer = (
+        "The invoice is open, due 2026-08-15, and was billed 120 instead "
+        "of the subscription amount of 100. Credit eligibility and amount "
+        "remain unverified pending review."
+    )
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=_repeated_invoice_resolutions(
+            answer,
+            source_concern_id="invoice-source",
+            target_concern_ids=("invoice-target",),
+        ),
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert any(
+        assessment["obligationId"].startswith("invoice-target:")
+        and assessment["resolution"] == "not_covered"
+        for assessment in result.obligation_assessments
+    )
+
+
+def test_lookup_bound_requirement_cannot_rebind_concern_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance = "State the result of the invoice lookup."
+    issue = _issue(
+        _invoice_concern("invoice-source", guidance=(guidance,)),
+        _invoice_concern("invoice-target", guidance=(guidance,)),
+    )
+    answer = "The invoice lookup result is open."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.uncovered_obligations == (guidance,)
+
+
+def test_rebinding_rejects_source_specific_identifier_for_different_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    generic_tool = {
+        "name": "invoice_lookup",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {"path": "invoice_status", "value": "open"},
+            {"path": "due_date", "value": "2026-08-15"},
+        ],
+    }
+    issue = _issue(
+        {
+            **_invoice_concern(
+                "invoice-source",
+                guidance=(guidance,),
+                tool_evidence=[generic_tool],
+            ),
+            "sourceText": "Please check invoice INV-11111.",
+        },
+        {
+            **_invoice_concern(
+                "invoice-target",
+                guidance=(guidance,),
+                tool_evidence=[generic_tool],
+            ),
+            "sourceText": "Please check invoice INV-22222.",
+        },
+    )
+    answer = "Invoice INV-11111 is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:invoice_lookup"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (guidance,)
+
+
+@pytest.mark.parametrize(
+    ("source_text", "target_text", "answer_identifier"),
+    [
+        (
+            "Compare invoices INV-11111 and INV-22222.",
+            "Compare invoices INV-11111 and INV-22222.",
+            "INV-11111",
+        ),
+        ("Check invoice INV-11.", "Check invoice INV-22.", "INV-11"),
+    ],
+    ids=("ambiguous-broad-scope", "short-identifiers"),
+)
+def test_rebinding_identifier_requires_independent_tool_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    source_text: str,
+    target_text: str,
+    answer_identifier: str,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    generic_tool = {
+        "name": "invoice_lookup",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {"path": "invoice_status", "value": "open"},
+            {"path": "due_date", "value": "2026-08-15"},
+        ],
+    }
+    issue = _issue(
+        {
+            **_invoice_concern(
+                "invoice-source",
+                guidance=(guidance,),
+                tool_evidence=[generic_tool],
+            ),
+            "sourceText": source_text,
+        },
+        {
+            **_invoice_concern(
+                "invoice-target",
+                guidance=(guidance,),
+                tool_evidence=[generic_tool],
+            ),
+            "sourceText": target_text,
+        },
+    )
+    answer = f"Invoice {answer_identifier} is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:invoice_lookup"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (guidance,)
+
+
+def test_rebinding_identifier_rejects_ambiguous_same_family_tool_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    ambiguous_tool = {
+        "name": "invoice_lookup",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {
+                "path": "invoice_ids",
+                "value": "INV-11111 and INV-22222",
+            },
+            {"path": "invoice_status", "value": "open"},
+            {"path": "due_date", "value": "2026-08-15"},
+        ],
+    }
+    issue = _issue(
+        *(
+            _invoice_concern(
+                concern_id,
+                guidance=(guidance,),
+                tool_evidence=[ambiguous_tool],
+            )
+            for concern_id in ("invoice-source", "invoice-target")
+        )
+    )
+    answer = "Invoice INV-11111 is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:invoice_lookup"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (guidance,)
+
+
+def test_rebinding_identifier_accepts_exact_fixture_bound_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    issue = _issue(
+        {
+            **_invoice_concern(
+                "invoice-source",
+                guidance=(guidance,),
+                tool_evidence=[_invoice_tool_evidence()],
+            ),
+            "sourceText": "Please check invoice INV-9012.",
+            "replyRequirements": [
+                "Never claim a selected action completed before exact success evidence exists.",
+                "State the open invoice and due date.",
+            ],
+            "forbiddenClaims": ["That a credit has been issued."],
+        },
+        {
+            **_invoice_concern(
+                "invoice-target",
+                guidance=(guidance,),
+                tool_evidence=[_invoice_tool_evidence()],
+            ),
+            "replyRequirements": [
+                "Never claim a selected action completed before exact success evidence exists.",
+                "Keep profile update pending.",
+            ],
+        },
+    )
+    answer = "Invoice INV-9012 is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:fixture_saas_invoice_inv_9012"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+
+
+def test_rebinding_policy_identity_preserves_currency_and_percent_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_guidance = "State that the discount is 10%."
+    target_guidance = "State that the discount is $10."
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            guidance=(source_guidance,),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+        _invoice_concern(
+            "invoice-target",
+            guidance=(target_guidance,),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+    )
+    answer = "The discount is 10%."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (target_guidance,)
+
+
+def test_rebinding_requires_identical_complete_runbook_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance = _REPEATED_INVOICE_GUIDANCE[0]
+    issue = _issue(
+        _invoice_concern(
+            "invoice-source",
+            guidance=(guidance,),
+            tool_evidence=[_invoice_tool_evidence()],
+        ),
+        {
+            **_invoice_concern(
+                "invoice-target",
+                guidance=(guidance,),
+                tool_evidence=[_invoice_tool_evidence()],
+            ),
+            "forbiddenClaims": ["Do not state that the invoice is open."],
+        },
+    )
+    answer = "The invoice is open and due 2026-08-15."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+    source_evidence_id = "tool:invoice-source:fixture_saas_invoice_inv_9012"
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:required-guidance-1",
+                "answered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+            (
+                "invoice-target:required-guidance-1",
+                "not_covered",
+                [unit_id],
+                [source_evidence_id],
+            ),
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (guidance,)
+
+
+def test_duplicate_customer_question_is_never_rebound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    question = "What is the current invoice status?"
+    issue = _issue(
+        {
+            **_invoice_concern("invoice-source"),
+            "answerObligations": [
+                {"obligationId": "invoice-source:question", "question": question}
+            ],
+        },
+        {
+            **_invoice_concern("invoice-target"),
+            "answerObligations": [
+                {"obligationId": "invoice-target:question", "question": question}
+            ],
+        },
+    )
+    answer = "The invoice is open."
+    unit_id = issue_agent._grounding_answer_units(answer)[0]["id"]
+
+    result = _ground_with_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            (
+                "invoice-source:question",
+                "answered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            (
+                "invoice-target:question",
+                "not_covered",
+                [unit_id],
+                ["concern:invoice-source"],
+            ),
+            *[
+                (
+                    f"{concern_id}:required-guidance-{index}",
+                    "answered",
+                    [unit_id],
+                    [f"concern:{concern_id}"],
+                )
+                for concern_id in ("invoice-source", "invoice-target")
+                for index in range(1, len(_REPEATED_INVOICE_GUIDANCE) + 1)
+            ],
+        ],
+        verdict="not_grounded",
+    )
+
+    assert result.verified is False
+    assert result.uncovered_obligations == (question,)

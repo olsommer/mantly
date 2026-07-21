@@ -5517,6 +5517,57 @@ def _false_pause_grounding_issue(
     return issue
 
 
+def _unsafe_false_pause_tool_evidence(case: str) -> list[dict[str, Any]]:
+    base: dict[str, Any] = {
+        "name": "fixture_matter_mat_2026_221",
+        "method": "GET",
+        "status": "success",
+        "responseFacts": [
+            {
+                "path": "fixture_evidence.result.0",
+                "value": "matter_id: MAT-2026-221",
+            },
+            {
+                "path": "fixture_evidence.result.1",
+                "value": "substantive_discussion_paused: false",
+            },
+        ],
+    }
+    if case == "truncated":
+        return [{**base, "responseFactsTruncated": True}]
+    if case == "nonaffirmative":
+        return [{**base, "hasNonaffirmativeLookupResult": True}]
+    if case == "duplicate-post":
+        return [base, {**base, "method": "POST"}]
+    facts = list(base["responseFacts"])
+    if case == "nested-true":
+        facts.append(
+            {
+                "path": "audit.substantive_discussion_paused",
+                "value": True,
+            }
+        )
+    elif case == "nested-matter":
+        facts.append({"path": "payload.matter_id", "value": "MAT-2026-999"})
+    elif case == "nested-fixture-true":
+        facts.append(
+            {
+                "path": "fixture_evidence.result.2",
+                "value": "audit.substantive_discussion_paused: true",
+            }
+        )
+    else:  # pragma: no cover - only bounded test cases call this helper
+        raise AssertionError(f"Unknown unsafe false-pause case: {case}")
+    return [{**base, "responseFacts": facts}]
+
+
+def _false_pause_issue_with_tool_evidence(case: str) -> dict[str, Any]:
+    issue = _false_pause_grounding_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"]["toolEvidence"] = _unsafe_false_pause_tool_evidence(case)
+    return issue
+
+
 def _matter_status_grounding_issue(
     *,
     method: str = "GET",
@@ -6268,6 +6319,38 @@ def test_grounding_overrides_false_pause_state_semantic_miss(
     assert result.obligation_assessments[0]["resolution"] == "answered"
 
 
+def test_grounding_overrides_exact_l08_qualified_false_pause_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _false_pause_grounding_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["answerObligations"][0][
+        "question"
+    ] = "Confirm whether substantive discussion is already paused"
+    concern["outcome"]["toolEvidence"][0]["responseFacts"].append(
+        {
+            "path": "fixture_evidence.result.3",
+            "value": "matter_id: MAT-2026-221",
+        }
+    )
+    evidence_id = "tool:conflict:fixture_matter_mat_2026_221"
+    answer = (
+        "We have confirmed that the matter is currently open, and substantive "
+        "discussion for MAT-2026-221 is not currently paused."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
 def test_false_pause_state_override_accepts_direct_native_boolean() -> None:
     ticket = issue_agent._automatic_ticket_context(
         _false_pause_grounding_issue(response_facts={"substantive_discussion_paused": False})
@@ -6280,6 +6363,303 @@ def test_false_pause_state_override_accepts_direct_native_boolean() -> None:
         answer_unit_ids=("u001",),
         expected_units={"u001": {"text": "Substantive discussion is not currently paused."}},
         supported_unit_evidence_ids={"u001": frozenset({"tool:conflict:fixture_matter_mat_2026_221"})},
+    )
+
+
+def test_false_pause_state_override_rejects_mismatched_matter_qualifier() -> None:
+    ticket = issue_agent._automatic_ticket_context(_false_pause_grounding_issue())
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question="Confirm whether substantive discussion is already paused",
+            answer_unit_ids=("u001",),
+            expected_units={
+                "u001": {
+                    "text": (
+                        "Substantive discussion for MAT-2026-999 is not currently "
+                        "paused."
+                    )
+                }
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset(
+                    {"tool:conflict:fixture_matter_mat_2026_221"}
+                )
+            },
+        )
+        is False
+    )
+
+
+def test_false_pause_state_override_rejects_conflicting_evidence_matter_ids() -> None:
+    issue = _false_pause_grounding_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"]["toolEvidence"][0]["responseFacts"].append(
+        {
+            "path": "fixture_evidence.result.3",
+            "value": "matter_id: MAT-2026-999",
+        }
+    )
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question="Confirm whether substantive discussion is already paused",
+            answer_unit_ids=("u001",),
+            expected_units={
+                "u001": {
+                    "text": (
+                        "Substantive discussion for MAT-2026-999 is not currently "
+                        "paused."
+                    )
+                }
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset(
+                    {"tool:conflict:fixture_matter_mat_2026_221"}
+                )
+            },
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "For MAT-2026-999, substantive discussion is not currently paused.",
+        "Regarding MAT-2026-999, substantive discussion is not currently paused.",
+    ],
+    ids=("for-prefix", "regarding-prefix"),
+)
+def test_false_pause_state_full_grounding_rejects_wrong_prefixed_matter(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    issue = _false_pause_grounding_issue()
+    # Keep the other identifier globally available so this regression exercises
+    # the exact evidence-to-unit binding, not the broad identifier allowlist.
+    issue["subject"] = "Matter MAT-2026-999 status"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=["tool:conflict:fixture_matter_mat_2026_221"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "For MAT-99, substantive discussion is not currently paused.",
+        "Regarding MAT-99, substantive discussion is not currently paused.",
+        "For MAT-99, we confirmed substantive discussion is not currently paused.",
+        (
+            "Regarding MAT-99, the current substantive discussion is not "
+            "currently paused."
+        ),
+        (
+            "For matter MAT-99, our lookup confirms substantive discussion is "
+            "not currently paused."
+        ),
+        "Matter MAT-99: substantive discussion is not currently paused.",
+        "On MAT-99, substantive discussion is not currently paused.",
+        "Re MAT-99, substantive discussion is not currently paused.",
+    ],
+    ids=(
+        "for-prefix",
+        "regarding-prefix",
+        "for-prefix-intervening",
+        "regarding-prefix-intervening",
+        "for-matter-prefix-intervening",
+        "matter-label",
+        "on-prefix",
+        "re-prefix",
+    ),
+)
+def test_false_pause_state_full_grounding_rejects_wrong_short_prefixed_matter(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    issue = _false_pause_grounding_issue()
+    tool = issue["aiRuns"][0]["intentResult"]["concerns"][0]["outcome"][
+        "toolEvidence"
+    ][0]
+    tool["name"] = "fixture_matter_mat_22"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=["tool:conflict:fixture_matter_mat_22"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+def test_false_pause_state_full_grounding_rejects_conflicting_evidence_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _false_pause_grounding_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"]["toolEvidence"][0]["responseFacts"].append(
+        {
+            "path": "fixture_evidence.result.3",
+            "value": "matter_id: MAT-2026-999",
+        }
+    )
+    answer = "Substantive discussion for MAT-2026-999 is not currently paused."
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=["tool:conflict:fixture_matter_mat_2026_221"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+def test_false_pause_state_full_grounding_rejects_duplicate_evidence_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _false_pause_grounding_issue()
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["outcome"]["toolEvidence"] = [
+        {
+            "name": "matter_lookup",
+            "method": "GET",
+            "status": "success",
+            "responseFacts": {
+                "matter_id": matter_id,
+                "substantive_discussion_paused": False,
+            },
+        }
+        for matter_id in ("MAT-2026-221", "MAT-2026-999")
+    ]
+    answer = "Substantive discussion for MAT-2026-999 is not currently paused."
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=["tool:conflict:matter_lookup"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "truncated",
+        "nonaffirmative",
+        "duplicate-post",
+        "nested-true",
+        "nested-matter",
+        "nested-fixture-true",
+    ),
+)
+def test_false_pause_state_override_rejects_unsafe_nested_or_duplicate_evidence(
+    case: str,
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(
+        _false_pause_issue_with_tool_evidence(case)
+    )
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question="Confirm whether substantive discussion is already paused",
+            answer_unit_ids=("u001",),
+            expected_units={
+                "u001": {
+                    "text": "Substantive discussion is not currently paused."
+                }
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset(
+                    {"tool:conflict:fixture_matter_mat_2026_221"}
+                )
+            },
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "truncated",
+        "nonaffirmative",
+        "duplicate-post",
+        "nested-true",
+        "nested-matter",
+        "nested-fixture-true",
+    ),
+)
+def test_false_pause_state_full_grounding_rejects_unsafe_nested_or_duplicate_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=_false_pause_issue_with_tool_evidence(case),
+        answer="Substantive discussion is not currently paused.",
+        resolutions=[("conflict:pause-state", "not_covered", ["u001"])],
+        unit_evidence_ids=["tool:conflict:fixture_matter_mat_2026_221"],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+def test_false_pause_state_override_rejects_qualified_contradiction() -> None:
+    ticket = issue_agent._automatic_ticket_context(_false_pause_grounding_issue())
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question="Confirm whether substantive discussion is already paused",
+            answer_unit_ids=("u001",),
+            expected_units={
+                "u001": {
+                    "text": (
+                        "Substantive discussion for MAT-2026-221 is currently "
+                        "paused, but substantive discussion for MAT-2026-221 is "
+                        "not currently paused."
+                    )
+                }
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset(
+                    {"tool:conflict:fixture_matter_mat_2026_221"}
+                )
+            },
+        )
+        is False
     )
 
 
@@ -6431,6 +6811,50 @@ def test_false_pause_state_override_requires_exact_unambiguous_read_only_fact(
             answer_unit_ids=("u001",),
             expected_units={"u001": {"text": "Substantive discussion is not currently paused."}},
             supported_unit_evidence_ids={"u001": frozenset({"tool:conflict:fixture_matter_mat_2026_221"})},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _false_pause_grounding_issue(method="POST"),
+        _false_pause_grounding_issue(status="failed"),
+        _false_pause_grounding_issue(evidence_concern_id="other"),
+        _false_pause_grounding_issue(
+            response_facts=[
+                {"path": "substantive_discussion_paused", "value": False},
+                {"path": "substantive_discussion_paused", "value": True},
+            ]
+        ),
+    ],
+    ids=("post", "failed", "foreign", "ambiguous"),
+)
+def test_qualified_false_pause_state_override_rejects_unsafe_evidence(
+    issue: dict[str, Any],
+) -> None:
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert (
+        issue_agent._tool_backed_false_pause_state_answers_obligation(
+            ticket=ticket,
+            concern_id="conflict",
+            question="Confirm whether substantive discussion is already paused",
+            answer_unit_ids=("u001",),
+            expected_units={
+                "u001": {
+                    "text": (
+                        "Substantive discussion for MAT-2026-221 is not currently "
+                        "paused."
+                    )
+                }
+            },
+            supported_unit_evidence_ids={
+                "u001": frozenset(
+                    {"tool:conflict:fixture_matter_mat_2026_221"}
+                )
+            },
         )
         is False
     )

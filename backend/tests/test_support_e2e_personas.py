@@ -487,7 +487,11 @@ def test_personas_preserve_the_high_value_regression_cases() -> None:
         "fixture_saas_account_acme_4421"
     ]
     assert saas_runbooks["saas-workspace-deletion"].required_guidance == [
-        "State explicitly that a Billing Admin cannot authorize workspace deletion."
+        "State explicitly that a Billing Admin cannot authorize workspace deletion.",
+        (
+            "State explicitly that the Workspace Owner's identity and authorization "
+            "must be verified before any workspace deletion request can proceed."
+        ),
     ]
     assert saas_runbooks["saas-token-exposure"].required_read_only_tools == [
         "fixture_saas_token_acme_prod_7f2a"

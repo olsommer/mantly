@@ -251,6 +251,7 @@ runbooks:
     required_read_only_tools: [fixture_saas_account_acme_4421]
     required_guidance:
       - State explicitly that a Billing Admin cannot authorize workspace deletion.
+      - State explicitly that the Workspace Owner's identity and authorization must be verified before any workspace deletion request can proceed.
   - key: saas-webhook-recovery
     purpose: Explain verified integration failures and prepare secret rotation or event replay.
     proposed_actions: [rotate_signing_secret, replay_webhook_events]

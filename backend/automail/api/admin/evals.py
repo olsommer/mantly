@@ -41,6 +41,13 @@ router = APIRouter(prefix="/api/admin/projects/{pid}/eval")
 
 __all__ = ["_demo_root", "mark_orphaned_eval_runs_failed", "router"]
 
+_E2E_RESPONSE_JUDGE_TIMEOUT_SECONDS = 60
+# ``langchain-google-genai`` forwards this value as total attempts and the
+# underlying Google client treats ``0`` as its default of five attempts.
+# One therefore means one bounded request with no provider retry for the live
+# fixture judge. (The normal eval runner keeps its existing defaults.)
+_E2E_RESPONSE_JUDGE_MAX_RETRIES = 1
+
 
 class E2EResponseJudgeInput(BaseModel):
     response_text: str = Field(min_length=1, max_length=50_000)
@@ -111,6 +118,8 @@ async def judge_e2e_response(
         True,
         config_path=config_source,
         tenant_id=ctx.tenant_id or None,
+        timeout=_E2E_RESPONSE_JUDGE_TIMEOUT_SECONDS,
+        max_retries=_E2E_RESPONSE_JUDGE_MAX_RETRIES,
     )
     if result.response is None:
         raise HTTPException(status_code=502, detail="Response judge returned no response score")

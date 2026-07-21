@@ -92,4 +92,24 @@ the same number of knowledge articles.
 
 Without `--seed`, the runner first verifies that all persona knowledge markers
 already exist. Runtime project, channel, ticket, and article IDs are written
-only to the requested report path; keep reports outside the repository.
+only to the requested report path; keep reports outside the repository. The
+report is replaced atomically after seeding, after every completed case, and
+after every knowledge check, so an interrupted or hung run retains its last
+complete diagnostic checkpoint.
+
+For a targeted rerun, repeat `--case PERSONA=CASE_ID`. Personas without a
+selected case are not touched, and only knowledge checks whose source case was
+selected run. Omitting `--case` preserves the full-persona behavior.
+
+```sh
+uv run --project backend python -m e2e.live \
+  --api-base https://api.mantly.io \
+  --target lawyer='<lawyer-project-id>:<email-channel-id>' \
+  --case lawyer=L08 \
+  --case lawyer=L09 \
+  --report /tmp/mantly-lawyer-targeted.json
+```
+
+`--timeout-seconds` remains the full pipeline polling budget and, by default,
+the timeout for each API request. Set `--request-timeout-seconds` separately to
+fail a stuck individual request sooner without shortening the pipeline budget.

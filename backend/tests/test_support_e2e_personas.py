@@ -1350,6 +1350,8 @@ def test_e2e_semantic_judge_is_gated_and_uses_response_rubric(monkeypatch) -> No
         "intentName": "e2e-response-rubric",
         "actions": [],
     }
+    assert captured["kwargs"]["timeout"] == 60
+    assert captured["kwargs"]["max_retries"] == 1
 
 
 class _FakeSemanticJudgeApi:

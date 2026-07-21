@@ -11,17 +11,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import re
 import string
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -76,6 +78,12 @@ class Target:
     persona_id: str
     project_id: str
     channel_id: str
+
+
+@dataclass(frozen=True)
+class CaseSelector:
+    persona_id: str
+    case_id: str
 
 
 @dataclass
@@ -181,6 +189,25 @@ def parse_target(raw: str) -> Target:
     return Target(persona_id=persona_id, project_id=project_id, channel_id=channel_id)
 
 
+def parse_case_selector(raw: str) -> CaseSelector:
+    """Parse ``PERSONA_ID=CASE_ID`` for an unambiguous targeted rerun."""
+
+    persona_id, separator, case_id = raw.partition("=")
+    if not separator or not persona_id or not case_id:
+        raise argparse.ArgumentTypeError(
+            "case must be PERSONA_ID=CASE_ID (for example, lawyer=L08)"
+        )
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", persona_id):
+        raise argparse.ArgumentTypeError(
+            f"invalid persona ID in case selector: {persona_id!r}"
+        )
+    if not re.fullmatch(r"[A-Z][0-9]{2}", case_id):
+        raise argparse.ArgumentTypeError(
+            f"invalid case ID in case selector: {case_id!r}"
+        )
+    return CaseSelector(persona_id=persona_id, case_id=case_id)
+
+
 def _target_validation_error(targets: list[Target]) -> str:
     persona_ids = [target.persona_id for target in targets]
     if len(persona_ids) != len(set(persona_ids)):
@@ -194,11 +221,64 @@ def _target_validation_error(targets: list[Target]) -> str:
     return ""
 
 
+def _case_selection_error(
+    selectors: list[CaseSelector],
+    targets: list[Target],
+    personas: dict[str, E2EPersona],
+) -> str:
+    target_ids = {target.persona_id for target in targets}
+    untargeted = sorted(
+        {selector.persona_id for selector in selectors} - target_ids
+    )
+    if untargeted:
+        return (
+            "Every --case persona must also have a --target: "
+            + ", ".join(untargeted)
+        )
+    for selector in selectors:
+        persona = personas.get(selector.persona_id)
+        if persona is None:
+            return f"Unknown persona in --case: {selector.persona_id}"
+        valid_case_ids = {case.id for case in persona.cases}
+        if selector.case_id not in valid_case_ids:
+            return (
+                f"Unknown case for persona {selector.persona_id}: "
+                f"{selector.case_id}"
+            )
+    return ""
+
+
+def _selected_cases(
+    persona: E2EPersona,
+    selectors: list[CaseSelector],
+) -> list[PersonaCase]:
+    if not selectors:
+        return list(persona.cases)
+    selected_ids = {
+        selector.case_id
+        for selector in selectors
+        if selector.persona_id == persona.id
+    }
+    return [case for case in persona.cases if case.id in selected_ids]
+
+
 def _api_base(raw: str) -> str:
     value = raw.rstrip("/")
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise argparse.ArgumentTypeError("--api-base must be an absolute HTTP(S) URL")
+    return value
+
+
+def _positive_seconds(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout values must be numbers") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            "timeout values must be finite and greater than zero"
+        )
     return value
 
 
@@ -2051,6 +2131,9 @@ def run_knowledge_checks(
     persona: E2EPersona,
     article_ids: dict[str, str],
     cases: list[dict[str, Any]],
+    *,
+    source_case_ids: set[str] | None = None,
+    on_completed: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     issue_by_case = {
         str(item.get("id") or ""): str(item.get("issueId") or "")
@@ -2059,6 +2142,11 @@ def run_knowledge_checks(
     }
     results: list[dict[str, Any]] = []
     for check in persona.knowledge_checks:
+        if (
+            source_case_ids is not None
+            and check.source_case_id not in source_case_ids
+        ):
+            continue
         recorder = AssertionRecorder()
         source_case = next(
             case for case in persona.cases if case.id == check.source_case_id
@@ -2177,6 +2265,8 @@ def run_knowledge_checks(
             result["error"] = str(exc)
         result["passed"] = recorder.passed
         results.append(result)
+        if on_completed is not None:
+            on_completed(result)
     return results
 
 
@@ -2202,6 +2292,53 @@ def _summarize(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _completed_report_passed(report: dict[str, Any]) -> bool:
+    personas = report.get("personas") or []
+    return bool(personas) and all(
+        persona.get("passed") is True for persona in personas
+    )
+
+
+def _write_report_checkpoint(
+    report: dict[str, Any],
+    path: Path,
+    *,
+    status: str,
+) -> None:
+    """Atomically persist a valid report snapshot without exposing partial JSON."""
+
+    report["status"] = status
+    report["updatedAt"] = _now_iso()
+    report["summary"] = _summarize(report)
+    report["passed"] = status == "completed" and _completed_report_passed(report)
+    encoded = json.dumps(
+        report,
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    ) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Seed and run portable Mantly personas against isolated live QA projects."
@@ -2216,6 +2353,17 @@ def _parser() -> argparse.ArgumentParser:
         help="Repeat once per persona.",
     )
     parser.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        type=parse_case_selector,
+        metavar="PERSONA=CASE_ID",
+        help=(
+            "Run only this persona case; repeat for multiple targeted cases. "
+            "By default every case for every target runs."
+        ),
+    )
+    parser.add_argument(
         "--token-env",
         default=DEFAULT_TOKEN_ENV,
         help=f"Environment variable containing the bearer token (default: {DEFAULT_TOKEN_ENV}).",
@@ -2224,8 +2372,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", action="store_true")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--timeout-seconds", type=float, default=240.0)
-    parser.add_argument("--poll-seconds", type=float, default=2.0)
+    parser.add_argument("--timeout-seconds", type=_positive_seconds, default=240.0)
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "Optional timeout for each HTTP request. By default --timeout-seconds "
+            "is used for both requests and pipeline polling."
+        ),
+    )
+    parser.add_argument("--poll-seconds", type=_positive_seconds, default=2.0)
     return parser
 
 
@@ -2249,6 +2406,16 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"Unknown persona target(s): {', '.join(sorted(unknown))}", file=sys.stderr)
         return 2
+    selectors: list[CaseSelector] = args.case
+    selection_error = _case_selection_error(selectors, targets, personas)
+    if selection_error:
+        print(selection_error, file=sys.stderr)
+        return 2
+    if selectors:
+        selected_persona_ids = {selector.persona_id for selector in selectors}
+        targets = [
+            target for target in targets if target.persona_id in selected_persona_ids
+        ]
     run_id = args.run_id.strip() or (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         + "-"
@@ -2262,10 +2429,28 @@ def main(argv: list[str] | None = None) -> int:
         "startedAt": _now_iso(),
         "personas": [],
     }
-    api = AdminApi(args.api_base, token, timeout_seconds=args.timeout_seconds)
+    if selectors:
+        report["caseSelection"] = [
+            {"personaId": persona_id, "caseId": case_id}
+            for persona_id, case_id in sorted(
+                {(selector.persona_id, selector.case_id) for selector in selectors}
+            )
+        ]
+    _write_report_checkpoint(report, args.report, status="running")
+    request_timeout_seconds = (
+        args.request_timeout_seconds
+        if args.request_timeout_seconds is not None
+        else args.timeout_seconds
+    )
+    api = AdminApi(
+        args.api_base,
+        token,
+        timeout_seconds=request_timeout_seconds,
+    )
     try:
         for target in targets:
             persona = personas[target.persona_id]
+            selected_cases = _selected_cases(persona, selectors)
             persona_report: dict[str, Any] = {
                 "personaId": persona.id,
                 "projectId": target.project_id,
@@ -2273,6 +2458,8 @@ def main(argv: list[str] | None = None) -> int:
                 "cases": [],
                 "knowledgeChecks": [],
             }
+            if selectors:
+                persona_report["selectedCaseIds"] = [case.id for case in selected_cases]
             report["personas"].append(persona_report)
             print(f"[{persona.id}] target ready; seed={bool(args.seed)}", flush=True)
             try:
@@ -2285,10 +2472,12 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 persona_report["seedError"] = str(exc)
                 persona_report["passed"] = False
+                _write_report_checkpoint(report, args.report, status="running")
                 print(f"[{persona.id}] seed failed: {exc}", file=sys.stderr, flush=True)
                 continue
+            _write_report_checkpoint(report, args.report, status="running")
             runtime_safe = True
-            for index, case in enumerate(persona.cases, start=1):
+            for index, case in enumerate(selected_cases, start=1):
                 try:
                     _preflight_target_for_run(api, target, persona)
                 except Exception as exc:
@@ -2300,8 +2489,13 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                         flush=True,
                     )
+                    _write_report_checkpoint(report, args.report, status="running")
                     break
-                print(f"[{persona.id}] {index}/{len(persona.cases)} {case.id}: {case.title}", flush=True)
+                print(
+                    f"[{persona.id}] {index}/{len(selected_cases)} "
+                    f"{case.id}: {case.title}",
+                    flush=True,
+                )
                 case_report = run_case(
                     api,
                     target,
@@ -2313,16 +2507,28 @@ def main(argv: list[str] | None = None) -> int:
                     poll_seconds=args.poll_seconds,
                 )
                 persona_report["cases"].append(case_report)
+                _write_report_checkpoint(report, args.report, status="running")
                 status = "PASS" if case_report["passed"] else "FAIL"
                 print(f"[{persona.id}] {case.id}: {status}", flush=True)
             if not runtime_safe:
                 continue
+            completed_knowledge_checks: list[dict[str, Any]] = []
+
+            def checkpoint_knowledge_check(result: dict[str, Any]) -> None:
+                completed_knowledge_checks.append(result)
+                persona_report["knowledgeChecks"] = list(
+                    completed_knowledge_checks
+                )
+                _write_report_checkpoint(report, args.report, status="running")
+
             persona_report["knowledgeChecks"] = run_knowledge_checks(
                 api,
                 target,
                 persona,
                 article_ids,
                 persona_report["cases"],
+                source_case_ids={case.id for case in selected_cases},
+                on_completed=checkpoint_knowledge_check,
             )
             persona_report["passed"] = all(
                 item.get("passed") is True
@@ -2331,19 +2537,16 @@ def main(argv: list[str] | None = None) -> int:
                     *persona_report["knowledgeChecks"],
                 ]
             )
+            _write_report_checkpoint(report, args.report, status="running")
+    except KeyboardInterrupt:
+        report["interruptedAt"] = _now_iso()
+        _write_report_checkpoint(report, args.report, status="interrupted")
+        print(f"Interrupted. Partial report: {args.report}", file=sys.stderr, flush=True)
+        return 130
     finally:
         api.close()
     report["finishedAt"] = _now_iso()
-    report["summary"] = _summarize(report)
-    report["passed"] = (
-        bool(report["personas"])
-        and all(persona.get("passed") is True for persona in report["personas"])
-    )
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_report_checkpoint(report, args.report, status="completed")
     print(json.dumps(report["summary"], sort_keys=True), flush=True)
     print(f"Report: {args.report}", flush=True)
     return 0 if report["passed"] else 1

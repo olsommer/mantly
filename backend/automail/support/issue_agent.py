@@ -1460,6 +1460,8 @@ _ACTION_STATE_SUBJECT_TOKEN_ALIASES = {
     # Read-only facts are commonly phrased as either "the recorded due date"
     # or "our records show the due date". Keep those forms on one topic token
     # so an answered fact is not mistaken for an omitted pending action.
+    "availability": "available",
+    "unavailable": "available",
     "recorded": "record",
     "recording": "record",
     "records": "record",

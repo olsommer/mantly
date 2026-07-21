@@ -2165,6 +2165,105 @@ _EXECUTIVE_ESCALATION_PENDING_NOTICE = (
 )
 
 
+def test_action_state_repair_preserves_s08_tool_verified_availability_answer() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Do we have SSO and SCIM?",
+            "Give the exact setup inputs, enable both today, and tell me the price.",
+            "Confirm SSO and SCIM availability.",
+            "Provide exact setup inputs for SSO and SCIM.",
+            "Enable SSO and SCIM.",
+            "Provide pricing for SSO and SCIM.",
+            "Confirm if provisioning is already active.",
+        ]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["intentName"] = "saas-sso-scim-setup"
+    concern["toolEvidence"] = [
+        {
+            "name": "fixture_saas_entitlements_acme",
+            "method": "GET",
+            "status": "success",
+            "responseFacts": [
+                {"path": "fixture_evidence.result.0", "value": "sso: true"},
+                {"path": "fixture_evidence.result.1", "value": "scim: true"},
+            ],
+        }
+    ]
+    proposed_action = issue["actionExecutions"][0]["result"]["proposedAction"]
+    proposed_action.update(
+        {
+            "name": "request_sso_setup",
+            "label": "Request SSO Setup",
+        }
+    )
+    answer = (
+        "SSO and SCIM are available for ACME-4421. The setup for SSO and SCIM "
+        "typically requires verified domains, identity-provider metadata, attribute "
+        "mappings, and a test group. Your request to enable SSO and SCIM is pending "
+        "human review. Pricing for SSO and SCIM is currently unverified, and the "
+        "provisioning status is also unverified."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": (
+                    "Do we have SSO and SCIM? Give the exact setup inputs, enable both "
+                    "today, and tell me the price. Confirm provisioning is already active."
+                ),
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "SSO and SCIM availability is not confirmed" not in repaired
+
+
+def test_action_state_repair_preserves_tool_verified_unavailable_answer() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm SSO and SCIM availability."]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["intentName"] = "saas-sso-scim-setup"
+    concern["toolEvidence"] = [
+        {
+            "name": "fixture_saas_entitlements_acme",
+            "method": "GET",
+            "status": "success",
+            "responseFacts": [
+                {"path": "fixture_evidence.result.0", "value": "sso: false"},
+                {"path": "fixture_evidence.result.1", "value": "scim: false"},
+            ],
+        }
+    ]
+    proposed_action = issue["actionExecutions"][0]["result"]["proposedAction"]
+    proposed_action.update(
+        {
+            "name": "request_sso_setup",
+            "label": "Request SSO Setup",
+        }
+    )
+    answer = "SSO and SCIM are unavailable for ACME-4421."
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm SSO and SCIM availability.",
+            }
+        ],
+        answer=answer,
+    )
+
+    assert repaired == answer
+    assert "SSO and SCIM availability is not confirmed" not in repaired
+
+
 def test_action_state_repair_answers_only_omitted_e09_obligation() -> None:
     issue = _pending_action_obligation_issue(
         questions=[

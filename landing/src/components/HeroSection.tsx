@@ -1,7 +1,7 @@
 import { useTranslation } from "@/i18n/useTranslation";
 import { Button } from "@/components/ui/button";
 import { DemoLauncher } from "@/components/DemoLauncher";
-import { ArrowDown, ArrowRight } from "lucide-react";
+import { ArrowRight, BookOpen, Github } from "lucide-react";
 
 export function HeroSection() {
   const { t } = useTranslation();
@@ -43,13 +43,20 @@ export function HeroSection() {
                 <ArrowRight className="ml-2 h-4 w-4" />
               </a>
             </Button>
-            <Button asChild variant="ghost" size="lg" className="text-base px-8 h-12">
+            <Button asChild variant="outline" size="lg" className="text-base px-8 h-12">
               <a href={t("hero.secondaryHref")}>
+                <Github className="mr-2 h-4 w-4" />
                 {t("hero.secondaryCta")}
-                <ArrowDown className="ml-2 h-4 w-4" />
               </a>
             </Button>
           </div>
+          <a
+            href="https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md"
+            className="mt-5 inline-flex items-center gap-2 text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline animate-fade-in-up delay-300"
+          >
+            <BookOpen className="h-4 w-4" />
+            {t("hero.selfHostCta")}
+          </a>
         </div>
 
         {/* Product preview */}

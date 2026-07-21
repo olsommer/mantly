@@ -453,11 +453,15 @@ export interface LicenseStatus {
 
 export interface BillingStatus {
     plan: 'free' | 'pro' | 'business' | 'enterprise';
+    deploymentMode: 'cloud' | 'self_hosted' | 'dedicated';
+    edition: 'community' | 'business' | 'enterprise';
     subscriptionStatus: 'none' | 'active' | 'past_due' | 'canceled';
     cancelAtPeriodEnd: boolean;
     currentPeriodStart: string;
     currentPeriodEnd: string;
     usage: {
+        agentRunsThisPeriod: number;
+        /** @deprecated Transitional alias for older clients. */
         emailsThisPeriod: number;
         projects: number;
         users: number;
@@ -476,6 +480,8 @@ export interface BillingStatus {
     syncedAddons: Record<string, number>;
     retention?: Record<string, number>;
     limits: {
+        agentRunsPerMonth: number;
+        /** @deprecated Transitional alias for older clients. */
         emailsPerMonth: number;
         projects: number;
         users: number;
@@ -483,6 +489,10 @@ export interface BillingStatus {
         evalSets: number;
         evalCasesPerSet: number;
         retentionDays: number;
+    };
+    metering: {
+        unit: 'agent_run';
+        definition: string;
     };
     features: {
         feedback_learnings: boolean;

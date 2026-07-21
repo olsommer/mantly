@@ -40,7 +40,7 @@ from automail.core.brand import get_brand
 # Set up structured logging right after env is loaded
 from automail.core.logging_config import setup_logging
 from automail.core.rate_limit import limiter
-from automail.core.runtime_flags import demo_routes_available
+from automail.core.runtime_flags import demo_routes_available, is_saas_mode
 from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema
 from automail.db.pocketbase.bootstrap_common import validate_pb_bootstrap_env
 from automail.db.pocketbase.bootstrap_mail import sync_pocketbase_mail_settings
@@ -66,6 +66,9 @@ brand = get_brand()
 # ── Startup validation ────────────────────────────────────────────────────────
 
 REQUIRE_AUTH: bool = os.getenv("REQUIRE_AUTH", "false").lower() == "true"
+
+if is_saas_mode() and not REQUIRE_AUTH:
+    raise RuntimeError("REQUIRE_AUTH=true is required when IS_SAAS=true")
 
 if REQUIRE_AUTH and not os.getenv("JWT_SECRET"):
     raise RuntimeError(

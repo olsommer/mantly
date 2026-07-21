@@ -15,17 +15,38 @@ involves humans where configured, and replies through the originating channel.
 
 | Pillar | Purpose |
 | --- | --- |
-| **Inbox** | Omnichannel ticket inbox and system of record. |
-| **Runbook Agent** | Matches executable runbooks and handles configured actions and responses. |
+| **Inbox** | Omnichannel ticket system of record and one final response composer. |
+| **Runbook Agent** | Matches one or more concern-scoped runbooks and returns structured action results. |
 | **Knowledge Agent** | Helps humans investigate tickets using permitted company knowledge. |
 
 ```text
-channel -> ticket -> runbook or human handling -> actions + response -> channel
+channel -> ticket -> concern runbooks -> actions + structured results
+        -> Inbox response composer -> one response -> channel
 ```
 
 Mantly prioritizes higher full-automation rates, lower cost per resolution,
 faster support, and consistent answer quality. It should not become a generic
 workflow builder or a legacy helpdesk with an AI sidebar.
+
+## Editions and licensing
+
+Unless a file carries an explicit different notice, this repository is Mantly
+Community and is licensed under `AGPL-3.0-only`; see [LICENSE](LICENSE).
+
+- **Mantly Community** is the source-based self-hosted edition. It requires no
+  Mantly license key and performs no commercial license-server check. Start with
+  the [Community deployment guide](docs/deploy-community.md).
+- **Mantly Cloud** is the hosted service operated by Mantly.
+- **Commercial deployments** may add managed delivery, support, or separately
+  licensed terms for Business and Enterprise customers. The commercial
+  pre-built-image path is documented separately and does not change the rights
+  granted for Community source.
+
+Mantly Cloud and independently developed commercial components may use separate
+terms. External Community contributions are not relicensed without separate,
+explicit contributor permission. Third-party components remain under their
+respective licenses. See the [edition matrix](docs/editions.md) and
+[trademark policy](TRADEMARKS.md).
 
 ## Repository
 
@@ -38,7 +59,7 @@ workflow builder or a legacy helpdesk with an AI sidebar.
 | `pocketbase/` | PocketBase image and startup logic |
 | `demo/` | Demo fixtures, actions, pipelines, and sample data |
 | `e2e/` | Reusable test personas, synthetic knowledge, tool facts, and lifecycle expectations |
-| `deploy/` | Customer deployment assets |
+| `deploy/` | Community proxy config and commercial customer deployment assets |
 | `docs/` | Product, implementation, and deployment documentation |
 | `scripts/` | Quality, release, packaging, and smoke-test tooling |
 
@@ -104,11 +125,17 @@ Optional frontend development:
 
 ## Quality checks
 
-Run repository lint, type, and frontend build checks, then backend tests:
+Run the enforced backend lint/tests and frontend lint/build checks:
 
 ```sh
 ./scripts/check-quality.sh
-(cd backend && uv run pytest)
+```
+
+Strict Pyright currently has a legacy baseline and is opt-in while that backlog
+is reduced:
+
+```sh
+MANTLY_STRICT_PYRIGHT=1 ./scripts/check-quality.sh
 ```
 
 ## Documentation
@@ -116,5 +143,10 @@ Run repository lint, type, and frontend build checks, then backend tests:
 - [Product vision](docs/product-vision.md)
 - [Current support-system RFC](docs/pylon-pivot-rfc.md)
 - [Founder-led pilot runbook](PILOT_RUNBOOK.md)
+- [Community self-hosted deployment](docs/deploy-community.md)
+- [Editions and deployment modes](docs/editions.md)
 - [SaaS deployment](docs/deploy-saas.md)
-- [Enterprise on-premises deployment](docs/deploy-onprem.md)
+- [Commercial on-premises deployment](docs/deploy-onprem.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Trademark policy](TRADEMARKS.md)

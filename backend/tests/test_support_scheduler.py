@@ -10908,7 +10908,11 @@ def test_public_support_portal_accepts_customer_message(client, monkeypatch):
 
     resp = client.post(
         "/api/support/portal/portal-token/messages",
-        json={"body": "Still need help.", "senderEmail": "customer@example.com"},
+        json={
+            "body": "Still need help.",
+            "senderEmail": "customer@example.com",
+            "messageId": "portal-client-1",
+        },
     )
 
     assert resp.status_code == 200
@@ -10918,6 +10922,7 @@ def test_public_support_portal_accepts_customer_message(client, monkeypatch):
         "body": "Still need help.",
         "sender_name": "",
         "sender_email": "customer@example.com",
+        "message_id": "portal-client-1",
     }]
 
 

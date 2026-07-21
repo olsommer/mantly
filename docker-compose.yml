@@ -49,6 +49,8 @@ services:
       # ── Core ────────────────────────────────────────────────────────────
       REQUIRE_AUTH: "true"
       IS_SAAS: "${VITE_IS_SAAS:-true}"
+      MANTLY_DEPLOYMENT_MODE: "${MANTLY_DEPLOYMENT_MODE:-cloud}"
+      MANTLY_EDITION: "${MANTLY_EDITION:-community}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       CORS_ORIGINS: "${CORS_ORIGINS:-${PUBLIC_URL}}"
       MANIFEST_BASE_URL: "${PUBLIC_URL}"

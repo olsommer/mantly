@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import HTTPException
 
 from automail.billing.config import (
-    STRIPE_ONPREM_MAX_USERS,
     STRIPE_ONPREM_PRICE_ID,
     STRIPE_WEBHOOK_SECRET,
     _ensure_stripe,
@@ -84,7 +83,7 @@ def _find_tenant_by_customer(customer_id: str) -> str | None:
     return rec["id"] if rec else None
 
 def _handle_checkout_completed(session: dict) -> None:
-    """Handle checkout.session.completed — upgrade tenant or provision on-prem license."""
+    """Upgrade a SaaS tenant or defer on-prem licensing to a platform admin."""
     # Try metadata first, then customer lookup
     tenant_id = (session.get("metadata") or {}).get("tenant_id")
     if not tenant_id:
@@ -101,7 +100,13 @@ def _handle_checkout_completed(session: dict) -> None:
         except Exception:
             is_onprem = False
         if is_onprem:
-            _provision_onprem_license(session, subscription_id, tenant_id)
+            logger.warning(
+                "On-prem checkout completed for subscription %s (tenant=%s); "
+                "no license was created automatically. A platform administrator "
+                "must create and securely deliver it through POST /api/admin/licenses.",
+                subscription_id,
+                tenant_id or "unresolved",
+            )
             return
 
     if not tenant_id:
@@ -134,49 +139,6 @@ def _is_onprem_subscription(subscription_id: str) -> bool:
         if price_id == STRIPE_ONPREM_PRICE_ID:
             return True
     return False
-
-def _provision_onprem_license(
-    session: dict,
-    subscription_id: str,
-    tenant_id: str | None,
-) -> None:
-    """Auto-create an on-prem license when an on-prem subscription is purchased."""
-    import secrets
-
-    from automail.db.pocketbase.client import _first, _post, generate_id
-
-    # Derive tenant name from metadata, customer email, or fallback
-    tenant_name = (session.get("metadata") or {}).get("tenant_name", "")
-    if not tenant_name:
-        customer_details = session.get("customer_details") or {}
-        tenant_name = customer_details.get("name") or customer_details.get("email") or "On-Prem Customer"
-
-    # Check if a license already exists for this subscription
-    existing = _first("licenses", f"subscription_id='{subscription_id}'")
-    if existing:
-        logger.info("License already exists for subscription %s — skipping", subscription_id)
-        return
-
-    # Determine max_users from metadata or env default
-    max_users_str = (session.get("metadata") or {}).get("max_users", "")
-    max_users = int(max_users_str) if max_users_str else STRIPE_ONPREM_MAX_USERS
-
-    key = secrets.token_hex(20)
-    data = {
-        "id": generate_id(),
-        "key": key,
-        "tenant_name": tenant_name,
-        "max_users": max_users,
-        "is_active": True,
-        "subscription_id": subscription_id,
-    }
-    _post("/api/collections/licenses/records", data)
-    logger.info(
-        "Auto-provisioned on-prem license for '%s' (sub=%s, key=%s…)",
-        tenant_name,
-        subscription_id,
-        key[:8],
-    )
 
 def _handle_subscription_updated(subscription: dict) -> None:
     """Handle customer.subscription.updated — sync status and period end."""
@@ -257,8 +219,8 @@ def _revoke_onprem_license_by_subscription(subscription_id: str) -> None:
         {"is_active": False},
     )
     logger.info(
-        "Auto-revoked on-prem license %s (subscription %s deleted)",
-        rec.get("key", "")[:8],
+        "Auto-revoked on-prem license record %s (subscription %s deleted)",
+        rec.get("id", "unknown"),
         subscription_id,
     )
 

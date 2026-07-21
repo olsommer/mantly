@@ -17679,6 +17679,7 @@ def test_create_customer_portal_message_appends_and_reopens(monkeypatch):
     patched: list[tuple[str, dict]] = []
     automations: list[dict] = []
     prepared: list[dict] = []
+    runbooks: list[dict] = []
     ids = iter(["message123", "event123"])
     session = {
         "id": "portal123",
@@ -17704,6 +17705,11 @@ def test_create_customer_portal_message_appends_and_reopens(monkeypatch):
     monkeypatch.setattr(issues, "_list_all", lambda collection, *_args, **_kwargs: [] if collection == "support_issue_watchers" else [])
     monkeypatch.setattr(issues, "_post", lambda path, data: posted.append((path, data)) or data)
     monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
+    monkeypatch.setattr(
+        issues,
+        "_apply_direct_channel_runbooks",
+        lambda **kwargs: runbooks.append(kwargs) or kwargs["issue"],
+    )
     monkeypatch.setattr(
         issues,
         "_run_automation_rules_for_issue",
@@ -17737,6 +17743,9 @@ def test_create_customer_portal_message_appends_and_reopens(monkeypatch):
     assert notification_post["title"] == "Customer Portal reply"
     assert notification_post["body"] == "Still need help."
     assert notification_post["metadata"]["portalSessionId"] == "portal123"
+    assert runbooks[0]["source"] == "customer_portal"
+    assert runbooks[0]["source_message_id"] == "portal:portal123:message123"
+    assert runbooks[0]["body"] == "Still need help."
     assert automations[0]["trigger"] == "issue_updated"
     assert automations[0]["context"]["source"] == "customer_portal"
     assert automations[0]["context"]["event"] == "message_received"
@@ -17790,6 +17799,11 @@ def test_create_customer_portal_message_skips_auto_draft_when_automation_prepare
     monkeypatch.setattr(issues, "_patch", lambda path, data: patched.append((path, data)) or data)
     monkeypatch.setattr(
         issues,
+        "_apply_direct_channel_runbooks",
+        lambda **kwargs: kwargs["issue"],
+    )
+    monkeypatch.setattr(
+        issues,
         "_run_automation_rules_for_issue",
         lambda **_kwargs: {
             "processed": 1,
@@ -17826,6 +17840,65 @@ def test_create_customer_portal_message_skips_auto_draft_when_automation_prepare
     assert [data["event_type"] for path, data in posted if path == "/api/collections/support_issue_events/records"] == [
         "portal_message_received",
     ]
+
+
+def test_customer_portal_message_retry_reuses_client_message_id(monkeypatch):
+    session = {
+        "id": "portal123",
+        "issue": "issue1",
+        "tenant": "tenant1",
+        "project": "project1",
+        "status": "active",
+        "expires_at": "2030-07-01T10:00:00+00:00",
+    }
+    issue = {
+        "id": "issue1",
+        "status": "open",
+        "contactEmail": "customer@example.com",
+        "messageCount": 2,
+    }
+    existing_message = {
+        "id": "existingmsg1",
+        "issue": "issue1",
+        "source_message_id": "portal:portal123:portal-client-1",
+        "direction": "customer",
+        "sender": "customer@example.com",
+        "body": "Still need help.",
+        "message_kind": "portal_message",
+        "attachments": [],
+        "metadata": {"portalSessionId": "portal123"},
+    }
+
+    def fake_first(collection, *_args, **_kwargs):
+        if collection == "support_customer_portal_sessions":
+            return session
+        if collection == "support_messages":
+            return existing_message
+        return None
+
+    monkeypatch.setattr(issues, "_first", fake_first)
+    monkeypatch.setattr(issues, "get_issue", lambda *_args, **_kwargs: issue)
+    monkeypatch.setattr(
+        issues,
+        "_post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("retry must not persist twice")),
+    )
+    monkeypatch.setattr(
+        issues,
+        "_apply_direct_channel_runbooks",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("retry must not rerun AI")),
+    )
+
+    message = issues.create_customer_portal_message(
+        "portal-token",
+        body="Still need help.",
+        sender_email="customer@example.com",
+        message_id="portal-client-1",
+    )
+
+    assert message is not None
+    assert message["id"] == "existingmsg1"
+    assert message["sourceMessageId"] == "portal:portal123:portal-client-1"
 
 
 def test_create_web_chat_session_creates_issue_session_and_message(monkeypatch):

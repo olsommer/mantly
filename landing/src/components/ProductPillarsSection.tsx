@@ -1,46 +1,48 @@
+import { BookOpenCheck, Inbox, Workflow } from "lucide-react";
 import { useTranslation } from "@/i18n/useTranslation";
-import { BriefcaseBusiness, FileText, Headset } from "lucide-react";
 import type { TranslationKey } from "@/i18n/translations";
 
-const useCases = [
+const pillars = [
   {
-    icon: BriefcaseBusiness,
-    title: "testimonials.1.title",
-    copy: "testimonials.1.copy",
+    icon: Inbox,
+    title: "pillars.1.title",
+    copy: "pillars.1.copy",
   },
   {
-    icon: FileText,
-    title: "testimonials.2.title",
-    copy: "testimonials.2.copy",
+    icon: Workflow,
+    title: "pillars.2.title",
+    copy: "pillars.2.copy",
   },
   {
-    icon: Headset,
-    title: "testimonials.3.title",
-    copy: "testimonials.3.copy",
+    icon: BookOpenCheck,
+    title: "pillars.3.title",
+    copy: "pillars.3.copy",
   },
-] satisfies Array<{ icon: typeof BriefcaseBusiness; title: TranslationKey; copy: TranslationKey }>;
+] satisfies Array<{
+  icon: typeof Inbox;
+  title: TranslationKey;
+  copy: TranslationKey;
+}>;
 
-export function TestimonialsSection() {
+export function ProductPillarsSection() {
   const { t } = useTranslation();
 
   return (
-    <section className="py-24 sm:py-32 bg-muted/40">
+    <section className="bg-muted/40 py-24 sm:py-32">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        {/* Section header */}
         <div className="mx-auto max-w-2xl text-center">
           <p className="text-xs font-semibold uppercase tracking-widest text-primary">
-            {t("testimonials.tagline")}
+            {t("pillars.tagline")}
           </p>
           <h2 className="mt-4 text-[2.5rem] leading-tight sm:text-[3rem] lg:text-[3.5rem]">
-            {t("testimonials.title")}
+            {t("pillars.title")}
           </h2>
         </div>
 
-        {/* Use-case cards */}
         <div className="mt-16 grid gap-6 sm:grid-cols-3">
-          {useCases.map((item, i) => (
+          {pillars.map((item) => (
             <div
-              key={i}
+              key={item.title}
               className="rounded-2xl border border-border/60 bg-background p-7 transition-shadow hover:shadow-md"
             >
               <item.icon className="mb-5 h-6 w-6 text-primary" />

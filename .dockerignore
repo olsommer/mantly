@@ -9,7 +9,7 @@ admin/node_modules/
 addin/node_modules/
 landing/node_modules/
 frontend/node_modules/
-.venv
+**/.venv/
 .DS_Store
 frontend/dist
 admin/dist
@@ -18,4 +18,6 @@ landing/dist
 backend/data/
 test-results
 playwright-report
+.playwright-cli/
+output/
 .claude/

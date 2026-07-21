@@ -1,14 +1,15 @@
 import {
-  MousePointerClick,
-  BotMessageSquare,
-  Paperclip,
-  Users,
-  RefreshCw,
+  BookOpenCheck,
+  CloudCog,
+  FileSearch,
+  GitBranch,
+  Github,
   ShieldCheck,
   LayoutDashboard,
-  Mail,
-  Settings2,
-  FileCheck2,
+  MessagesSquare,
+  MessageSquareText,
+  PlugZap,
+  TestTube2,
 } from "lucide-react";
 import { useTranslation } from "@/i18n/useTranslation";
 
@@ -17,21 +18,21 @@ export function FeaturesSection() {
   const subtitle = t("features.subtitle");
 
   const features = [
-    { icon: MousePointerClick, title: t("features.1.title"), desc: t("features.1.desc") },
-    { icon: BotMessageSquare, title: t("features.2.title"), desc: t("features.2.desc") },
-    { icon: Paperclip, title: t("features.3.title"), desc: t("features.3.desc") },
-    { icon: Users, title: t("features.4.title"), desc: t("features.4.desc") },
-    { icon: RefreshCw, title: t("features.5.title"), desc: t("features.5.desc") },
-    { icon: ShieldCheck, title: t("features.6.title"), desc: t("features.6.desc") },
-    { icon: Settings2, title: t("features.7.title"), desc: t("features.7.desc") },
-    { icon: FileCheck2, title: t("features.8.title"), desc: t("features.8.desc") },
-    { icon: Mail, title: t("features.9.title"), desc: t("features.9.desc") },
+    { icon: Github, title: t("features.1.title"), desc: t("features.1.desc") },
+    { icon: MessagesSquare, title: t("features.2.title"), desc: t("features.2.desc") },
+    { icon: GitBranch, title: t("features.3.title"), desc: t("features.3.desc") },
+    { icon: MessageSquareText, title: t("features.4.title"), desc: t("features.4.desc") },
+    { icon: BookOpenCheck, title: t("features.5.title"), desc: t("features.5.desc") },
+    { icon: PlugZap, title: t("features.6.title"), desc: t("features.6.desc") },
+    { icon: ShieldCheck, title: t("features.7.title"), desc: t("features.7.desc") },
+    { icon: TestTube2, title: t("features.8.title"), desc: t("features.8.desc") },
+    { icon: CloudCog, title: t("features.9.title"), desc: t("features.9.desc") },
   ];
 
   const adminTabs = [
-    { icon: Settings2, label: t("features.admin.tab.intents") },
-    { icon: Mail, label: t("features.admin.tab.responses") },
-    { icon: FileCheck2, label: t("features.admin.tab.attachments") },
+    { icon: GitBranch, label: t("features.admin.tab.intents") },
+    { icon: TestTube2, label: t("features.admin.tab.responses") },
+    { icon: FileSearch, label: t("features.admin.tab.attachments") },
   ];
 
   return (

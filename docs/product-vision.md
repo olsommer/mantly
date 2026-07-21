@@ -36,9 +36,10 @@ Mantly should win through:
 - End-to-end agentic execution, not reply suggestions alone.
 - A higher full-automation rate and lower cost per resolved ticket.
 - Deep company control over runbooks, knowledge, permissions, and autonomy.
-- Mantly Cloud plus an enterprise on-premises option.
-- A likely self-hostable or source-available model, with the exact boundary
-  still open.
+- Mantly Cloud plus AGPL Community self-hosting and commercial Business or
+  Enterprise deployment options.
+- A useful open-source Community core. The exact paid feature and support
+  boundary remains open.
 
 The anti-vision is a Zendesk clone with an AI sidebar. Mantly must not become a
 bloated legacy helpdesk checklist, a general-purpose workflow builder, or an
@@ -84,8 +85,8 @@ Mantly has three product pillars.
 
 | Pillar | Purpose | Optionality |
 | --- | --- | --- |
-| **Inbox** | Omnichannel support inbox and system of record for tickets, conversations, actions, replies, ownership, and audit history. | Shared foundation. |
-| **Runbook Agent** | Matches and activates executable support runbooks, performs configured work, and applies the runbook's human/automation behavior. | Independently enabled module. |
+| **Inbox** | Omnichannel support inbox, system of record, and owner of the final response composer across all detected concerns. | Shared foundation. |
+| **Runbook Agent** | Matches and activates concern-scoped support runbooks, performs permitted work, and returns structured results and action state without composing a customer reply. | Independently enabled module. |
 | **Knowledge Agent** | Helps a human investigate a ticket by searching permitted company knowledge and preparing a cited answer. | Independently enabled module. |
 
 Both agents use one shared, permission-aware knowledge layer. They remain
@@ -100,18 +101,20 @@ language, but the product UI uses the familiar ticket term.
 ```text
 Customer channel
     -> normalized ticket in Inbox
-    -> Runbook Agent selects one best-matching runbook
-        -> manual handling
-        -> semi-automatic handling
-        -> automatic handling
-    -> one customer response
+    -> detect one or more customer concerns
+    -> execute each matching runbook in an isolated concern context
+        -> structured findings, obligations, evidence, and action state
+    -> Inbox response composer combines all concern results
+    -> validate answer obligations and action state
+    -> one coherent customer response
     -> originating channel
 ```
 
-For V1, one ticket activates one runbook. If a ticket clearly contains several
-independent requests and no single runbook is a safe fit, Mantly routes it for
-manual handling. Multi-runbook selection, parallel execution, conflict
-resolution, and response synthesis are later capabilities.
+One inbound message may activate several runbooks. Each runbook works only on
+its assigned concern and returns structured output; it does not independently
+draft a customer-facing response. The Inbox composer owns the single final
+reply so duplicated greetings, conflicting promises, and fragmented answers do
+not leak to the customer.
 
 When no runbook matches, Mantly can queue the ticket for manual work and, when
 enabled, prepare a knowledge-backed answer. The company controls whether that
@@ -120,8 +123,9 @@ answer remains a draft or may be sent automatically.
 ## Runbook Agent
 
 A runbook behaves like an agent skill. It tells Mantly when the skill applies,
-which knowledge and tools it may use, which actions it can expose or execute,
-and how a response should be handled.
+which knowledge and tools it may use, and which actions it can expose or
+execute. It returns concern-scoped evidence, obligations, and action outcomes
+to the Inbox response composer.
 
 The agent finds the best runbook, activates it, then follows the behavior
 configured by the company. V1 supports three practical outcomes:
@@ -141,18 +145,20 @@ schema.
 
 - Configured automatic actions run.
 - Other configured actions appear as human-triggered buttons.
-- The runbook may prepare a response draft.
-- A human completes the work and sends the response; semi-automatic handling
-  never auto-sends.
+- The runbook returns its structured outcome to the ticket.
+- The Inbox response composer prepares one combined response. A human completes
+  the work and sends it; semi-automatic handling never auto-sends.
 
 ### Automatic
 
 - Configured automatic actions run.
-- Mantly generates and sends the response when auto-send is configured.
+- The Inbox response composer generates one response and sends it when the
+  ticket's auto-send policy permits it.
 - No human participates unless execution fails.
 
-Response behavior remains runbook-configurable: no response, prepare a draft,
-or send automatically where the selected runbook outcome permits it.
+Response delivery is a ticket/Inbox policy: no response, prepare a draft, or
+send automatically when every selected runbook, required action, grounding
+check, and approval rule permits it.
 
 V1 does not need a general conditional-policy engine. Runbook configuration
 should remain understandable: human review, automatic versus human-triggered
@@ -355,7 +361,7 @@ same day:
 
 1. Connect one channel.
 2. Add knowledge.
-3. Create one runbook.
+3. Create the runbooks needed for the concerns you support.
 4. Connect one tool.
 5. Replay a test ticket.
 6. Publish.
@@ -372,8 +378,7 @@ same day:
 ### Explicit V1 boundaries
 
 - Do not expand existing automation features into a general workflow builder.
-- No visual DAGs, nested orchestration, multi-runbook execution, or runbook
-  resume engine.
+- No visual DAGs, arbitrary nested orchestration, or runbook resume engine.
 - No voice or phone channel.
 - No standalone internal Knowledge Agent.
 - No runbook or connector marketplace.
@@ -424,8 +429,7 @@ targets remain open.
 - Historical-ticket analysis that proposes runbooks.
 - Observation of human handling that proposes improvements.
 - Broader knowledge connectors.
-- Multi-intent detection and multi-runbook execution.
-- Parallel runbook processing, conflict handling, and one synthesized response.
+- More parallel runbook processing and stronger cross-concern conflict handling.
 - Specialist approval routing.
 - Runbook and connector marketplace.
 - Voice support.
@@ -435,7 +439,8 @@ targets remain open.
 
 - Economic buyer and internal champion.
 - Pricing model.
-- Exact open-source or source-available boundary and license.
+- Exact Business and Enterprise feature boundary, contribution licensing, and
+  commercial packaging terms around the AGPL Community core.
 - Numeric customer and revenue targets.
 - Role taxonomy and default views.
 - Existing-helpdesk overlay scope and priority.

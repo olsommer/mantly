@@ -6,6 +6,7 @@ import {
     Eye,
     FlaskConical,
     FolderKanban,
+    Github,
     Inbox,
     BookOpen,
     ChartNoAxesColumn,
@@ -61,6 +62,7 @@ import {
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { brand } from '@/brand';
 import { useI18n } from '@/lib/i18n-context';
+import { settings } from '@/settings';
 
 import type { AccountCapabilities, Project } from '@/api/endpoints';
 
@@ -391,10 +393,11 @@ export function AppSidebar({
                                 const items: { title: string; href: string; icon: LucideIcon }[] = [];
                                 if (effectiveSupport) items.push({ title: 'Support', href: `mailto:${effectiveSupport}`, icon: LifeBuoy });
                                 if (effectiveFeedback) items.push({ title: 'Feedback', href: `mailto:${effectiveFeedback}`, icon: Send });
+                                items.push({ title: 'Source code', href: settings.sourceUrl, icon: Github });
                                 return items.map(item => (
                                     <SidebarMenuItem key={item.title}>
                                         <SidebarMenuButton asChild size="sm" tooltip={t(item.title)}>
-                                            <a href={item.href}>
+                                            <a href={item.href} target={item.title === 'Source code' ? '_blank' : undefined} rel={item.title === 'Source code' ? 'noreferrer' : undefined}>
                                                 <item.icon />
                                                 <span>{t(item.title)}</span>
                                             </a>

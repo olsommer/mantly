@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "@/i18n/useTranslation";
 import { Button } from "@/components/ui/button";
-import { Menu, X } from "lucide-react";
+import { Github, Menu, X } from "lucide-react";
 import { localizedPath } from "@/i18n/language-routing";
 
 export function Header() {
@@ -9,6 +9,7 @@ export function Header() {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const homePath = localizedPath("/", lang);
+  const mobileMenuId = "mobile-navigation";
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 10);
@@ -18,9 +19,12 @@ export function Header() {
 
   const navLinks = [
     { href: `${homePath}#how-it-works`, label: t("nav.howItWorks") },
-    { href: `${homePath}#features`, label: t("nav.features") },
+    { href: `${homePath}#features`, label: t("nav.product") },
     { href: `${homePath}#pricing`, label: t("nav.pricing") },
-    { href: `${homePath}#faq`, label: t("nav.faq") },
+    {
+      href: "https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md",
+      label: t("nav.docs"),
+    },
   ];
 
   return (
@@ -34,7 +38,7 @@ export function Header() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
           {/* Logo */}
-          <a href="https://mantly.io" className="flex items-baseline gap-1.5 group">
+          <a href={homePath} className="flex items-baseline gap-1.5 group">
             <span className="font-display text-2xl font-normal leading-tight tracking-tight text-foreground">
               {t("brand.name")}
             </span>
@@ -42,7 +46,7 @@ export function Header() {
           </a>
 
           {/* Desktop nav */}
-          <nav className="hidden md:flex items-center gap-8">
+          <nav className="hidden lg:flex items-center gap-7">
             {navLinks.map((link) => (
               <a
                 key={link.href}
@@ -55,12 +59,18 @@ export function Header() {
           </nav>
 
           {/* Desktop actions */}
-          <div className="hidden md:flex items-center gap-4">
+          <div className="hidden lg:flex items-center gap-2">
             <Button asChild variant="ghost" size="sm">
-              <a href="mailto:support@mantly.io">{t("nav.sales")}</a>
+              <a href="https://github.com/olsommer/mantly">
+                <Github className="h-4 w-4" />
+                {t("nav.github")}
+              </a>
+            </Button>
+            <Button asChild variant="ghost" size="sm">
+              <a href="https://app.mantly.io">{t("nav.login")}</a>
             </Button>
             <Button asChild size="sm">
-              <a href="https://app.mantly.io">{t("nav.login")}</a>
+              <a href="https://app.mantly.io?view=signup">{t("nav.cloud")}</a>
             </Button>
           </div>
 
@@ -69,9 +79,11 @@ export function Header() {
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="md:hidden text-muted-foreground hover:text-foreground"
+            className="lg:hidden text-muted-foreground hover:text-foreground"
             onClick={() => setMobileOpen(!mobileOpen)}
-            aria-label="Toggle menu"
+            aria-label={t(mobileOpen ? "a11y.closeMenu" : "a11y.openMenu")}
+            aria-expanded={mobileOpen}
+            aria-controls={mobileMenuId}
           >
             {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </Button>
@@ -79,7 +91,10 @@ export function Header() {
 
         {/* Mobile nav */}
         {mobileOpen && (
-          <div className="md:hidden border-t border-border/50 pb-4 pt-3 bg-background/95 backdrop-blur-xl">
+          <div
+            id={mobileMenuId}
+            className="lg:hidden border-t border-border/50 pb-4 pt-3 bg-background/95 backdrop-blur-xl"
+          >
             <nav className="flex flex-col gap-1">
               {navLinks.map((link) => (
                 <a
@@ -91,12 +106,18 @@ export function Header() {
                   {link.label}
                 </a>
               ))}
-              <div className="flex items-center gap-3 pt-3 mt-2 border-t border-border/50">
+              <div className="grid grid-cols-2 gap-2 pt-3 mt-2 border-t border-border/50">
                 <Button asChild variant="ghost" size="sm">
-                  <a href="mailto:support@mantly.io">{t("nav.sales")}</a>
+                  <a href="https://github.com/olsommer/mantly">
+                    <Github className="h-4 w-4" />
+                    {t("nav.github")}
+                  </a>
                 </Button>
-                <Button asChild size="sm">
+                <Button asChild variant="ghost" size="sm">
                   <a href="https://app.mantly.io">{t("nav.login")}</a>
+                </Button>
+                <Button asChild size="sm" className="col-span-2">
+                  <a href="https://app.mantly.io?view=signup">{t("nav.cloud")}</a>
                 </Button>
               </div>
             </nav>

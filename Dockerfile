@@ -31,11 +31,13 @@ FROM node:22-alpine AS admin-build
 ARG VITE_PB_URL=/pb
 ARG VITE_API_URL=
 ARG VITE_IS_SAAS=false
+ARG VITE_SOURCE_URL=https://github.com/olsommer/mantly
 ARG VITE_ENABLE_ADMIN_PREVIEW=true
 ARG VITE_ENABLE_DEMO_MODE=false
 ENV VITE_PB_URL=${VITE_PB_URL}
 ENV VITE_API_URL=${VITE_API_URL}
 ENV VITE_IS_SAAS=${VITE_IS_SAAS}
+ENV VITE_SOURCE_URL=${VITE_SOURCE_URL}
 ENV VITE_REQUIRE_AUTH=true
 ENV VITE_ENABLE_ADMIN_PREVIEW=${VITE_ENABLE_ADMIN_PREVIEW}
 ENV VITE_ENABLE_DEMO_MODE=${VITE_ENABLE_DEMO_MODE}
@@ -66,6 +68,7 @@ COPY brand.json /app/brand.json
 COPY demo /app/demo
 COPY e2e/ /app/e2e/
 COPY addin/manifest.xml /app/backend/resources/manifest.xml
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/mantly/THIRD_PARTY_NOTICES.md
 
 # Copy icon assets for Outlook manifest
 COPY backend/assets/ /app/backend/assets/

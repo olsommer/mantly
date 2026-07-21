@@ -80,6 +80,7 @@ def ensure_app_collections_schema(
             "licenses",
             [
                 _text_field("key", required=True),
+                _text_field("key_prefix"),
                 _text_field("tenant_name", required=True),
                 _number_field("max_users"),
                 _date_field("expires_at"),
@@ -94,6 +95,13 @@ def ensure_app_collections_schema(
         _, was_created = _ensure_collection(http_client, resolved_pb_url, token, licenses_payload)
         if was_created:
             created.append("licenses")
+        _ensure_field_on_collection(
+            http_client,
+            resolved_pb_url,
+            token,
+            "licenses",
+            _text_field("key_prefix"),
+        )
 
         eval_sets_payload = _base_collection_payload(
             "eval_sets",
@@ -199,6 +207,26 @@ def ensure_app_collections_schema(
         if was_created:
             created.append("projects")
         projects_id = projects["id"]
+
+        agent_runs_payload = _base_collection_payload(
+            "agent_runs",
+            [
+                _relation_field_cascade("tenant", tenants_id, required=True),
+                _relation_field("project", projects_id),
+                _text_field("source", required=True),
+                _text_field("idempotency_key", required=True),
+                _created_field(),
+                _updated_field(),
+            ],
+            indexes=[
+                "CREATE UNIQUE INDEX idx_agent_runs_tenant_key ON agent_runs (tenant, idempotency_key)",
+                "CREATE INDEX idx_agent_runs_tenant_created ON agent_runs (tenant, created)",
+                "CREATE INDEX idx_agent_runs_project_created ON agent_runs (project, created)",
+            ],
+        )
+        _, was_created = _ensure_collection(http_client, resolved_pb_url, token, agent_runs_payload)
+        if was_created:
+            created.append("agent_runs")
 
         project_configs_payload = _base_collection_payload(
             "project_configs",
@@ -1484,6 +1512,14 @@ def ensure_app_collections_schema(
         if was_created:
             created.append("support_channel_sync_runs")
 
+        support_channel_webhook_claim_fields = (
+            {**_text_field("processing_claim_token"), "hidden": True},
+            _date_field("processing_claimed_at"),
+            _date_field("processing_claim_expires_at"),
+            _number_field("processing_attempt"),
+            _bool_field("processing_retry_safe"),
+            _number_field("retry_policy_version"),
+        )
         support_channel_webhook_events_payload = _base_collection_payload(
             "support_channel_webhook_events",
             [
@@ -1501,6 +1537,7 @@ def ensure_app_collections_schema(
                 _json_field("result"),
                 _date_field("received_at"),
                 _date_field("processed_at"),
+                *support_channel_webhook_claim_fields,
                 _created_field(),
                 _updated_field(),
             ],
@@ -1519,14 +1556,7 @@ def ensure_app_collections_schema(
         )
         if was_created:
             created.append("support_channel_webhook_events")
-        for field_def in (
-            {**_text_field("processing_claim_token"), "hidden": True},
-            _date_field("processing_claimed_at"),
-            _date_field("processing_claim_expires_at"),
-            _number_field("processing_attempt"),
-            _bool_field("processing_retry_safe"),
-            _number_field("retry_policy_version"),
-        ):
+        for field_def in support_channel_webhook_claim_fields:
             _ensure_field_on_collection(
                 http_client,
                 resolved_pb_url,

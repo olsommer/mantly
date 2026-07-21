@@ -53,12 +53,12 @@ function UsageMeter({
 
 const PLAN_META: Record<string, { label: string; description: string }> = {
     free: {
-        label: 'Free',
-        description: 'Get started with basic features and limited usage.',
+        label: 'Cloud Sandbox',
+        description: 'Explore the managed core with limited usage.',
     },
     pro: {
-        label: 'Pro',
-        description: 'Lightweight automation for one user.',
+        label: 'Cloud',
+        description: 'Managed hosting for operational support teams.',
     },
     business: {
         label: 'Business',
@@ -66,7 +66,7 @@ const PLAN_META: Record<string, { label: string; description: string }> = {
     },
     enterprise: {
         label: 'Enterprise',
-        description: 'Custom limits, dedicated support, and SLA.',
+        description: 'Custom deployment and onboarding for regulated teams.',
     },
 };
 
@@ -226,7 +226,7 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                     {plan === 'pro' && status.cancelAtPeriodEnd && (
                         <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                             <div className="font-medium">
-                                {cancelDate ? t('Pro active until {date}.', { date: cancelDate }) : t('Pro subscription scheduled to cancel.')}
+                                {cancelDate ? t('Cloud active until {date}.', { date: cancelDate }) : t('Cloud subscription scheduled to cancel.')}
                             </div>
                             <div className="mt-0.5">
                                 {t('Your subscription is scheduled to cancel at the end of the billing period.')}
@@ -240,7 +240,7 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                             <Button onClick={() => handleUpgrade('pro')} disabled={checkoutLoading !== null}>
                                 {checkoutLoading === 'pro' && <Loader className="size-4 animate-spin mr-2" />}
                                 <Zap className="size-4 mr-1" />
-                                {t('Upgrade to Pro')}
+                                {t('Upgrade to Cloud')}
                             </Button>
                         )}
                         {(plan === 'pro' || plan === 'business') && (
@@ -290,13 +290,13 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                                     <div>
                                         <div className="font-medium text-foreground">{t('Plan limits')}</div>
                                         <p>
-                                            {t('Emails, projects and team members are included up to the plan limit. Paid plans can continue beyond configured limits when add-on prices are configured.')}
+                                            {t('Agent runs and projects are included up to the plan limit. One agent run is one inbound customer message, regardless of concerns, runbooks, knowledge searches, tool calls, or response steps.')}
                                         </p>
                                     </div>
                                     <div>
                                         <div className="font-medium text-foreground">{t('Paid add-ons')}</div>
                                         <p>
-                                            {t('Extra users, extra projects and additional email blocks are billed as Stripe subscription items. You can manage or cancel the subscription in the Stripe portal.')}
+                                            {t('Extra projects and additional agent-run blocks can be billed as Stripe subscription items. You can manage or cancel the subscription in the Stripe portal.')}
                                         </p>
                                     </div>
                                     <div>
@@ -312,15 +312,15 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                     <div className="mt-3 flex gap-3 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
                         <Info className="mt-0.5 size-4 shrink-0 text-primary" />
                         <div>
-                            {t('Usage above the included team, project or email limits can create paid add-ons when the related Stripe add-on prices are configured.')}
+                            {t('Usage above the included project or agent-run limits can create paid add-ons when the related Stripe add-on prices are configured.')}
                         </div>
                     </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     <UsageMeter
-                        label={t('Emails processed')}
-                        current={status.usage.emailsThisPeriod}
-                        limit={status.limits.emailsPerMonth}
+                        label={t('Agent runs')}
+                        current={status.usage.agentRunsThisPeriod}
+                        limit={status.limits.agentRunsPerMonth}
                     />
                     <Separator />
                     <UsageMeter
@@ -396,12 +396,12 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                     <CardContent>
                         <div className="grid grid-cols-5 gap-4 text-sm">
                             <div className="font-medium text-muted-foreground">{t('Feature')}</div>
-                            <div className="font-medium text-center">{t('Free')}</div>
-                            <div className="font-medium text-center">{t('Pro')}</div>
+                            <div className="font-medium text-center">{t('Cloud Sandbox')}</div>
+                            <div className="font-medium text-center">{t('Cloud')}</div>
                             <div className="font-medium text-center">{t('Business')}</div>
                             <div className="font-medium text-center">{t('Enterprise')}</div>
 
-                            <div className="text-muted-foreground">{t('Emails / month')}</div>
+                            <div className="text-muted-foreground">{t('Agent runs / month')}</div>
                             <div className="text-center">20</div>
                             <div className="text-center font-medium">150</div>
                             <div className="text-center font-medium">1,000</div>
@@ -410,14 +410,14 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                             <div className="text-muted-foreground">{t('Projects')}</div>
                             <div className="text-center">1</div>
                             <div className="text-center font-medium">1</div>
-                            <div className="text-center font-medium">1</div>
+                            <div className="text-center font-medium">10</div>
                             <div className="text-center font-medium">{t('Custom')}</div>
 
                             <div className="text-muted-foreground">{t('Team members')}</div>
                             <div className="text-center">1</div>
-                            <div className="text-center font-medium">1</div>
-                            <div className="text-center font-medium">5</div>
-                            <div className="text-center font-medium">{t('Custom')}</div>
+                            <div className="text-center font-medium">{t('Unlimited')}</div>
+                            <div className="text-center font-medium">{t('Unlimited')}</div>
+                            <div className="text-center font-medium">{t('Unlimited')}</div>
 
                             <div className="text-muted-foreground">{t('Eval runs / month')}</div>
                             <div className="text-center">5</div>
@@ -432,8 +432,8 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                             <div className="text-center font-medium">{t('Included')}</div>
 
                             <div className="text-muted-foreground">{t('Security monitoring')}</div>
-                            <div className="text-center text-muted-foreground">--</div>
-                            <div className="text-center text-muted-foreground">--</div>
+                            <div className="text-center font-medium">{t('Included')}</div>
+                            <div className="text-center font-medium">{t('Included')}</div>
                             <div className="text-center font-medium">{t('Included')}</div>
                             <div className="text-center font-medium">{t('Custom')}</div>
 
@@ -455,11 +455,6 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                             <div className="text-center font-medium">199 EUR/mo</div>
                             <div className="text-center font-medium">{t('Custom')}</div>
 
-                            <div className="text-muted-foreground">{t('Additional seats')}</div>
-                            <div className="text-center text-muted-foreground">--</div>
-                            <div className="text-center font-medium">9 EUR/mo</div>
-                            <div className="text-center font-medium">{t('from 9 EUR/mo')}</div>
-                            <div className="text-center font-medium">{t('Custom')}</div>
                         </div>
                         <p className="mt-3 text-xs text-muted-foreground">
                             {t('Mantly-managed LLM usage is billed at provider cost x 1.2. BYOK LLM usage has no surcharge.')}
@@ -468,7 +463,7 @@ export function Billing({ isDemoAccount = false }: { isDemoAccount?: boolean }) 
                             {plan === 'free' && (
                                 <Button onClick={() => handleUpgrade('pro')} disabled={checkoutLoading !== null} size="sm">
                                     {checkoutLoading === 'pro' && <Loader className="size-4 animate-spin mr-2" />}
-                                    {t('Upgrade to Pro')}
+                                    {t('Upgrade to Cloud')}
                                 </Button>
                             )}
                             {plan !== 'business' && (

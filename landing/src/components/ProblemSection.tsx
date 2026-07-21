@@ -1,23 +1,23 @@
 import { useTranslation } from "@/i18n/useTranslation";
-import { Clock, ShieldAlert, AlertTriangle } from "lucide-react";
+import { CircleCheckBig, GitMerge, ShieldCheck } from "lucide-react";
 
 export function ProblemSection() {
   const { t } = useTranslation();
   const subtitle = t("problem.subtitle");
 
-  const painPoints = [
+  const outcomes = [
     {
-      icon: Clock,
+      icon: CircleCheckBig,
       title: t("problem.pain1.title"),
       desc: t("problem.pain1.desc"),
     },
     {
-      icon: ShieldAlert,
+      icon: ShieldCheck,
       title: t("problem.pain2.title"),
       desc: t("problem.pain2.desc"),
     },
     {
-      icon: AlertTriangle,
+      icon: GitMerge,
       title: t("problem.pain3.title"),
       desc: t("problem.pain3.desc"),
     },
@@ -39,15 +39,15 @@ export function ProblemSection() {
           )}
         </div>
 
-        {/* Pain points */}
+        {/* Outcomes */}
         <div className="mt-20 grid gap-6 sm:grid-cols-3 sm:gap-8">
-          {painPoints.map((point) => (
+          {outcomes.map((point) => (
             <div
               key={point.title}
               className="rounded-2xl border border-border/60 bg-background p-8 text-center transition-shadow hover:shadow-md"
             >
-              <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-destructive/8">
-                <point.icon className="h-5 w-5 text-destructive" />
+              <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/8">
+                <point.icon className="h-5 w-5 text-primary" />
               </div>
               <h3 className="text-[2rem] leading-tight">{point.title}</h3>
               <p className="mt-3 text-base text-muted-foreground leading-relaxed">

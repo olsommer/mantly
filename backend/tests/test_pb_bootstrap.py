@@ -5,6 +5,7 @@ import pytest
 
 from automail.db.pocketbase.bootstrap_app_schema import AppCollectionsBootstrapResult, ensure_app_collections_schema
 from automail.db.pocketbase.bootstrap_common import validate_pb_bootstrap_env
+from automail.db.pocketbase.bootstrap_onprem import bootstrap_onprem_tenant
 from automail.db.pocketbase.bootstrap_users import UsersSchemaBootstrapResult, ensure_users_collection_schema
 
 
@@ -16,17 +17,19 @@ def _collection_payload(*, create_rule, include_must_change_password: bool) -> d
         {"id": "relation1314505826", "name": "tenant", "type": "relation"},
     ]
     if include_must_change_password:
-        fields.extend([
-            {
-                "id": "bool915273641",
-                "name": "must_change_password",
-                "type": "bool",
-            },
-            {"id": "bool1111111111", "name": "password_login_enabled", "type": "bool"},
-            {"id": "text1111111111", "name": "login_code_hash", "type": "text"},
-            {"id": "date1111111111", "name": "login_code_expires", "type": "date"},
-            {"id": "number1111111111", "name": "login_code_attempts", "type": "number"},
-        ])
+        fields.extend(
+            [
+                {
+                    "id": "bool915273641",
+                    "name": "must_change_password",
+                    "type": "bool",
+                },
+                {"id": "bool1111111111", "name": "password_login_enabled", "type": "bool"},
+                {"id": "text1111111111", "name": "login_code_hash", "type": "text"},
+                {"id": "date1111111111", "name": "login_code_expires", "type": "date"},
+                {"id": "number1111111111", "name": "login_code_attempts", "type": "number"},
+            ]
+        )
     return {
         "id": "_pb_users_auth_",
         "name": "users",
@@ -44,6 +47,48 @@ class TestValidatePbBootstrapEnv:
     def test_auth_enabled_requires_pb_admin_credentials(self):
         with pytest.raises(RuntimeError, match="PB_ADMIN_EMAIL and PB_ADMIN_PASSWORD"):
             validate_pb_bootstrap_env(True, pb_admin_email="", pb_admin_password="")
+
+
+class TestBootstrapOnPremTenant:
+    @pytest.mark.no_gemini
+    def test_initial_root_user_can_sign_in_without_smtp(self, monkeypatch):
+        posted_users: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and request.url.path.endswith("/tenants/records"):
+                return httpx.Response(200, json={"totalItems": 0}, request=request)
+            if request.method == "POST":
+                payload = json.loads(request.content.decode("utf-8"))
+                if request.url.path.endswith("/users/records"):
+                    posted_users.append(payload)
+                return httpx.Response(200, json={"id": payload.get("id", "record")}, request=request)
+            raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+        client_class = httpx.Client
+        monkeypatch.setenv("IS_SAAS", "false")
+        monkeypatch.setenv("REQUIRE_AUTH", "true")
+        monkeypatch.setenv("SETUP_ADMIN_EMAIL", "root@example.com")
+        monkeypatch.setenv("SETUP_ADMIN_PASSWORD", "temporary-password")
+        monkeypatch.setattr(
+            "automail.db.pocketbase.bootstrap_onprem._authenticate_superuser",
+            lambda *_args: "superuser-token",
+        )
+        monkeypatch.setattr(
+            "automail.db.pocketbase.bootstrap_onprem.httpx.Client",
+            lambda **_kwargs: client_class(transport=httpx.MockTransport(handler)),
+        )
+
+        created = bootstrap_onprem_tenant(
+            pb_url="http://pb.test",
+            pb_admin_email="pb-admin@example.com",
+            pb_admin_password="pb-secret",
+        )
+
+        assert created is True
+        assert len(posted_users) == 1
+        assert posted_users[0]["email"] == "root@example.com"
+        assert posted_users[0]["password_login_enabled"] is True
+        assert posted_users[0]["must_change_password"] is True
 
 
 class TestEnsureUsersCollectionSchema:
@@ -216,6 +261,7 @@ class TestEnsureAppCollectionsSchema:
                 "eval_runs",
                 "eval_results",
                 "projects",
+                "agent_runs",
                 "project_configs",
                 "intent_attachments",
                 "project_intents",
@@ -275,6 +321,7 @@ class TestEnsureAppCollectionsSchema:
             "eval_runs",
             "eval_results",
             "projects",
+            "agent_runs",
             "project_configs",
             "intent_attachments",
             "project_intents",
@@ -327,55 +374,57 @@ class TestEnsureAppCollectionsSchema:
             "intent_learning_proposals",
         ]
         assert posted_payloads[0]["indexes"] == ["CREATE UNIQUE INDEX idx_licenses_key ON licenses (key)"]
+        assert any(field["name"] == "key_prefix" and field["type"] == "text" for field in posted_payloads[0]["fields"])
         assert posted_payloads[2]["fields"][0]["collectionId"] == "eval_sets-id"
         assert posted_payloads[4]["fields"][0]["collectionId"] == "eval_runs-id"
+        agent_runs = next(payload for payload in posted_payloads if payload["name"] == "agent_runs")
+        assert any(
+            field["name"] == "tenant" and field["collectionId"] == "tenants-id" and field["required"]
+            for field in agent_runs["fields"]
+        )
+        assert any(
+            field["name"] == "project" and field["collectionId"] == "projects-id"
+            for field in agent_runs["fields"]
+        )
+        assert any(field["name"] == "source" and field["required"] for field in agent_runs["fields"])
+        assert any(field["name"] == "idempotency_key" and field["required"] for field in agent_runs["fields"])
+        assert (
+            "CREATE UNIQUE INDEX idx_agent_runs_tenant_key ON agent_runs (tenant, idempotency_key)"
+            in agent_runs["indexes"]
+        )
         intent_attachments = next(payload for payload in posted_payloads if payload["name"] == "intent_attachments")
         assert any(field["name"] == "file" and field["type"] == "file" for field in intent_attachments["fields"])
         support_accounts = next(payload for payload in posted_payloads if payload["name"] == "support_accounts")
         assert any(field["name"] == "account_key" and field["required"] for field in support_accounts["fields"])
         support_contacts = next(payload for payload in posted_payloads if payload["name"] == "support_contacts")
         assert any(field["name"] == "contact_key" and field["required"] for field in support_contacts["fields"])
-        email_claims = next(
-            payload for payload in posted_payloads
-            if payload["name"] == "email_processing_claims"
-        )
-        assert any(
-            field["name"] == "owner_token" and field["hidden"] is True
-            for field in email_claims["fields"]
-        )
+        email_claims = next(payload for payload in posted_payloads if payload["name"] == "email_processing_claims")
+        assert any(field["name"] == "owner_token" and field["hidden"] is True for field in email_claims["fields"])
         assert (
             "CREATE UNIQUE INDEX idx_email_processing_claim_attempt ON "
             "email_processing_claims (project, claim_key, attempt)"
         ) in email_claims["indexes"]
         support_issues = next(payload for payload in posted_payloads if payload["name"] == "support_issues")
         assert any(field["name"] == "source_email_id" and field["required"] for field in support_issues["fields"])
-        assert any(field["name"] == "project" and field["collectionId"] == "projects-id" for field in support_issues["fields"])
+        assert any(
+            field["name"] == "project" and field["collectionId"] == "projects-id" for field in support_issues["fields"]
+        )
         assert any(field["name"] == "queue_key" and field["type"] == "text" for field in support_issues["fields"])
         assert any(field["name"] == "queue_name" and field["type"] == "text" for field in support_issues["fields"])
         llm_usage = next(payload for payload in posted_payloads if payload["name"] == "llm_usage_events")
+        assert any(field["name"] == "duration_ms" and field["type"] == "number" for field in llm_usage["fields"])
+        assert any(field["name"] == "stage_execution_id" and field["type"] == "text" for field in llm_usage["fields"])
+        assert any(field["name"] == "usage_record_id" and field["type"] == "text" for field in llm_usage["fields"])
+        assert any(field["name"] == "duration_scope" and field["type"] == "text" for field in llm_usage["fields"])
         assert any(
-            field["name"] == "duration_ms" and field["type"] == "number"
-            for field in llm_usage["fields"]
-        )
-        assert any(
-            field["name"] == "stage_execution_id" and field["type"] == "text"
-            for field in llm_usage["fields"]
-        )
-        assert any(
-            field["name"] == "usage_record_id" and field["type"] == "text"
-            for field in llm_usage["fields"]
-        )
-        assert any(
-            field["name"] == "duration_scope" and field["type"] == "text"
-            for field in llm_usage["fields"]
-        )
-        assert any(
-            field["name"] == "usage_payload_count" and field["type"] == "number"
-            for field in llm_usage["fields"]
+            field["name"] == "usage_payload_count" and field["type"] == "number" for field in llm_usage["fields"]
         )
         assert any(field["name"] == "metadata" and field["type"] == "json" for field in support_issues["fields"])
         support_issues_final = collections["support_issues"]
-        assert any(field["name"] == "merged_into_issue" and field["collectionId"] == "support_issues-id" for field in support_issues_final["fields"])
+        assert any(
+            field["name"] == "merged_into_issue" and field["collectionId"] == "support_issues-id"
+            for field in support_issues_final["fields"]
+        )
         assert any(field["name"] == "merged_at" and field["type"] == "date" for field in support_issues_final["fields"])
         assert any(field["name"] == "metadata" and field["type"] == "json" for field in support_issues_final["fields"])
         support_queues = next(payload for payload in posted_payloads if payload["name"] == "support_queues")
@@ -387,26 +436,48 @@ class TestEnsureAppCollectionsSchema:
         crm_connectors = next(payload for payload in posted_payloads if payload["name"] == "support_crm_connectors")
         assert any(field["name"] == "connector_key" and field["required"] for field in crm_connectors["fields"])
         crm_cursors = next(payload for payload in posted_payloads if payload["name"] == "support_crm_cursors")
-        assert any(field["name"] == "connector" and field["collectionId"] == "support_crm_connectors-id" for field in crm_cursors["fields"])
+        assert any(
+            field["name"] == "connector" and field["collectionId"] == "support_crm_connectors-id"
+            for field in crm_cursors["fields"]
+        )
         crm_sync_runs = next(payload for payload in posted_payloads if payload["name"] == "support_crm_sync_runs")
         assert any(field["name"] == "objects_seen" and field["type"] == "number" for field in crm_sync_runs["fields"])
-        crm_webhook_events = next(payload for payload in posted_payloads if payload["name"] == "support_crm_webhook_events")
+        crm_webhook_events = next(
+            payload for payload in posted_payloads if payload["name"] == "support_crm_webhook_events"
+        )
         assert any(field["name"] == "event_id" and field["required"] for field in crm_webhook_events["fields"])
-        assert any(field["name"] == "connector" and field["collectionId"] == "support_crm_connectors-id" for field in crm_webhook_events["fields"])
+        assert any(
+            field["name"] == "connector" and field["collectionId"] == "support_crm_connectors-id"
+            for field in crm_webhook_events["fields"]
+        )
         support_messages = next(payload for payload in posted_payloads if payload["name"] == "support_messages")
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in support_messages["fields"])
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in support_messages["fields"]
+        )
         external_objects = next(payload for payload in posted_payloads if payload["name"] == "support_external_objects")
         assert any(field["name"] == "external_id" and field["required"] for field in external_objects["fields"])
-        assert any(field["name"] == "account" and field["collectionId"] == "support_accounts-id" for field in external_objects["fields"])
-        external_sync_runs = next(payload for payload in posted_payloads if payload["name"] == "support_external_sync_runs")
-        assert any(field["name"] == "objects_seen" and field["type"] == "number" for field in external_sync_runs["fields"])
-        assert any(field["name"] == "source_issue" and field["collectionId"] == "support_issues-id" for field in external_sync_runs["fields"])
-        support_outbound = next(payload for payload in posted_payloads if payload["name"] == "support_outbound_messages")
+        assert any(
+            field["name"] == "account" and field["collectionId"] == "support_accounts-id"
+            for field in external_objects["fields"]
+        )
+        external_sync_runs = next(
+            payload for payload in posted_payloads if payload["name"] == "support_external_sync_runs"
+        )
+        assert any(
+            field["name"] == "objects_seen" and field["type"] == "number" for field in external_sync_runs["fields"]
+        )
+        assert any(
+            field["name"] == "source_issue" and field["collectionId"] == "support_issues-id"
+            for field in external_sync_runs["fields"]
+        )
+        support_outbound = next(
+            payload for payload in posted_payloads if payload["name"] == "support_outbound_messages"
+        )
         assert any(field["name"] == "to_address" and field["required"] for field in support_outbound["fields"])
         assert any(field["name"] == "body" and field["required"] for field in support_outbound["fields"])
         assert any(
-            field["name"] == "delivery_claim_token" and field["hidden"] is True
-            for field in support_outbound["fields"]
+            field["name"] == "delivery_claim_token" and field["hidden"] is True for field in support_outbound["fields"]
         )
         assert {field["name"] for field in support_outbound["fields"]} >= {
             "idempotency_key",
@@ -421,16 +492,29 @@ class TestEnsureAppCollectionsSchema:
         delivery_runs = next(payload for payload in posted_payloads if payload["name"] == "support_delivery_runs")
         assert any(field["name"] == "sent" and field["type"] == "number" for field in delivery_runs["fields"])
         assert any(field["name"] == "result" and field["type"] == "json" for field in delivery_runs["fields"])
-        launch_proof_runs = next(payload for payload in posted_payloads if payload["name"] == "support_launch_proof_runs")
+        launch_proof_runs = next(
+            payload for payload in posted_payloads if payload["name"] == "support_launch_proof_runs"
+        )
         assert any(field["name"] == "actions" and field["type"] == "json" for field in launch_proof_runs["fields"])
         assert any(field["name"] == "launch_proof" and field["type"] == "json" for field in launch_proof_runs["fields"])
         support_ai_runs = next(payload for payload in posted_payloads if payload["name"] == "support_ai_runs")
         assert any(field["name"] == "run_key" and field["required"] for field in support_ai_runs["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in support_ai_runs["fields"])
-        support_agent_messages = next(payload for payload in posted_payloads if payload["name"] == "support_agent_messages")
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in support_ai_runs["fields"]
+        )
+        support_agent_messages = next(
+            payload for payload in posted_payloads if payload["name"] == "support_agent_messages"
+        )
         assert any(field["name"] == "role" and field["required"] for field in support_agent_messages["fields"])
-        assert any(field["name"] == "run" and field["collectionId"] == "support_ai_runs-id" for field in support_agent_messages["fields"])
-        assert any(field["name"] == "reply" and field["collectionId"] == "support_outbound_messages-id" for field in support_agent_messages["fields"])
+        assert any(
+            field["name"] == "run" and field["collectionId"] == "support_ai_runs-id"
+            for field in support_agent_messages["fields"]
+        )
+        assert any(
+            field["name"] == "reply" and field["collectionId"] == "support_outbound_messages-id"
+            for field in support_agent_messages["fields"]
+        )
         support_actions = next(payload for payload in posted_payloads if payload["name"] == "support_action_executions")
         assert any(field["name"] == "action_key" and field["required"] for field in support_actions["fields"])
         assert any(field["name"] == "label" and field["required"] for field in support_actions["fields"])
@@ -438,55 +522,104 @@ class TestEnsureAppCollectionsSchema:
         assert any(field["name"] == "trigger" and field["required"] for field in automation_rules["fields"])
         assert any(field["name"] == "actions" and field["type"] == "json" for field in automation_rules["fields"])
         automation_runs = next(payload for payload in posted_payloads if payload["name"] == "support_automation_runs")
-        assert any(field["name"] == "rule" and field["collectionId"] == "support_automation_rules-id" for field in automation_runs["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in automation_runs["fields"])
+        assert any(
+            field["name"] == "rule" and field["collectionId"] == "support_automation_rules-id"
+            for field in automation_runs["fields"]
+        )
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in automation_runs["fields"]
+        )
         support_events = next(payload for payload in posted_payloads if payload["name"] == "support_issue_events")
         assert any(field["name"] == "event_type" and field["required"] for field in support_events["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in support_events["fields"])
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in support_events["fields"]
+        )
         support_notes = next(payload for payload in posted_payloads if payload["name"] == "support_internal_notes")
         assert any(field["name"] == "body" and field["required"] for field in support_notes["fields"])
         sla_policies = next(payload for payload in posted_payloads if payload["name"] == "support_sla_policies")
-        assert any(field["name"] == "first_response_minutes" and field["type"] == "number" for field in sla_policies["fields"])
-        assert any(field["name"] == "resolution_minutes" and field["type"] == "number" for field in sla_policies["fields"])
-        portal_sessions = next(payload for payload in posted_payloads if payload["name"] == "support_customer_portal_sessions")
+        assert any(
+            field["name"] == "first_response_minutes" and field["type"] == "number" for field in sla_policies["fields"]
+        )
+        assert any(
+            field["name"] == "resolution_minutes" and field["type"] == "number" for field in sla_policies["fields"]
+        )
+        portal_sessions = next(
+            payload for payload in posted_payloads if payload["name"] == "support_customer_portal_sessions"
+        )
         assert any(field["name"] == "token_hash" and field["required"] for field in portal_sessions["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in portal_sessions["fields"])
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in portal_sessions["fields"]
+        )
         csat_feedback = next(payload for payload in posted_payloads if payload["name"] == "support_csat_feedback")
         assert any(field["name"] == "rating" and field["type"] == "number" for field in csat_feedback["fields"])
-        assert any(field["name"] == "portal_session" and field["collectionId"] == "support_customer_portal_sessions-id" for field in csat_feedback["fields"])
+        assert any(
+            field["name"] == "portal_session" and field["collectionId"] == "support_customer_portal_sessions-id"
+            for field in csat_feedback["fields"]
+        )
         support_channels = next(payload for payload in posted_payloads if payload["name"] == "support_channels")
         assert any(field["name"] == "channel_key" and field["required"] for field in support_channels["fields"])
         channel_cursors = next(payload for payload in posted_payloads if payload["name"] == "support_channel_cursors")
         assert any(field["name"] == "cursor_key" and field["required"] for field in channel_cursors["fields"])
-        assert any(field["name"] == "channel" and field["collectionId"] == "support_channels-id" for field in channel_cursors["fields"])
+        assert any(
+            field["name"] == "channel" and field["collectionId"] == "support_channels-id"
+            for field in channel_cursors["fields"]
+        )
         sync_runs = next(payload for payload in posted_payloads if payload["name"] == "support_channel_sync_runs")
-        assert any(field["name"] == "channel" and field["collectionId"] == "support_channels-id" for field in sync_runs["fields"])
+        assert any(
+            field["name"] == "channel" and field["collectionId"] == "support_channels-id"
+            for field in sync_runs["fields"]
+        )
         assert any(field["name"] == "result" and field["type"] == "json" for field in sync_runs["fields"])
-        channel_webhook_events = next(payload for payload in posted_payloads if payload["name"] == "support_channel_webhook_events")
+        channel_webhook_events = next(
+            payload for payload in posted_payloads if payload["name"] == "support_channel_webhook_events"
+        )
         assert any(field["name"] == "event_id" and field["required"] for field in channel_webhook_events["fields"])
-        assert any(field["name"] == "outbound_message" and field["collectionId"] == "support_outbound_messages-id" for field in channel_webhook_events["fields"])
-        web_chat_sessions = next(payload for payload in posted_payloads if payload["name"] == "support_web_chat_sessions")
+        assert any(
+            field["name"] == "outbound_message" and field["collectionId"] == "support_outbound_messages-id"
+            for field in channel_webhook_events["fields"]
+        )
+        assert any(
+            field["name"] == "processing_claim_expires_at" and field["type"] == "date"
+            for field in channel_webhook_events["fields"]
+        )
+        assert (
+            "CREATE INDEX idx_support_channel_webhook_claim ON "
+            "support_channel_webhook_events (status, processing_claim_expires_at)"
+            in channel_webhook_events["indexes"]
+        )
+        web_chat_sessions = next(
+            payload for payload in posted_payloads if payload["name"] == "support_web_chat_sessions"
+        )
         assert any(field["name"] == "session_key" and field["required"] for field in web_chat_sessions["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in web_chat_sessions["fields"])
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in web_chat_sessions["fields"]
+        )
         knowledge_articles = next(payload for payload in posted_payloads if payload["name"] == "knowledge_articles")
         assert any(field["name"] == "title" and field["required"] for field in knowledge_articles["fields"])
         knowledge_gaps = next(payload for payload in posted_payloads if payload["name"] == "support_knowledge_gaps")
         assert any(field["name"] == "gap_key" and field["required"] for field in knowledge_gaps["fields"])
-        assert any(field["name"] == "issue" and field["collectionId"] == "support_issues-id" for field in knowledge_gaps["fields"])
+        assert any(
+            field["name"] == "issue" and field["collectionId"] == "support_issues-id"
+            for field in knowledge_gaps["fields"]
+        )
         account_insights = next(payload for payload in posted_payloads if payload["name"] == "support_account_insights")
-        assert any(field["name"] == "account" and field["collectionId"] == "support_accounts-id" for field in account_insights["fields"])
+        assert any(
+            field["name"] == "account" and field["collectionId"] == "support_accounts-id"
+            for field in account_insights["fields"]
+        )
         assert any(field["name"] == "insight_key" and field["required"] for field in account_insights["fields"])
         intent_learnings = next(payload for payload in posted_payloads if payload["name"] == "intent_learnings")
-        assert any(field["name"] == "affected_stages" and field["type"] == "json" for field in intent_learnings["fields"])
+        assert any(
+            field["name"] == "affected_stages" and field["type"] == "json" for field in intent_learnings["fields"]
+        )
         learning_proposals = next(
-            payload for payload in posted_payloads
-            if payload["name"] == "intent_learning_proposals"
+            payload for payload in posted_payloads if payload["name"] == "intent_learning_proposals"
         )
         assert any(
-            field["name"] == "eval_case_hash" and field["type"] == "text"
-            for field in learning_proposals["fields"]
+            field["name"] == "eval_case_hash" and field["type"] == "text" for field in learning_proposals["fields"]
         )
-        assert any(
-            field["name"] == "eval_run" and field["type"] == "text"
-            for field in learning_proposals["fields"]
-        )
+        assert any(field["name"] == "eval_run" and field["type"] == "text" for field in learning_proposals["fields"])

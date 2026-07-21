@@ -7,6 +7,21 @@ on:
     branches: ["main"]
 
 jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   backend-lint:
     name: Backend lint
     runs-on: ubuntu-latest
@@ -59,6 +74,9 @@ jobs:
           tests/test_prompt_injection.py
           tests/test_eval_judge.py
           tests/test_billing_periods.py
+          tests/test_agent_run_metering.py
+          tests/test_license_security.py
+          tests/test_signup_and_license.py
           tests/test_llm_billing.py
           tests/test_refactor_paths.py
           -v

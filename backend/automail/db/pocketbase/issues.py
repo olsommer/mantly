@@ -180,6 +180,7 @@ SMOKE_TARGET_PLACEHOLDERS = {
     "smxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 }
 SUPPORT_SCHEMA_REQUIRED_COLLECTIONS = (
+    "agent_runs",
     "email_processing_claims",
     "support_accounts",
     "support_contacts",
@@ -221,6 +222,7 @@ SUPPORT_SCHEMA_REQUIRED_COLLECTIONS = (
     "support_account_insights",
 )
 SUPPORT_SCHEMA_COLLECTION_METADATA = {
+    "agent_runs": {"area": "billing", "migration": "65_agent_runs.js"},
     "email_processing_claims": {"area": "inbound", "migration": "61_email_processing_claims.js"},
     "support_issues": {"area": "ticket spine", "migration": "25_support_issues.js"},
     "support_accounts": {"area": "accounts", "migration": "26_support_accounts_contacts_messages.js"},
@@ -7572,6 +7574,22 @@ def _apply_direct_channel_runbooks(
                 logger.error("Could not persist direct-channel resume fallback", exc_info=True)
         return {**issue, **issue_updates}
 
+    from automail.billing.agent_runs import (
+        direct_channel_agent_run_key,
+        reserve_agent_run,
+    )
+
+    agent_run_reservation = reserve_agent_run(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        source=source,
+        idempotency_key=direct_channel_agent_run_key(
+            project_id=project_id,
+            source=source,
+            source_message_id=source_message_id,
+        ),
+    )
+
     processing_claim_token = secrets.token_hex(16)
     processing_run = _start_processing_run(
         issue_id=issue_id,
@@ -7645,6 +7663,10 @@ def _apply_direct_channel_runbooks(
     # The expiry sweeper never replays runbooks. If it fenced this owner while
     # the LLM was still returning, refuse every subsequent durable write.
     _require_processing_claim(processing_run)
+    if tenant_id and agent_run_reservation.created:
+        from automail.billing.addons import sync_stripe_addons_best_effort
+
+        sync_stripe_addons_best_effort(tenant_id)
 
     requires_human = bool(error or result is None or result.requires_human)
     intent_result = result.intent_result if result else {"concerns": [], "error": error}
@@ -19789,21 +19811,28 @@ def _portal_auto_prepare_agent_reply(
     portal_session_id: str,
     message_id: str,
     automation_result: dict[str, Any] | None,
+    processing_run: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    _require_processing_claim(processing_run)
     if _automation_created_customer_reply(automation_result):
+        _finish_processing_run(processing_run, detail="Automation prepared the customer reply")
         return None
     question = "Draft an approval-ready response to the latest customer portal message from the ticket context and knowledge base."
     try:
-        answer = create_issue_agent_answer(
-            issue_id,
-            tenant_id=tenant_id,
-            project_id=project_id,
-            author_email="automation",
-            question=question,
-            create_draft=True,
-            include_feedback_link=False,
-            use_knowledge_agent=False,
-        )
+        _require_processing_claim(processing_run)
+        answer_kwargs: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "author_email": "automation",
+            "question": question,
+            "create_draft": True,
+            "include_feedback_link": False,
+            "use_knowledge_agent": False,
+        }
+        if processing_run:
+            answer_kwargs["processing_run"] = processing_run
+        answer = create_issue_agent_answer(issue_id, **answer_kwargs)
+        _require_processing_claim(processing_run)
         if answer:
             _record_issue_event(
                 issue_id=issue_id,
@@ -19821,8 +19850,12 @@ def _portal_auto_prepare_agent_reply(
                     "aiRunId": _string_from(answer.get("run", {}).get("id")) if isinstance(answer.get("run"), dict) else "",
                 },
             )
+        _finish_processing_run(processing_run, detail="Ticket package ready for review")
         return answer
+    except ProcessingClaimExpired:
+        raise
     except Exception as exc:
+        _finish_processing_run(processing_run, failed=True, detail=str(exc))
         _record_issue_event(
             issue_id=issue_id,
             event_type="portal_agent_autopilot_failed",
@@ -19846,6 +19879,7 @@ def create_customer_portal_message(
     body: str,
     sender_name: str = "",
     sender_email: str = "",
+    message_id: str = "",
 ) -> dict[str, Any] | None:
     clean_body = body.strip()
     if not clean_body:
@@ -19861,13 +19895,38 @@ def create_customer_portal_message(
     issue = get_issue(issue_id, tenant_id=tenant_id, project_id=project_id)
     if not issue:
         return None
-    message_id = generate_id()
+    client_message_id = _clip(_string_from(message_id), 300)
+    source_message_id = (
+        f"portal:{session['id']}:{client_message_id}"
+        if client_message_id
+        else ""
+    )
+    if source_message_id:
+        existing_message = _first(
+            "support_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"source_message_id='{_escape_pb(source_message_id)}'"
+                ),
+            ),
+        )
+        if existing_message:
+            return _normalize_message(existing_message)
+    record_message_id = (
+        _stable_record_id("customer_portal_message", project_id, issue_id, source_message_id)
+        if source_message_id
+        else generate_id()
+    )
+    source_message_id = source_message_id or f"portal:{session['id']}:{record_message_id}"
     sender = sender_email.strip() or sender_name.strip() or issue.get("contactEmail") or "Customer"
     now = _now_iso()
     data: dict[str, Any] = {
-        "id": message_id,
+        "id": record_message_id,
         "issue": issue_id,
-        "source_message_id": f"portal:{session['id']}:{message_id}",
+        "source_message_id": source_message_id,
         "direction": "customer",
         "sender": sender,
         "body": clean_body,
@@ -19879,7 +19938,25 @@ def create_customer_portal_message(
     if tenant_id:
         data["tenant"] = tenant_id
     data["project"] = project_id
-    message = _normalize_message(_post("/api/collections/support_messages/records", data))
+    try:
+        message = _normalize_message(_post("/api/collections/support_messages/records", data))
+    except httpx.HTTPStatusError:
+        if not client_message_id:
+            raise
+        existing_message = _first(
+            "support_messages",
+            _issue_filter(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                extra=(
+                    f"issue='{_escape_pb(issue_id)}' && "
+                    f"source_message_id='{_escape_pb(source_message_id)}'"
+                ),
+            ),
+        )
+        if not existing_message:
+            raise
+        return _normalize_message(existing_message)
     issue_updates: dict[str, Any] = {
         "latest_message_at": now,
         "message_count": int(issue.get("messageCount") or 0) + 1,
@@ -19897,35 +19974,62 @@ def create_customer_portal_message(
         title="Portal message received",
         from_status="done" if issue_was_done else "",
         to_status="open" if issue_was_done else "",
-        metadata={"portalSessionId": session["id"], "messageId": message_id},
+        metadata={"portalSessionId": session["id"], "messageId": record_message_id},
     )
     _notify_customer_message_subscribers(
         issue={**issue, **issue_updates},
         issue_id=issue_id,
         source="customer_portal",
-        message_id=message_id,
+        message_id=record_message_id,
         body=clean_body,
         actor_email=sender,
         tenant_id=tenant_id,
         project_id=project_id,
         metadata={"portalSessionId": session["id"]},
     )
-    automation_result = _run_message_update_automations(
+    contact_email = sender_email.strip() or _string_from(issue.get("contactEmail"))
+    contact_name = sender_name.strip() or _string_from(issue.get("contactName")) or sender
+    processed_issue = _apply_direct_channel_runbooks(
         issue={**issue, **issue_updates},
+        source="customer_portal",
+        source_message_id=source_message_id,
+        subject=_string_from(issue.get("subject")) or "Customer portal message",
+        body=clean_body,
+        identity={
+            "account_name": _string_from(issue.get("accountName")) or _sender_domain(contact_email),
+            "account_domain": _sender_domain(contact_email),
+            "contact_email": contact_email,
+            "contact_name": contact_name,
+        },
+        identity_data={
+            "provider": "customer_portal",
+            "portalSessionId": _string_from(session["id"]),
+            "senderEmail": contact_email,
+            "senderName": contact_name,
+        },
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    processing_run = _processing_run_from_issue(processed_issue)
+    _require_processing_claim(processing_run)
+    automation_result = _run_message_update_automations(
+        issue=processed_issue,
         tenant_id=tenant_id,
         project_id=project_id,
         actor_email="automation",
         source="customer_portal",
-        message_id=message_id,
+        message_id=record_message_id,
         context={"portalSessionId": session["id"]},
+        processing_run=processing_run,
     )
     _portal_auto_prepare_agent_reply(
         issue_id=issue_id,
         tenant_id=tenant_id,
         project_id=project_id,
         portal_session_id=_string_from(session["id"]),
-        message_id=message_id,
+        message_id=record_message_id,
         automation_result=automation_result,
+        processing_run=processing_run,
     )
     return message
 

@@ -23,6 +23,8 @@ RUN PB_ARCH="${TARGETARCH}"; \
 # Copy migrations from repo root (build context is the repo root)
 COPY backend/pb_migrations/ /pb/pb_migrations/
 COPY pocketbase/pb_hooks/ /pb/pb_hooks/
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/mantly/THIRD_PARTY_NOTICES.md
+COPY third_party/pocketbase/LICENSE /usr/share/licenses/pocketbase/LICENSE
 
 COPY pocketbase/start.sh /start.sh
 RUN chmod +x /start.sh

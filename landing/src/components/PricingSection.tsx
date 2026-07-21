@@ -1,4 +1,4 @@
-import { Check, Mail, ShieldCheck, Sparkles, Building2 } from "lucide-react";
+import { Building2, Check, Cloud, Github, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -21,42 +21,43 @@ type PlanCopy = {
 export function PricingSection() {
   const { t } = useTranslation();
   const subtitle = t("pricing.subtitle");
-  const plans: Array<PlanCopy & { icon: typeof Sparkles; href: string; featured: boolean; isCustom?: boolean }> = [
+  const plans: Array<PlanCopy & { icon: typeof Cloud; href: string; featured: boolean; hidePeriod?: boolean }> = [
     {
-      name: "pricing.free.name",
-      price: "pricing.free.price",
-      desc: "pricing.free.desc",
-      cta: "pricing.free.cta",
+      name: "pricing.community.name",
+      price: "pricing.community.price",
+      desc: "pricing.community.desc",
+      cta: "pricing.community.cta",
       features: [
-        "pricing.free.feature1",
-        "pricing.free.feature2",
-        "pricing.free.feature3",
-        "pricing.free.feature4",
-        "pricing.free.feature5",
-        "pricing.free.feature6",
+        "pricing.community.feature1",
+        "pricing.community.feature2",
+        "pricing.community.feature3",
+        "pricing.community.feature4",
+        "pricing.community.feature5",
+        "pricing.community.feature6",
       ],
-      icon: Sparkles,
-      href: "https://app.mantly.io?view=signup",
+      icon: Github,
+      href: "https://github.com/olsommer/mantly",
       featured: false,
+      hidePeriod: true,
     },
     {
-      name: "pricing.pro.name",
-      price: "pricing.pro.price",
-      desc: "pricing.pro.desc",
-      cta: "pricing.pro.cta",
+      name: "pricing.cloud.name",
+      price: "pricing.cloud.price",
+      desc: "pricing.cloud.desc",
+      cta: "pricing.cloud.cta",
       features: [
-        "pricing.pro.feature1",
-        "pricing.pro.feature2",
-        "pricing.pro.feature3",
-        "pricing.pro.feature4",
-        "pricing.pro.feature5",
-        "pricing.pro.feature6",
-        "pricing.pro.feature7",
-        "pricing.pro.feature8",
+        "pricing.cloud.feature1",
+        "pricing.cloud.feature2",
+        "pricing.cloud.feature3",
+        "pricing.cloud.feature4",
+        "pricing.cloud.feature5",
+        "pricing.cloud.feature6",
+        "pricing.cloud.feature7",
+        "pricing.cloud.feature8",
       ],
-      icon: ShieldCheck,
+      icon: Cloud,
       href: "https://app.mantly.io?view=signup",
-      featured: false,
+      featured: true,
     },
     {
       name: "pricing.business.name",
@@ -72,15 +73,10 @@ export function PricingSection() {
         "pricing.business.feature6",
         "pricing.business.feature7",
         "pricing.business.feature8",
-        "pricing.business.feature9",
-        "pricing.business.feature10",
-        "pricing.business.feature11",
-        "pricing.business.feature12",
-        "pricing.business.feature13",
       ],
-      icon: Mail,
-      href: "https://app.mantly.io?view=signup",
-      featured: true,
+      icon: ShieldCheck,
+      href: "mailto:support@mantly.io?subject=Mantly%20Business",
+      featured: false,
     },
     {
       name: "pricing.enterprise.name",
@@ -96,9 +92,9 @@ export function PricingSection() {
         "pricing.enterprise.feature6",
       ],
       icon: Building2,
-      href: "mailto:support@mantly.io",
+      href: "mailto:support@mantly.io?subject=Mantly%20Enterprise",
       featured: false,
-      isCustom: true,
+      hidePeriod: true,
     },
   ];
 
@@ -144,7 +140,7 @@ export function PricingSection() {
                 <CardDescription className="self-start">{t(plan.desc)}</CardDescription>
                 <div className="self-end">
                   <span className="text-4xl font-semibold">{t(plan.price)}</span>
-                  {!plan.isCustom && (
+                  {!plan.hidePeriod && (
                     <span className="ml-1 text-base text-muted-foreground">{t("pricing.month")}</span>
                   )}
                 </div>
@@ -171,6 +167,12 @@ export function PricingSection() {
             </Card>
           ))}
         </div>
+        <p className="mx-auto mt-10 max-w-3xl text-center text-sm leading-relaxed text-muted-foreground">
+          {t("pricing.runDefinition")}
+        </p>
+        <p className="mx-auto mt-3 max-w-3xl text-center text-sm leading-relaxed text-muted-foreground">
+          {t("pricing.usageNote")}
+        </p>
       </div>
     </section>
   );

@@ -18,11 +18,11 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
     privacy: {
       title: "Datenschutz",
       intro:
-        "Diese Datenschutzerklärung informiert darüber, wie Mantly personenbezogene Daten auf der öffentlichen Website, in der Admin-Anwendung, im Outlook-Add-in und in den angebundenen Backend-Diensten verarbeitet.",
+        "Diese Datenschutzerklärung informiert darüber, wie IsarAI personenbezogene Daten auf der öffentlichen Website und bei der Bereitstellung von Mantly Cloud einschließlich Admin-Anwendung, verbundenen Supportkanälen und Backend-Diensten verarbeitet.",
       sections: [
         {
           title: "Stand",
-          body: ["19. Mai 2026"],
+          body: ["21. Juli 2026"],
         },
         {
           title: "Verantwortliche Stelle",
@@ -38,24 +38,24 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Arten der verarbeiteten Daten",
           body: [
             "Beim Besuch der öffentlichen Website verarbeiten wir technische Nutzungsdaten wie IP-Adresse, Browser, Gerätedaten, Datum und Uhrzeit des Zugriffs, Referrer und aufgerufene Seiten.",
-            "Bei der Nutzung von Mantly verarbeiten wir Konto- und Organisationsdaten wie E-Mail-Adresse, Name, Unternehmen, Passwort- und Authentifizierungsstatus, Rollen, Projekte und Workspace-Zuordnungen.",
-            "Im Outlook-Add-in und in der Admin-Anwendung können E-Mail-Inhalte und Metadaten verarbeitet werden, insbesondere Absender, Empfänger, Betreff, Body, Anhänge, technische E-Mail-Metadaten und vom Nutzer ausgelöste Analyse- oder Vorschau-Runs.",
-            "Darüber hinaus verarbeiten wir Konfigurationen für Kundenidentifikation, Anliegenerkennung, Pipeline, Aktionen, Tools, Antwortregeln, Instruktionen, Vorlagen, Evaluation-Sets, Test-E-Mails, Evaluationsergebnisse, Feedback, Learnings, Monitoring-Logs, Risikoergebnisse für Phishing und Prompt Injection sowie Token- und Nutzungsdaten.",
-            "Für Abrechnung und Vertragsverwaltung verarbeiten wir Plan-, Zahlungs-, Rechnungs-, Subscription- und Usage-Daten.",
+            "Bei der Nutzung von Mantly Cloud verarbeiten wir Konto- und Organisationsdaten wie E-Mail-Adresse, Name, Unternehmen, Passwort- und Authentifizierungsstatus, Rollen, Projekte und Workspace-Zuordnungen.",
+            "In Mantly Cloud können Inhalte und Metadaten aus verbundenen Supportkanälen verarbeitet werden, etwa Absender oder Teilnehmer, Empfänger, Betreff, Nachrichtentext, Anhänge, kanalbezogene technische Metadaten sowie ausgelöste Analyse- oder Vorschau-Runs. Dazu können insbesondere E-Mail-, Webchat- und weitere konfigurierte Kanalnachrichten gehören.",
+            "Darüber hinaus verarbeiten wir Konfigurationen für Kunden- und Anliegenerkennung, Pipelines, Aktionen, Tools, Antwortregeln, Instruktionen, Vorlagen, Evaluation-Sets, Testnachrichten, Evaluationsergebnisse, Feedback, Learnings, Monitoring-Logs, Risikoergebnisse für Phishing und Prompt Injection sowie Token- und Nutzungsdaten.",
+            "Für Abrechnung und Vertragsverwaltung von Mantly Cloud verarbeiten wir Plan-, Zahlungs-, Rechnungs-, Subscription- und Usage-Daten.",
           ],
         },
         {
           title: "Zwecke der Verarbeitung",
           body: [
-            "Wir verarbeiten personenbezogene Daten zur Bereitstellung der Website, zur Kontoerstellung und Anmeldung, zur Bereitstellung der Mantly-SaaS-Dienste, der Admin-Anwendung und des Outlook-Add-ins.",
-            "E-Mail- und Workflow-Daten werden verarbeitet, um Kunden zu identifizieren, Anliegen zu erkennen, Antworten vorzubereiten, Aktionen und Tools auszuführen, Vorschauen zu erzeugen, Veröffentlichungen vorzubereiten und Evaluationen durchzuführen.",
+            "Wir verarbeiten personenbezogene Daten zur Bereitstellung der Website sowie zur Kontoerstellung, Anmeldung und Bereitstellung von Mantly Cloud, der Admin-Anwendung und verbundenen Supportkanälen.",
+            "Supportnachrichten und Workflow-Daten werden verarbeitet, um Kunden zu identifizieren, Anliegen zu erkennen, Antworten vorzubereiten, Aktionen und Tools auszuführen, Vorschauen zu erzeugen, Veröffentlichungen vorzubereiten und Evaluationen durchzuführen.",
             "Weitere Zwecke sind Sicherheit, Missbrauchs- und Betrugsprävention, Phishing- und Prompt-Injection-Warnungen, Monitoring, Fehleranalyse, Support, Produktverbesserung, Nutzungslimits, Token-Metering, Abrechnung und Erfüllung gesetzlicher Pflichten.",
           ],
         },
         {
           title: "Rechtsgrundlagen",
           body: [
-            "Die Verarbeitung zur Bereitstellung von Mantly, zur Konto- und Projektverwaltung, zur Analyse von E-Mails, zur Durchführung von Workflows und zur Abrechnung erfolgt regelmäßig zur Erfüllung eines Vertrags oder zur Durchführung vorvertraglicher Maßnahmen.",
+            "Die Verarbeitung zur Bereitstellung von Mantly Cloud, zur Konto- und Projektverwaltung, zur Analyse von Supportnachrichten, zur Durchführung von Workflows und zur Abrechnung erfolgt regelmäßig zur Erfüllung eines Vertrags oder zur Durchführung vorvertraglicher Maßnahmen.",
             "Sicherheits-, Fehleranalyse-, Missbrauchspräventions-, Monitoring- und Produktverbesserungszwecke beruhen auf berechtigten Interessen, soweit nicht überwiegende Interessen der betroffenen Personen entgegenstehen.",
             "Rechnungs- und steuerrelevante Daten werden verarbeitet, soweit dies zur Erfüllung gesetzlicher Pflichten erforderlich ist.",
             "Analyse der öffentlichen Landingpage erfolgt zur Produktverbesserung auf Grundlage berechtigter Interessen, soweit nicht überwiegende Interessen der betroffenen Personen entgegenstehen.",
@@ -64,22 +64,29 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Hosting und Infrastruktur",
           body: [
-            "Mantly wird auf Infrastruktur der Hetzner Online GmbH, www.hetzner.com, betrieben. Hetzner verarbeitet technische Nutzungsdaten, Server-Logs und auf der Infrastruktur gespeicherte Anwendungs- und Datenbankdaten, soweit dies für Hosting, Verfügbarkeit, Sicherheit und Betrieb erforderlich ist.",
-            "Die Datenbank und Anwendungsspeicher werden durch IsarAI selbst betrieben. PocketBase wird selbst gehostet und ist kein eigenständiger externer Cloud-Dienst.",
+            "Die öffentliche Website und Mantly Cloud werden auf Infrastruktur der Hetzner Online GmbH, www.hetzner.com, betrieben. Hetzner verarbeitet technische Nutzungsdaten, Server-Logs und dort gespeicherte Anwendungs- und Datenbankdaten, soweit dies für Hosting, Verfügbarkeit, Sicherheit und Betrieb erforderlich ist.",
+            "Die Cloud-Datenbank und Anwendungsspeicher werden durch IsarAI betrieben. PocketBase wird von IsarAI selbst gehostet und ist kein eigenständiger externer Cloud-Dienst.",
+          ],
+        },
+        {
+          title: "Self-hosted Community Edition",
+          body: [
+            "Bei einer selbst betriebenen Mantly Community-Instanz bestimmt der jeweilige Betreiber, welche Daten verarbeitet werden, wo die Instanz läuft und welche Anbieter oder Integrationen angebunden sind. IsarAI verarbeitet Daten dieser Instanz nicht allein dadurch, dass die Open-Source-Software eingesetzt wird.",
+            "Daten einer Community-Instanz erreichen IsarAI nur, wenn der Betreiber oder Nutzer einen separaten IsarAI-Dienst verwendet, Support kontaktiert oder ausdrücklich eine von IsarAI betriebene Integration konfiguriert. Für selbst gewählte LLM-, Kanal- und Infrastruktur-Anbieter ist der Betreiber verantwortlich.",
           ],
         },
         {
           title: "Zahlung und Abrechnung",
           body: [
-            "Für Zahlungsabwicklung, Checkout, Abonnements, Rechnungen, Kundenportal und nutzungsbasierte Abrechnung setzen wir Stripe ein.",
+            "Für Zahlungsabwicklung, Checkout, Abonnements, Rechnungen, Kundenportal und nutzungsbasierte Abrechnung von Mantly Cloud setzen wir Stripe ein.",
             "Dabei können insbesondere E-Mail-Adresse, Kundendaten, Rechnungsdaten, Zahlungsmetadaten, Stripe-Kunden- und Subscription-IDs sowie abrechnungsrelevante Nutzungsereignisse verarbeitet werden.",
           ],
         },
         {
           title: "LLM-Anbieter",
           body: [
-            "Für KI-Funktionen kann Mantly Google Gemini oder OpenAI verwenden. Je nach Konfiguration werden E-Mail-Inhalte, Metadaten, Projektkonfigurationen, Kunden- und Intent-Kontext, Aktionen, Tools, Instruktionen, Evaluationen, Feedback, Learnings und generierte Ausgaben an den jeweiligen Anbieter übermittelt.",
-            "Die Verarbeitung erfolgt zur E-Mail-Analyse, Kundenidentifikation, Anliegenerkennung, Antworterstellung, Evaluation, Sicherheitsprüfung und Erfassung von Token-Nutzungsmetadaten.",
+            "Für KI-Funktionen in Mantly Cloud kann IsarAI Google Gemini oder OpenAI verwenden. Je nach Konfiguration werden Supportnachrichten, Metadaten, Projektkonfigurationen, Kunden- und Anliegenkontext, Aktionen, Tools, Instruktionen, Evaluationen, Feedback, Learnings und generierte Ausgaben an den jeweiligen Anbieter übermittelt.",
+            "Die Verarbeitung erfolgt zur Nachrichtenanalyse, Kundenidentifikation, Anliegenerkennung, Antworterstellung, Evaluation, Sicherheitsprüfung und Erfassung von Token-Nutzungsmetadaten.",
             "Wenn ein Kunde eigene LLM-Zugangsdaten oder einen eigenen Provider konfiguriert, verarbeitet dieser Anbieter Daten nach der jeweiligen Kundenkonfiguration.",
           ],
         },
@@ -94,7 +101,7 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Analyse auf der öffentlichen Landingpage",
           body: [
             "Auf der öffentlichen Landingpage kann PostHog im Cookieless-Modus eingesetzt werden, um Nutzung, Seitenaufrufe, Interaktionen und technische Kennzahlen zu verstehen.",
-            "Diese Analyse betrifft derzeit nur die öffentliche Landingpage, nicht die Admin-Anwendung und nicht das Outlook-Add-in.",
+            "Diese Analyse betrifft derzeit nur die öffentliche Landingpage, nicht die Admin-Anwendung und nicht Inhalte aus verbundenen Supportkanälen.",
             "PostHog wird ohne Cookies und ohne persistente Browser-Identifikation betrieben.",
           ],
         },
@@ -117,15 +124,15 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Speicherdauer",
           body: [
             "Personenbezogene Daten werden nur so lange verarbeitet, wie es für die jeweiligen Zwecke erforderlich ist oder gesetzliche Aufbewahrungspflichten bestehen.",
-            "Konto- und Workspace-Daten werden grundsätzlich bis zur Löschung des Kontos oder Vertragsendes gespeichert. Rechnungs- und steuerrelevante Daten werden entsprechend gesetzlicher Aufbewahrungsfristen gespeichert.",
+            "Konto- und Workspace-Daten in Mantly Cloud werden grundsätzlich bis zur Löschung des Kontos oder Vertragsendes gespeichert. Rechnungs- und steuerrelevante Daten werden entsprechend gesetzlicher Aufbewahrungsfristen gespeichert.",
             "Monitoring-Runs, Evaluationsergebnisse, Feedback, Learnings und LLM-Nutzungsdaten werden entsprechend Produktkonfiguration, Plan, Löschanforderung oder betrieblicher Erforderlichkeit gespeichert.",
-            "E-Mail- und Workflow-Daten können durch Nutzer in der Anwendung gelöscht werden, soweit keine gesetzlichen oder vertraglichen Aufbewahrungspflichten entgegenstehen.",
+            "Supportnachrichten und Workflow-Daten können durch Nutzer in der Anwendung gelöscht werden, soweit keine gesetzlichen oder vertraglichen Aufbewahrungspflichten entgegenstehen.",
           ],
         },
         {
           title: "Empfänger und Dienstleister",
           body: [
-            "Empfänger personenbezogener Daten können interne berechtigte Personen von IsarAI sowie sorgfältig ausgewählte Dienstleister für Hosting, Datenbankbetrieb, Zahlungsabwicklung, E-Mail-Kommunikation, LLM-Verarbeitung, Sicherheit, Support und technische Infrastruktur sein.",
+            "Bei der Bereitstellung von Mantly Cloud können Empfänger personenbezogener Daten interne berechtigte Personen von IsarAI sowie sorgfältig ausgewählte Dienstleister für Hosting, Datenbankbetrieb, Zahlungsabwicklung, Nachrichtenkommunikation, LLM-Verarbeitung, Sicherheit, Support und technische Infrastruktur sein.",
             "Soweit erforderlich, werden Auftragsverarbeitungsverträge oder vergleichbare Datenschutzvereinbarungen geschlossen.",
           ],
         },
@@ -155,17 +162,18 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
     terms: {
       title: "Nutzungsbedingungen",
       intro:
-        "Diese Nutzungsbedingungen regeln die Nutzung von Mantly, einschließlich der öffentlichen Website, der Admin-Anwendung, des Outlook-Add-ins, der APIs und angebundener Dienste.",
+        "Diese Nutzungsbedingungen regeln Mantly Cloud und andere von IsarAI betriebene Dienste, einschließlich der öffentlichen Website, der gehosteten Admin-Anwendung, APIs und angebundener Dienste.",
       sections: [
         {
           title: "Stand",
-          body: ["20. Mai 2026"],
+          body: ["21. Juli 2026"],
         },
         {
           title: "Anbieter und Geltungsbereich",
           body: [
             "Mantly ist ein Angebot der IsarAI UG (haftungsbeschränkt), Breitensteinstr. 6, 82031 Grünwald.",
-            "Diese Bedingungen gelten für Unternehmen, Organisationen und Verbraucher, soweit sie Mantly nutzen, ein Konto erstellen, einen Plan buchen oder auf Mantly-Dienste zugreifen.",
+            "Diese Bedingungen gelten für Unternehmen, Organisationen und Verbraucher, soweit sie Mantly Cloud oder andere von IsarAI betriebene Dienste nutzen, ein gehostetes Konto erstellen, einen Plan buchen oder auf solche Dienste zugreifen.",
+            "Der Quellcode der Mantly Community Edition wird unabhängig von diesen Bedingungen unter der GNU Affero General Public License Version 3 bereitgestellt. Für Nutzung, Vervielfältigung, Änderung und Verbreitung dieses Codes gilt ausschließlich diese Open-Source-Lizenz; diese Bedingungen schränken die dort gewährten Rechte nicht ein.",
             "Abweichende Vereinbarungen, Auftragsverarbeitungsverträge oder individuelle Verträge gehen diesen Bedingungen vor, soweit sie ausdrücklich etwas anderes regeln.",
           ],
         },
@@ -173,30 +181,30 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Konto und Berechtigung",
           body: [
             "Nutzer müssen richtige und aktuelle Angaben machen und Zugangsdaten vertraulich behandeln.",
-            "Wer Mantly für ein Unternehmen oder eine Organisation nutzt, bestätigt, zur Nutzung und Verwaltung des jeweiligen Workspace berechtigt zu sein.",
-            "Verbraucher dürfen Mantly nur nutzen, wenn sie geschäftsfähig sind oder die erforderliche Zustimmung eines gesetzlichen Vertreters vorliegt.",
+            "Wer Mantly Cloud für ein Unternehmen oder eine Organisation nutzt, bestätigt, zur Nutzung und Verwaltung des jeweiligen gehosteten Workspace berechtigt zu sein.",
+            "Verbraucher dürfen die von IsarAI betriebenen Dienste nur nutzen, wenn sie geschäftsfähig sind oder die erforderliche Zustimmung eines gesetzlichen Vertreters vorliegt.",
           ],
         },
         {
           title: "Leistung und KI-Funktionen",
           body: [
-            "Mantly unterstützt bei der Bearbeitung wiederkehrender E-Mail-Anliegen. Dazu gehören insbesondere Kunden- und Anliegenerkennung, Entwurf von Antworten, Vorschauen, Evaluationen, Monitoring, konfigurierte Aktionen und Tool-Aufrufe.",
-            "Mantly nutzt KI-Modelle und Drittanbieter, um Inhalte zu analysieren, zu klassifizieren, zusammenzufassen, vorzubereiten oder zu generieren. KI-Ausgaben können falsch, unvollständig oder unpassend sein.",
-            "Mantly ersetzt keine rechtliche, medizinische, finanzielle, steuerliche, sicherheitsbezogene oder sonstige professionelle Beratung.",
+            "Mantly Cloud unterstützt bei der Bearbeitung wiederkehrender Supporttickets über verbundene Kanäle. Dazu gehören insbesondere Kunden- und Anliegenerkennung, Antworterstellung, Evaluationen, Monitoring, konfigurierte Aktionen und Tool-Aufrufe.",
+            "Mantly Cloud nutzt KI-Modelle und Drittanbieter, um Inhalte zu analysieren, zu klassifizieren, zusammenzufassen, vorzubereiten oder zu generieren. KI-Ausgaben können falsch, unvollständig oder unpassend sein.",
+            "Mantly Cloud ersetzt keine rechtliche, medizinische, finanzielle, steuerliche, sicherheitsbezogene oder sonstige professionelle Beratung.",
           ],
         },
         {
           title: "Prüfung und Verantwortung",
           body: [
-            "Nutzer bleiben für E-Mails, Eingaben, Konfigurationen, Freigaben, gesendete Nachrichten, ausgeführte Aktionen und die Verwendung von KI-Ausgaben verantwortlich.",
-            "Vor dem Senden, Veröffentlichen oder Ausführen müssen Nutzer prüfen, ob Inhalte richtig, vollständig, zulässig und für den jeweiligen Zweck geeignet sind.",
-            "Besondere Vorsicht ist erforderlich, wenn Inhalte rechtliche, medizinische, finanzielle, HR-, Versicherungs-, Sicherheits- oder sonstige erhebliche Auswirkungen haben können.",
+            "Nutzer bleiben für Eingaben, Konfigurationen, Freigaberichtlinien, gesendete Nachrichten, ausgeführte Aktionen und die Verwendung von KI-Ausgaben verantwortlich.",
+            "Nutzer müssen angemessene Prüf- und Freigaberichtlinien konfigurieren. Automatisches Senden darf nur aktiviert werden, wenn der Nutzer dies nach Bewertung der damit verbundenen Risiken für angemessen hält; konfigurierte Freigabeschritte werden von Mantly Cloud nicht umgangen.",
+            "Vor der Freigabe sensibler Ergebnisse oder der Aktivierung automatisierter Aktionen müssen Nutzer prüfen, ob Inhalte und Aktionen richtig, vollständig, zulässig und für den jeweiligen Zweck geeignet sind. Besondere Vorsicht ist bei rechtlichen, medizinischen, finanziellen, HR-, Versicherungs-, Sicherheits- oder sonstigen erheblichen Auswirkungen erforderlich.",
           ],
         },
         {
           title: "Daten und sensible Inhalte",
           body: [
-            "Nutzer sind verantwortlich dafür, dass sie E-Mails, Anhänge, personenbezogene Daten, Geschäftsgeheimnisse und sonstige Inhalte rechtmäßig in Mantly verarbeiten dürfen.",
+            "Nutzer sind verantwortlich dafür, dass sie Supportnachrichten, Anhänge, personenbezogene Daten, Geschäftsgeheimnisse und sonstige Inhalte rechtmäßig in Mantly Cloud verarbeiten dürfen.",
             "Besondere Kategorien personenbezogener Daten, Gesundheitsdaten, Daten über Straftaten, Ausweisdaten, Zahlungsdaten, Kinder-Daten, Passwörter, Geheimnisse oder vergleichbar sensible Daten dürfen nur verarbeitet werden, wenn der Nutzer hierzu berechtigt ist und Mantly dafür geeignet konfiguriert wurde.",
             "Nutzer müssen eigene Prüf-, Lösch-, Aufbewahrungs- und Freigabeprozesse einhalten.",
           ],
@@ -204,15 +212,15 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Zulässige Nutzung",
           body: [
-            "Mantly darf nicht für rechtswidrige Inhalte, Spam, Phishing, Malware, Credential Theft, Umgehung von Sicherheitsmaßnahmen, Verletzung geistiger Eigentumsrechte, belästigende Inhalte, täuschende Aktivitäten oder missbräuchliche Automatisierung genutzt werden.",
-            "Nutzer dürfen keine Systeme überlasten, Limits umgehen, Zugänge weiterverkaufen, Sicherheitsprüfungen umgehen, fremde Daten unbefugt verarbeiten oder Mantly in einer Weise nutzen, die Verfügbarkeit, Sicherheit oder Integrität des Dienstes beeinträchtigt.",
-            "IsarAI kann Inhalte, Workspaces oder Zugänge einschränken oder sperren, wenn ein begründeter Verdacht auf Missbrauch, Sicherheitsrisiken oder Verstöße gegen diese Bedingungen besteht.",
+            "Mantly Cloud und andere von IsarAI betriebene Dienste dürfen nicht für rechtswidrige Inhalte, Spam, Phishing, Malware, Credential Theft, Umgehung von Sicherheitsmaßnahmen, Verletzung geistiger Eigentumsrechte, belästigende Inhalte, täuschende Aktivitäten oder missbräuchliche Automatisierung genutzt werden.",
+            "Bei Mantly Cloud dürfen Nutzer keine Systeme überlasten, Limits umgehen, gehostete Zugänge ohne entsprechende Vereinbarung weiterverkaufen, Sicherheitsprüfungen umgehen, fremde Daten unbefugt verarbeiten oder den Dienst in einer Weise nutzen, die seine Verfügbarkeit, Sicherheit oder Integrität beeinträchtigt. Rechte aus der Open-Source-Lizenz der Community Edition bleiben unberührt.",
+            "IsarAI kann gehostete Inhalte, Workspaces oder Zugänge einschränken oder sperren, wenn ein begründeter Verdacht auf Missbrauch, Sicherheitsrisiken oder Verstöße gegen diese Bedingungen besteht. Rechte aus der Open-Source-Lizenz der Community Edition bleiben davon unberührt.",
           ],
         },
         {
           title: "Pläne, Testphasen, Preise und Zahlung",
           body: [
-            "Mantly kann kostenlose Pläne, Testphasen, kostenpflichtige Abonnements und nutzungsbasierte Abrechnung anbieten.",
+            "Mantly Cloud kann kostenlose Pläne, Testphasen, kostenpflichtige Abonnements und nutzungsbasierte Abrechnung anbieten.",
             "Preise, enthaltene Kontingente, Nutzungslimits, Verlängerung, Kündigung, Steuern und zusätzliche Gebühren werden im Checkout, in der Admin-Abrechnung oder in einem individuellen Angebot angezeigt.",
             "Zahlungen, Rechnungen, Kundenportal und Abonnementverwaltung können über Stripe abgewickelt werden. Kostenpflichtige Pläne verlängern sich, soweit angezeigt, bis sie gekündigt werden.",
             "Kostenlose Pläne oder Testphasen können eingeschränkt, geändert oder beendet werden, soweit dies rechtlich zulässig ist.",
@@ -221,9 +229,9 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Verfügbarkeit und Änderungen",
           body: [
-            "IsarAI bemüht sich um einen stabilen Betrieb von Mantly, garantiert jedoch keine ununterbrochene oder fehlerfreie Verfügbarkeit.",
+            "IsarAI bemüht sich um einen stabilen Betrieb von Mantly Cloud, garantiert jedoch keine ununterbrochene oder fehlerfreie Verfügbarkeit.",
             "Wartung, Sicherheitsmaßnahmen, Anbieterprobleme, Updates oder höhere Gewalt können zu Einschränkungen führen.",
-            "Mantly kann Funktionen ändern, erweitern oder entfernen, wenn dies für Sicherheit, Betrieb, Produktentwicklung, rechtliche Anforderungen oder technische Gründe erforderlich ist.",
+            "IsarAI kann Funktionen seiner gehosteten Dienste ändern, erweitern oder entfernen, wenn dies für Sicherheit, Betrieb, Produktentwicklung, rechtliche Anforderungen oder technische Gründe erforderlich ist.",
           ],
         },
         {
@@ -237,17 +245,17 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Rechte an Inhalten und Software",
           body: [
-            "Nutzer behalten ihre Rechte an eigenen Inhalten. Sie räumen IsarAI die Rechte ein, diese Inhalte zu verarbeiten, soweit dies zur Bereitstellung, Sicherung, Verbesserung und Abrechnung von Mantly erforderlich ist.",
-            "Mantly, die Software, Oberflächen, Marken, Designs, Dokumentation und Systemlogik bleiben Eigentum von IsarAI oder den jeweiligen Rechteinhabern.",
-            "Nutzer dürfen Mantly nicht kopieren, dekompilieren, zurückentwickeln, weiterverkaufen oder in nicht autorisierter Weise zugänglich machen, soweit dies nicht gesetzlich zwingend erlaubt ist.",
+            "Nutzer behalten ihre Rechte an eigenen Inhalten. Für Inhalte, die sie an Mantly Cloud übermitteln, räumen sie IsarAI die Rechte ein, diese Inhalte zu verarbeiten, soweit dies zur Bereitstellung, Sicherung, Verbesserung und Abrechnung des gehosteten Dienstes erforderlich ist.",
+            "Urheberrechte, Marken, Designs und nicht unter einer Open-Source-Lizenz veröffentlichte Bestandteile bleiben bei IsarAI oder den jeweiligen Rechteinhabern.",
+            "Der Quellcode der Community Edition darf im Umfang der GNU Affero General Public License Version 3 genutzt, untersucht, geändert und verbreitet werden. Für Mantly Cloud, Marken und proprietäre Bestandteile gelten ergänzend diese Bedingungen und gegebenenfalls individuelle Verträge.",
           ],
         },
         {
           title: "Laufzeit und Kündigung",
           body: [
-            "Nutzer können Mantly entsprechend dem gebuchten Plan und den angezeigten Kündigungsoptionen kündigen.",
+            "Nutzer können Mantly Cloud entsprechend dem gebuchten Plan und den angezeigten Kündigungsoptionen kündigen.",
             "Die Kündigung kostenpflichtiger Abonnements wirkt regelmäßig zum Ende des aktuellen Abrechnungszeitraums, sofern im Checkout oder Vertrag nichts anderes geregelt ist.",
-            "IsarAI kann Zugänge aus wichtigem Grund sperren oder beenden, insbesondere bei Sicherheitsrisiken, Zahlungsverzug, Rechtsverstößen oder erheblichen Verstößen gegen diese Bedingungen.",
+            "IsarAI kann gehostete Zugänge aus wichtigem Grund sperren oder beenden, insbesondere bei Sicherheitsrisiken, Zahlungsverzug, Rechtsverstößen oder erheblichen Verstößen gegen diese Bedingungen.",
           ],
         },
         {
@@ -262,8 +270,8 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Datenschutz",
           body: [
-            "Informationen zur Verarbeitung personenbezogener Daten enthält die Datenschutzerklärung von Mantly.",
-            "Soweit Mantly im Auftrag eines Kunden personenbezogene Daten verarbeitet, können ergänzende Auftragsverarbeitungsbedingungen gelten.",
+            "Informationen zur Verarbeitung personenbezogener Daten durch IsarAI enthält die Datenschutzerklärung von Mantly.",
+            "Soweit IsarAI über Mantly Cloud im Auftrag eines Kunden personenbezogene Daten verarbeitet, können ergänzende Auftragsverarbeitungsbedingungen gelten.",
           ],
         },
         {
@@ -283,7 +291,7 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Änderungen dieser Bedingungen",
           body: [
-            "IsarAI kann diese Bedingungen ändern, wenn Mantly, die rechtlichen Anforderungen, die Abrechnung oder technische Abläufe angepasst werden.",
+            "IsarAI kann diese Bedingungen ändern, wenn die von IsarAI betriebenen Dienste, rechtliche Anforderungen, die Abrechnung oder technische Abläufe angepasst werden.",
             "Die jeweils aktuelle Fassung ist auf dieser Seite abrufbar. Bei wesentlichen Änderungen können Nutzer zusätzlich informiert werden.",
           ],
         },
@@ -322,11 +330,11 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
     privacy: {
       title: "Privacy Policy",
       intro:
-        "This privacy policy explains how Mantly processes personal data on the public website, in the admin application, in the Outlook add-in, and in connected backend services.",
+        "This privacy policy explains how IsarAI processes personal data on the public website and when providing Mantly Cloud, including the admin application, connected support channels, and backend services.",
       sections: [
         {
           title: "Last Updated",
-          body: ["May 19, 2026"],
+          body: ["July 21, 2026"],
         },
         {
           title: "Controller",
@@ -342,24 +350,24 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Types of Data We Process",
           body: [
             "When you visit the public website, we process technical usage data such as IP address, browser, device data, access time, referrer, and requested pages.",
-            "When you use Mantly, we process account and organization data such as email address, name, company, password and authentication status, roles, projects, and workspace assignments.",
-            "In the Outlook add-in and admin application, email content and metadata may be processed, including sender, recipient, subject, body, attachments, technical email metadata, and user-triggered analysis or preview runs.",
-            "We also process configurations for customer identification, intent detection, pipelines, actions, tools, response rules, instructions, templates, evaluation sets, test emails, evaluation results, feedback, learnings, monitoring logs, phishing and prompt-injection risk results, and token and usage data.",
-            "For billing and contract management, we process plan, payment, invoice, subscription, and usage data.",
+            "When you use Mantly Cloud, we process account and organization data such as email address, name, company, password and authentication status, roles, projects, and workspace assignments.",
+            "Mantly Cloud may process content and metadata from connected support channels, such as senders or participants, recipients, subjects, message bodies, attachments, channel-specific technical metadata, and user-triggered analysis or preview runs. This may include email, web chat, and other configured channel messages.",
+            "We also process configurations for customer and concern detection, pipelines, actions, tools, response rules, instructions, templates, evaluation sets, test messages, evaluation results, feedback, learnings, monitoring logs, phishing and prompt-injection risk results, and token and usage data.",
+            "For Mantly Cloud billing and contract management, we process plan, payment, invoice, subscription, and usage data.",
           ],
         },
         {
           title: "Purposes",
           body: [
-            "We process personal data to provide the website, create and manage accounts, operate the Mantly SaaS service, admin application, and Outlook add-in.",
-            "Email and workflow data is processed to identify customers, detect intents, prepare replies, execute actions and tools, generate previews, prepare publishing, and run evaluations.",
+            "We process personal data to provide the website and to create accounts, manage sign-in, and operate Mantly Cloud, the admin application, and connected support channels.",
+            "Support messages and workflow data are processed to identify customers, detect concerns, prepare replies, execute actions and tools, generate previews, prepare publishing, and run evaluations.",
             "Additional purposes include security, abuse and fraud prevention, phishing and prompt-injection warnings, monitoring, error analysis, support, product improvement, usage limits, token metering, billing, and compliance with legal obligations.",
           ],
         },
         {
           title: "Legal Bases",
           body: [
-            "Processing for providing Mantly, managing accounts and projects, analyzing emails, running workflows, and billing is generally based on contract performance or pre-contractual measures.",
+            "Processing for providing Mantly Cloud, managing accounts and projects, analyzing support messages, running workflows, and billing is generally based on contract performance or pre-contractual measures.",
             "Security, error analysis, abuse prevention, monitoring, and product improvement are based on legitimate interests, unless overridden by the interests of affected persons.",
             "Invoice and tax-related data is processed where necessary to comply with legal obligations.",
             "Analytics on the public landing page are used for product improvement on the basis of legitimate interests, unless overridden by the interests of affected persons.",
@@ -368,22 +376,29 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Hosting and Infrastructure",
           body: [
-            "Mantly is hosted on infrastructure provided by Hetzner Online GmbH, www.hetzner.com. Hetzner processes technical usage data, server logs, and application and database data stored on the infrastructure where required for hosting, availability, security, and operation.",
-            "The database and application storage are operated by IsarAI. PocketBase is self-hosted and is not a separate external cloud service.",
+            "The public website and Mantly Cloud are hosted on infrastructure provided by Hetzner Online GmbH, www.hetzner.com. Hetzner processes technical usage data, server logs, and application and database data stored there where required for hosting, availability, security, and operation.",
+            "Cloud database and application storage are operated by IsarAI. PocketBase is self-hosted by IsarAI and is not a separate external cloud service.",
+          ],
+        },
+        {
+          title: "Self-Hosted Community Edition",
+          body: [
+            "For a self-hosted Mantly Community instance, the operator determines what data is processed, where the instance runs, and which providers or integrations are connected. IsarAI does not process that instance's data merely because the open-source software is used.",
+            "Data from a Community instance reaches IsarAI only when the operator or user uses a separate IsarAI service, contacts support, or explicitly configures an IsarAI-operated integration. The operator is responsible for self-selected LLM, channel, and infrastructure providers.",
           ],
         },
         {
           title: "Payments and Billing",
           body: [
-            "We use Stripe for payment processing, checkout, subscriptions, invoices, customer portal, and usage-based billing.",
+            "We use Stripe for Mantly Cloud payment processing, checkout, subscriptions, invoices, customer portal, and usage-based billing.",
             "This may include email address, customer data, invoice data, payment metadata, Stripe customer and subscription IDs, and billing-relevant usage events.",
           ],
         },
         {
           title: "LLM Providers",
           body: [
-            "For AI features, Mantly may use Google Gemini or OpenAI. Depending on configuration, email content, metadata, project configurations, customer and intent context, actions, tools, instructions, evaluations, feedback, learnings, and generated outputs may be sent to the relevant provider.",
-            "Processing is used for email analysis, customer identification, intent detection, reply drafting, evaluation, security checks, and token usage metadata.",
+            "For AI features in Mantly Cloud, IsarAI may use Google Gemini or OpenAI. Depending on configuration, support messages, metadata, project configurations, customer and concern context, actions, tools, instructions, evaluations, feedback, learnings, and generated outputs may be sent to the relevant provider.",
+            "Processing is used for message analysis, customer identification, concern detection, reply drafting, evaluation, security checks, and token usage metadata.",
             "If a customer configures their own LLM credentials or provider, that provider processes data according to the customer's configuration.",
           ],
         },
@@ -398,7 +413,7 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Analytics on the Public Landing Page",
           body: [
             "On the public landing page, we may use PostHog in cookieless mode to understand usage, page views, interactions, and technical metrics.",
-            "This analytics use currently applies only to the public landing page, not to the admin application and not to the Outlook add-in.",
+            "This analytics use currently applies only to the public landing page, not to the admin application or content from connected support channels.",
             "PostHog is operated without cookies and without persistent browser identification.",
           ],
         },
@@ -421,15 +436,15 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Retention",
           body: [
             "Personal data is processed only for as long as required for the relevant purposes or as required by legal retention obligations.",
-            "Account and workspace data is generally stored until account deletion or contract termination. Invoice and tax-related data is stored according to statutory retention periods.",
+            "Mantly Cloud account and workspace data is generally stored until account deletion or contract termination. Invoice and tax-related data is stored according to statutory retention periods.",
             "Monitoring runs, evaluation results, feedback, learnings, and LLM usage data are stored according to product configuration, plan, deletion request, or operational necessity.",
-            "Email and workflow data can be deleted by users in the application unless legal or contractual retention obligations apply.",
+            "Support messages and workflow data can be deleted by users in the application unless legal or contractual retention obligations apply.",
           ],
         },
         {
           title: "Recipients and Providers",
           body: [
-            "Recipients of personal data may include authorized IsarAI personnel and carefully selected service providers for hosting, database operation, payment processing, email communication, LLM processing, security, support, and technical infrastructure.",
+            "When providing Mantly Cloud, recipients of personal data may include authorized IsarAI personnel and carefully selected service providers for hosting, database operation, payment processing, message communication, LLM processing, security, support, and technical infrastructure.",
             "Where required, data processing agreements or comparable privacy agreements are concluded.",
           ],
         },
@@ -459,17 +474,18 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
     terms: {
       title: "Terms of Use",
       intro:
-        "These Terms of Use govern your use of Mantly, including the public website, admin application, Outlook add-in, APIs, and connected services.",
+        "These Terms of Use govern Mantly Cloud and other services operated by IsarAI, including the public website, hosted admin application, APIs, and connected services.",
       sections: [
         {
           title: "Effective Date",
-          body: ["May 20, 2026"],
+          body: ["July 21, 2026"],
         },
         {
           title: "Provider and Scope",
           body: [
             "Mantly is provided by IsarAI UG (limited liability), Breitensteinstr. 6, 82031 Grünwald, Germany.",
-            "These terms apply to businesses, organizations, and consumers who use Mantly, create an account, subscribe to a plan, or access Mantly services.",
+            "These terms apply to businesses, organizations, and consumers who use Mantly Cloud or other services operated by IsarAI, create a hosted account, subscribe to a plan, or access those services.",
+            "The source code of Mantly Community Edition is provided separately under the GNU Affero General Public License version 3. Use, copying, modification, and distribution of that code are governed exclusively by the open-source license; these terms do not limit rights granted by that license.",
             "Separate agreements, data processing agreements, or individual contracts prevail over these terms where they expressly provide different rules.",
           ],
         },
@@ -477,30 +493,30 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           title: "Account and Authority",
           body: [
             "Users must provide accurate and current information and keep login credentials confidential.",
-            "If you use Mantly for a company or organization, you confirm that you are authorized to use and administer the relevant workspace.",
-            "Consumers may use Mantly only if they have legal capacity or the required consent of a legal representative.",
+            "If you use Mantly Cloud for a company or organization, you confirm that you are authorized to use and administer the relevant hosted workspace.",
+            "Consumers may use services operated by IsarAI only if they have legal capacity or the required consent of a legal representative.",
           ],
         },
         {
           title: "Service and AI Features",
           body: [
-            "Mantly helps process recurring email cases. This may include customer and intent detection, reply drafting, previews, evaluations, monitoring, configured actions, and tool calls.",
-            "Mantly uses AI models and third-party providers to analyze, classify, summarize, prepare, or generate content. AI outputs may be inaccurate, incomplete, or unsuitable.",
-            "Mantly does not replace legal, medical, financial, tax, security, or other professional advice.",
+            "Mantly Cloud helps process recurring support tickets across connected channels. This may include customer and concern detection, response composition, evaluations, monitoring, configured actions, and tool calls.",
+            "Mantly Cloud uses AI models and third-party providers to analyze, classify, summarize, prepare, or generate content. AI outputs may be inaccurate, incomplete, or unsuitable.",
+            "Mantly Cloud does not replace legal, medical, financial, tax, security, or other professional advice.",
           ],
         },
         {
           title: "Review and Responsibility",
           body: [
-            "Users remain responsible for emails, inputs, configurations, approvals, sent messages, executed actions, and use of AI outputs.",
-            "Before sending, publishing, or executing anything, users must check that content is accurate, complete, lawful, and suitable for the relevant purpose.",
-            "Special care is required where content may have legal, medical, financial, HR, insurance, security, or other significant effects.",
+            "Users remain responsible for inputs, configurations, approval policies, sent messages, executed actions, and use of AI outputs.",
+            "Users must configure appropriate review and approval policies. Auto-send may be enabled only where the user determines it is appropriate after assessing the associated risks; Mantly Cloud does not bypass configured approval steps.",
+            "Before approving sensitive results or enabling automated actions, users must check that content and actions are accurate, complete, lawful, and suitable for the relevant purpose. Special care is required where they may have legal, medical, financial, HR, insurance, security, or other significant effects.",
           ],
         },
         {
           title: "Data and Sensitive Content",
           body: [
-            "Users are responsible for ensuring they may lawfully process emails, attachments, personal data, trade secrets, and other content in Mantly.",
+            "Users are responsible for ensuring they may lawfully process support messages, attachments, personal data, trade secrets, and other content in Mantly Cloud.",
             "Special categories of personal data, health data, criminal data, identity documents, payment data, children's data, passwords, secrets, or similarly sensitive data may be processed only if the user is legally allowed to do so and Mantly has been configured appropriately.",
             "Users must follow their own review, deletion, retention, and approval processes.",
           ],
@@ -508,15 +524,15 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Acceptable Use",
           body: [
-            "Mantly may not be used for illegal content, spam, phishing, malware, credential theft, bypassing security measures, infringement of intellectual property rights, harassment, deceptive activity, or abusive automation.",
-            "Users must not overload systems, bypass limits, resell access, circumvent security checks, process third-party data without authorization, or use Mantly in a way that harms the availability, security, or integrity of the service.",
-            "IsarAI may restrict or suspend content, workspaces, or access where there is a reasonable suspicion of abuse, security risk, or violation of these terms.",
+            "Mantly Cloud and other services operated by IsarAI may not be used for illegal content, spam, phishing, malware, credential theft, bypassing security measures, infringement of intellectual property rights, harassment, deceptive activity, or abusive automation.",
+            "For Mantly Cloud, users must not overload systems, bypass limits, resell hosted access without an appropriate agreement, circumvent security checks, process third-party data without authorization, or use the service in a way that harms its availability, security, or integrity. Rights granted by the Community Edition open-source license remain unaffected.",
+            "IsarAI may restrict or suspend hosted content, workspaces, or access where there is a reasonable suspicion of abuse, security risk, or violation of these terms. Rights granted by the Community Edition open-source license remain unaffected.",
           ],
         },
         {
           title: "Plans, Trials, Pricing, and Payment",
           body: [
-            "Mantly may offer free plans, trials, paid subscriptions, and usage-based billing.",
+            "Mantly Cloud may offer free plans, trials, paid subscriptions, and usage-based billing.",
             "Prices, included quotas, usage limits, renewal, cancellation, taxes, and additional fees are shown in checkout, admin billing, or an individual offer.",
             "Payments, invoices, customer portal, and subscription management may be handled through Stripe. Paid plans renew, where shown, until canceled.",
             "Free plans or trials may be limited, changed, or ended where legally permitted.",
@@ -525,9 +541,9 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Availability and Changes",
           body: [
-            "IsarAI works to keep Mantly stable, but does not guarantee uninterrupted or error-free availability.",
+            "IsarAI works to keep Mantly Cloud stable, but does not guarantee uninterrupted or error-free availability.",
             "Maintenance, security measures, provider issues, updates, or force majeure may cause limitations.",
-            "Mantly may change, add, or remove features where required for security, operations, product development, legal requirements, or technical reasons.",
+            "IsarAI may change, add, or remove features of its hosted services where required for security, operations, product development, legal requirements, or technical reasons.",
           ],
         },
         {
@@ -541,17 +557,17 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Content and Software Rights",
           body: [
-            "Users keep their rights in their own content. Users grant IsarAI the rights needed to process that content for providing, securing, improving, and billing Mantly.",
-            "Mantly, its software, interfaces, trademarks, designs, documentation, and system logic remain owned by IsarAI or the relevant rights holders.",
-            "Users must not copy, decompile, reverse engineer, resell, or make Mantly available in an unauthorized way unless mandatory law allows it.",
+            "Users keep their rights in their own content. For content submitted to Mantly Cloud, users grant IsarAI the rights needed to process that content for providing, securing, improving, and billing the hosted service.",
+            "Copyrights, trademarks, designs, and components not released under an open-source license remain owned by IsarAI or the relevant rights holders.",
+            "Community Edition source code may be used, studied, modified, and distributed under the GNU Affero General Public License version 3. These terms and any individual contracts additionally govern Mantly Cloud, trademarks, and proprietary components.",
           ],
         },
         {
           title: "Term and Termination",
           body: [
-            "Users may cancel Mantly according to the subscribed plan and displayed cancellation options.",
+            "Users may cancel Mantly Cloud according to the subscribed plan and displayed cancellation options.",
             "Cancellation of paid subscriptions usually takes effect at the end of the current billing period unless checkout or a contract states otherwise.",
-            "IsarAI may suspend or terminate access for cause, especially in case of security risks, payment default, unlawful conduct, or material breach of these terms.",
+            "IsarAI may suspend or terminate hosted access for cause, especially in case of security risks, payment default, unlawful conduct, or material breach of these terms.",
           ],
         },
         {
@@ -566,8 +582,8 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Privacy",
           body: [
-            "Information on personal data processing is provided in the Mantly Privacy Policy.",
-            "Where Mantly processes personal data on behalf of a customer, additional data processing terms may apply.",
+            "Information on personal data processing by IsarAI is provided in the Mantly Privacy Policy.",
+            "Where IsarAI processes personal data through Mantly Cloud on behalf of a customer, additional data processing terms may apply.",
           ],
         },
         {
@@ -587,7 +603,7 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
         {
           title: "Changes to These Terms",
           body: [
-            "IsarAI may update these terms if Mantly, legal requirements, billing, or technical processes change.",
+            "IsarAI may update these terms if services operated by IsarAI, legal requirements, billing, or technical processes change.",
             "The current version is available on this page. Users may receive additional notice for material changes.",
           ],
         },

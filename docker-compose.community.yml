@@ -1,0 +1,101 @@
+name: mantly-community
+
+# Source-based Mantly Community deployment.
+# No license key or license server is configured; this stack does not enable
+# Mantly's commercial phone-home license middleware.
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "${MANTLY_HTTP_PORT:-8080}:80"
+      - "${MANTLY_HTTPS_PORT:-8443}:443"
+      - "${MANTLY_HTTPS_PORT:-8443}:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - community_caddy_data:/data
+      - community_caddy_config:/config
+    environment:
+      DOMAIN: "${DOMAIN:-:80}"
+    depends_on:
+      app:
+        condition: service_healthy
+      pocketbase:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pocketbase:
+    build:
+      context: .
+      dockerfile: pocketbase/Dockerfile
+    image: ghcr.io/olsommer/mantly-pocketbase:${MANTLY_VERSION:-local}
+    environment:
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?Set PB_ADMIN_EMAIL in .env.community}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?Set PB_ADMIN_PASSWORD in .env.community}"
+    volumes:
+      - community_pb_data:/pb/pb_data
+    expose:
+      - "8090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_PB_URL: "/pb"
+        VITE_IS_SAAS: "false"
+        VITE_SOURCE_URL: "${MANTLY_SOURCE_URL:-https://github.com/olsommer/mantly}"
+        VITE_ENABLE_ADMIN_PREVIEW: "false"
+        VITE_ENABLE_DEMO_MODE: "false"
+    image: ghcr.io/olsommer/mantly:${MANTLY_VERSION:-local}
+    environment:
+      REQUIRE_AUTH: "true"
+      IS_SAAS: "false"
+      MANTLY_DEPLOYMENT_MODE: "self_hosted"
+      MANTLY_EDITION: "community"
+      JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in .env.community}"
+      CORS_ORIGINS: "${PUBLIC_URL:?Set PUBLIC_URL in .env.community}"
+      MANIFEST_BASE_URL: "${PUBLIC_URL}"
+      ADDIN_BASE_URL: "${PUBLIC_URL}"
+      ASSET_BASE_URL: "${PUBLIC_URL}"
+      APP_BASE_URL: "${PUBLIC_URL}"
+      PB_PUBLIC_URL: "${PUBLIC_URL}/pb"
+      ADDIN_ID: "${ADDIN_ID:?Set ADDIN_ID in .env.community}"
+      ENABLE_DEMO_MODE: "false"
+      ENABLE_E2E_FIXTURES: "false"
+      PB_URL: "http://pocketbase:8090"
+      PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?Set PB_ADMIN_EMAIL in .env.community}"
+      PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?Set PB_ADMIN_PASSWORD in .env.community}"
+      SETUP_ADMIN_EMAIL: "${SETUP_ADMIN_EMAIL:?Set SETUP_ADMIN_EMAIL in .env.community}"
+      SETUP_ADMIN_PASSWORD: "${SETUP_ADMIN_PASSWORD:?Set SETUP_ADMIN_PASSWORD in .env.community}"
+      COMPANY_NAME: "${COMPANY_NAME:-My Organisation}"
+      MANTLY_MANAGED_LLM_PROVIDER: "${MANTLY_MANAGED_LLM_PROVIDER:-gemini}"
+      MANTLY_MANAGED_LLM_MODEL: "${MANTLY_MANAGED_LLM_MODEL:-gemini-3-flash-preview}"
+      MANTLY_MANAGED_LLM_API_KEY: "${MANTLY_MANAGED_LLM_API_KEY:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_BASE_URL: "${MANTLY_MANAGED_LLM_CUSTOM_BASE_URL:-}"
+      MANTLY_MANAGED_LLM_CUSTOM_MODEL: "${MANTLY_MANAGED_LLM_CUSTOM_MODEL:-}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+    depends_on:
+      pocketbase:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      - community_app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  community_caddy_data:
+  community_caddy_config:
+  community_pb_data:
+  community_app_data:

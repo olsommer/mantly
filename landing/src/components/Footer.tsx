@@ -29,15 +29,27 @@ export function Footer() {
               <span className="font-display text-2xl font-normal leading-tight tracking-tight">{t("brand.name")}</span>
               
             </a>
-            <p className="mt-2 text-base text-muted-foreground/70 max-w-xs">
+            <p className="mt-2 text-base text-muted-foreground max-w-xs">
               {t("footer.tagline")}
             </p>
           </div>
 
           {/* Links */}
-          <div className="flex flex-wrap items-center gap-6 text-base text-muted-foreground/70">
-            <a href={homeHref} className="hover:text-foreground transition-colors">
-              {t("brand.name")}
+          <div className="flex flex-wrap items-center gap-6 text-base text-muted-foreground">
+            <a href="https://github.com/olsommer/mantly" className="hover:text-foreground transition-colors">
+              {t("footer.github")}
+            </a>
+            <a
+              href="https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md"
+              className="hover:text-foreground transition-colors"
+            >
+              {t("footer.docs")}
+            </a>
+            <a
+              href="mailto:support@mantly.io?subject=Mantly%20Enterprise"
+              className="hover:text-foreground transition-colors"
+            >
+              {t("footer.sales")}
             </a>
             <a
               href={legalLinks.support}
@@ -68,8 +80,8 @@ export function Footer() {
               variant="ghost"
               size="sm"
               onClick={toggleLang}
-              className="h-auto px-0 text-base text-muted-foreground/70 hover:text-foreground"
-              aria-label="Toggle language"
+              className="h-auto px-0 text-base text-muted-foreground hover:text-foreground"
+              aria-label={t(lang === "en" ? "a11y.switchToGerman" : "a11y.switchToEnglish")}
             >
               <Globe className="h-3.5 w-3.5" />
               {lang === "en" ? "DE" : "EN"}
@@ -79,7 +91,7 @@ export function Footer() {
 
         <Separator className="my-8 bg-border/50" />
 
-        <p className="text-xs text-muted-foreground/50 text-center">
+        <p className="text-xs text-muted-foreground text-center">
           &copy; {new Date().getFullYear()} {t("brand.name")}. {t("footer.rights")}
         </p>
       </div>

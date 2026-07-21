@@ -114,11 +114,14 @@ export const ProjectMembers = ({ projectId, userEmail, isDemoAccount = false }: 
                 }]);
                 setBilling({
                     plan: 'business',
+                    deploymentMode: 'cloud',
+                    edition: 'business',
                     subscriptionStatus: 'active',
                     cancelAtPeriodEnd: false,
                     currentPeriodStart: '',
                     currentPeriodEnd: '',
                     usage: {
+                        agentRunsThisPeriod: 0,
                         emailsThisPeriod: 0,
                         projects: 1,
                         users: 1,
@@ -136,13 +139,18 @@ export const ProjectMembers = ({ projectId, userEmail, isDemoAccount = false }: 
                     },
                     syncedAddons: {},
                     limits: {
+                        agentRunsPerMonth: 1000,
                         emailsPerMonth: 1000,
-                        projects: 1,
-                        users: 5,
+                        projects: 10,
+                        users: Number.POSITIVE_INFINITY,
                         evalRunsPerMonth: Number.POSITIVE_INFINITY,
                         evalSets: Number.POSITIVE_INFINITY,
                         evalCasesPerSet: Number.POSITIVE_INFINITY,
-                        retentionDays: 90,
+                        retentionDays: 365,
+                    },
+                    metering: {
+                        unit: 'agent_run',
+                        definition: 'One inbound customer message processed.',
                     },
                     features: {
                         feedback_learnings: true,
@@ -271,7 +279,7 @@ export const ProjectMembers = ({ projectId, userEmail, isDemoAccount = false }: 
                                         <DialogDescription>
                                             {canAddMembers
                                                 ? t('Select a tenant user and assign a project role.')
-                                                : t('The Free plan is limited to {count} {unit}. Upgrade to Pro to add team members to projects.', {
+                                                : t('The Cloud Sandbox is limited to {count} {unit}. Upgrade to Cloud to add team members to projects.', {
                                                     count: usersLimit,
                                                     unit: usersLimit === 1 ? t('user') : t('users'),
                                                 })}

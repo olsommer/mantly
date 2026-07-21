@@ -119,7 +119,7 @@ async def health_check():
     overall = "healthy" if pb_ok else "degraded"
     result: dict = {
         "status": overall,
-        "service": "email-agent",
+        "service": "mantly",
         "dependencies": {
             "pocketbase": {"status": "ok" if pb_ok else "error", "error": pb_error},
         },

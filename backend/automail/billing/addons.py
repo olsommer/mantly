@@ -18,6 +18,13 @@ from automail.billing.usage import get_usage
 
 logger = logging.getLogger(__name__)
 
+
+def _billable_overage(current: int, included: int) -> int:
+    if included < 0:
+        return 0
+    return max(current - included, 0)
+
+
 def sync_stripe_addons_best_effort(tenant_id: str) -> dict[str, int]:
     """Sync licensed add-on subscription item quantities from current usage."""
     try:
@@ -25,6 +32,7 @@ def sync_stripe_addons_best_effort(tenant_id: str) -> dict[str, int]:
     except Exception:
         logger.warning("Failed to sync Stripe add-ons for tenant %s", tenant_id, exc_info=True)
         return {}
+
 
 def sync_stripe_addons(tenant_id: str) -> dict[str, int]:
     """Update extra user/project/email subscription quantities in Stripe."""
@@ -45,12 +53,18 @@ def sync_stripe_addons(tenant_id: str) -> dict[str, int]:
 
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
     usage = get_usage(tenant_id)
-    email_overage = max(usage["emails_this_period"] - limits["emails_per_month"], 0)
+    agent_run_overage = _billable_overage(
+        usage["agent_runs_this_period"],
+        limits["emails_per_month"],
+    )
     desired = {
-        STRIPE_EXTRA_USER_PRICE_ID: max(usage["users"] - limits["users"], 0),
-        STRIPE_EXTRA_PROJECT_PRICE_ID: max(usage["projects"] - limits["projects"], 0),
+        STRIPE_EXTRA_USER_PRICE_ID: _billable_overage(usage["users"], limits["users"]),
+        STRIPE_EXTRA_PROJECT_PRICE_ID: _billable_overage(
+            usage["projects"],
+            limits["projects"],
+        ),
         STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID: (
-            (email_overage + STRIPE_EXTRA_EMAIL_BLOCK_SIZE - 1) // STRIPE_EXTRA_EMAIL_BLOCK_SIZE
+            (agent_run_overage + STRIPE_EXTRA_EMAIL_BLOCK_SIZE - 1) // STRIPE_EXTRA_EMAIL_BLOCK_SIZE
             if STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID and STRIPE_EXTRA_EMAIL_BLOCK_SIZE > 0
             else 0
         ),

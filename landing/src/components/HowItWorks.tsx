@@ -1,5 +1,5 @@
 import { useTranslation } from "@/i18n/useTranslation";
-import { UserSearch, Brain, Zap, ClipboardCheck } from "lucide-react";
+import { Inbox, ListChecks, Send, Wrench } from "lucide-react";
 
 export function HowItWorks() {
   const { t } = useTranslation();
@@ -7,28 +7,28 @@ export function HowItWorks() {
 
   const steps = [
     {
-      icon: UserSearch,
+      icon: Inbox,
       title: t("how.step1.title"),
       desc: t("how.step1.desc"),
       color: "bg-blue-500/10 text-blue-600",
       num: "01",
     },
     {
-      icon: Brain,
+      icon: ListChecks,
       title: t("how.step2.title"),
       desc: t("how.step2.desc"),
       color: "bg-violet-500/10 text-violet-600",
       num: "02",
     },
     {
-      icon: Zap,
+      icon: Wrench,
       title: t("how.step3.title"),
       desc: t("how.step3.desc"),
       color: "bg-amber-500/10 text-amber-600",
       num: "03",
     },
     {
-      icon: ClipboardCheck,
+      icon: Send,
       title: t("how.step4.title"),
       desc: t("how.step4.desc"),
       color: "bg-emerald-500/10 text-emerald-600",

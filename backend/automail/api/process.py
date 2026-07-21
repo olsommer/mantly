@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from automail.api.attachments import load_attachment_files, parse_email_attachments
+from automail.billing.agent_runs import email_agent_run_key, reserve_agent_run
 from automail.core.auth import TokenPayload, get_current_tenant, get_token_payload
 from automail.core.rate_limit import limiter
 from automail.db.pocketbase.client import (
@@ -240,11 +241,6 @@ def process_email_for_context(
             ensure_draft_exists(project_id, tenant_id=tenant_id)
             config_source = get_live_source(project_id, tenant_id=tenant_id)
 
-    # Enforce plan limits on email processing (SaaS only)
-    if tenant_id:
-        from automail.billing.usage import check_limit
-        check_limit(tenant_id, "emails_per_month")
-
     """
     Process an incoming email and determine the appropriate action.
 
@@ -345,6 +341,16 @@ def process_email_for_context(
             if processing_metadata is not None:
                 processing_metadata["cached"] = True
             return messages
+
+        reserve_agent_run(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source=source,
+            idempotency_key=email_agent_run_key(
+                project_id=project_id,
+                email_id=email_id,
+            ),
+        )
 
         # Email not analyzed yet - run the pipeline
         logger.info("Analyzing new email %s", email_id)

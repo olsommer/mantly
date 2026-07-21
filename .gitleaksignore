@@ -1,0 +1,28 @@
+# Synthetic credentials and false-positive identifier names in committed test fixtures.
+# Fingerprint-level ignores keep future findings in the same files visible.
+6fa281f79f44ee9a9701dfba062cb90bb49a1c51:e2e/personas/fulfillment.yaml:generic-api-key:195
+6fa281f79f44ee9a9701dfba062cb90bb49a1c51:e2e/personas/fulfillment.yaml:generic-api-key:510
+6fa281f79f44ee9a9701dfba062cb90bb49a1c51:e2e/personas/fulfillment.yaml:generic-api-key:511
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_e2e_fixture_tools.py:aws-access-token:79
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_knowledge_agent.py:generic-api-key:5093
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_knowledge_agent.py:stripe-access-token:5058
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_sensitive_values.py:aws-access-token:23
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_sensitive_values.py:generic-api-key:16
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_sensitive_values.py:generic-api-key:70
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_sensitive_values.py:jwt:27
+baddfe483725f0c076d6054993804d7ef45f5d22:backend/tests/test_sensitive_values.py:stripe-access-token:20
+d21cb6fbc8d979dacc3aa56903a67b1fdf017377:backend/tests/test_knowledge_agent.py:generic-api-key:77
+
+# Working-tree fingerprints for the same synthetic fixtures.
+backend/tests/test_e2e_fixture_tools.py:aws-access-token:79
+backend/tests/test_knowledge_agent.py:generic-api-key:96
+backend/tests/test_knowledge_agent.py:generic-api-key:7717
+backend/tests/test_knowledge_agent.py:stripe-access-token:7682
+backend/tests/test_sensitive_values.py:aws-access-token:23
+backend/tests/test_sensitive_values.py:generic-api-key:16
+backend/tests/test_sensitive_values.py:generic-api-key:70
+backend/tests/test_sensitive_values.py:jwt:27
+backend/tests/test_sensitive_values.py:stripe-access-token:20
+e2e/personas/fulfillment.yaml:generic-api-key:222
+e2e/personas/fulfillment.yaml:generic-api-key:557
+e2e/personas/fulfillment.yaml:generic-api-key:558

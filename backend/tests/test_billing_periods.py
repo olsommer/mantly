@@ -1,9 +1,14 @@
 from datetime import datetime, timezone
 
+from automail.billing.addons import _billable_overage
 from automail.billing.checkout import create_checkout_session
 from automail.billing.plans import (
+    entitlement_context,
+    get_edition_features,
+    get_edition_limits,
     get_plan_features,
     get_plan_limits,
+    get_tenant_edition,
     get_tenant_features,
     get_tenant_limits,
     has_feature,
@@ -25,6 +30,11 @@ def test_current_period_start_uses_synced_stripe_start(monkeypatch):
     )
 
     assert _current_period_start_iso("tenant") == "2026-05-05 20:43:30.000Z"
+
+
+def test_unlimited_resources_never_create_addon_overage():
+    assert _billable_overage(50_000, -1) == 0
+    assert _billable_overage(11, 10) == 1
 
 
 def test_create_checkout_session_uses_requested_business_price(monkeypatch):
@@ -92,14 +102,20 @@ def test_subscription_updated_uses_item_period_dates(monkeypatch):
     assert updates["plan"] == "pro"
     assert updates["subscription_id"] == "sub_test"
     assert updates["cancel_at_period_end"] is True
-    assert updates["current_period_start"] == datetime.fromtimestamp(
-        1778013810,
-        tz=timezone.utc,
-    ).isoformat()
-    assert updates["current_period_end"] == datetime.fromtimestamp(
-        1780692210,
-        tz=timezone.utc,
-    ).isoformat()
+    assert (
+        updates["current_period_start"]
+        == datetime.fromtimestamp(
+            1778013810,
+            tz=timezone.utc,
+        ).isoformat()
+    )
+    assert (
+        updates["current_period_end"]
+        == datetime.fromtimestamp(
+            1780692210,
+            tz=timezone.utc,
+        ).isoformat()
+    )
 
 
 def test_subscription_updated_hydrates_thin_event(monkeypatch):
@@ -142,10 +158,13 @@ def test_subscription_updated_hydrates_thin_event(monkeypatch):
 
     assert updates["subscription_id"] == "sub_test"
     assert updates["cancel_at_period_end"] is True
-    assert updates["current_period_end"] == datetime.fromtimestamp(
-        1780692210,
-        tz=timezone.utc,
-    ).isoformat()
+    assert (
+        updates["current_period_end"]
+        == datetime.fromtimestamp(
+            1780692210,
+            tz=timezone.utc,
+        ).isoformat()
+    )
 
 
 def test_stripe_object_to_dict_supports_private_recursive_method():
@@ -186,10 +205,13 @@ def test_subscription_updated_treats_cancel_at_as_scheduled_cancel(monkeypatch):
     )
 
     assert updates["cancel_at_period_end"] is True
-    assert updates["current_period_end"] == datetime.fromtimestamp(
-        1780692210,
-        tz=timezone.utc,
-    ).isoformat()
+    assert (
+        updates["current_period_end"]
+        == datetime.fromtimestamp(
+            1780692210,
+            tz=timezone.utc,
+        ).isoformat()
+    )
 
 
 def test_get_subscription_details_refreshes_cancel_at_period_end(monkeypatch):
@@ -229,10 +251,13 @@ def test_get_subscription_details_refreshes_cancel_at_period_end(monkeypatch):
     assert details["status"] == "active"
     assert details["cancel_at_period_end"] is True
     assert updates["plan"] == "business"
-    assert details["current_period_end"] == datetime.fromtimestamp(
-        1780692210,
-        tz=timezone.utc,
-    ).isoformat()
+    assert (
+        details["current_period_end"]
+        == datetime.fromtimestamp(
+            1780692210,
+            tz=timezone.utc,
+        ).isoformat()
+    )
     assert updates["cancel_at_period_end"] is True
 
 
@@ -327,9 +352,41 @@ def test_free_eval_sets_are_limited(monkeypatch):
 def test_plan_feature_matrix_matches_pricing(monkeypatch):
     assert get_plan_features("free")["feedback_learnings"] is False
     assert get_plan_features("pro")["feedback_learnings"] is True
-    assert get_plan_features("pro")["security_monitoring"] is False
+    assert get_plan_features("free")["security_monitoring"] is True
+    assert get_plan_features("pro")["security_monitoring"] is True
     assert get_plan_features("business")["security_monitoring"] is True
     assert get_plan_features("business")["byok_llm"] is True
+
+
+def test_self_hosted_community_has_unlimited_safe_core(monkeypatch):
+    monkeypatch.setattr("automail.billing.plans.IS_SAAS", False)
+    monkeypatch.setattr("automail.billing.plans.INSTANCE_EDITION", "community")
+    monkeypatch.setattr("automail.billing.plans.DEPLOYMENT_MODE", "self_hosted")
+
+    assert get_tenant_edition("tenant") == "community"
+    assert all(limit == -1 for limit in get_edition_limits("community").values())
+    assert all(get_edition_features("community").values())
+    assert get_tenant_limits("tenant") == get_edition_limits("community")
+    assert get_tenant_features("tenant") == get_edition_features("community")
+    assert entitlement_context("tenant") == {
+        "deployment": "self_hosted",
+        "edition": "community",
+    }
+
+
+def test_cloud_plan_maps_to_edition_without_changing_billing_plan(monkeypatch):
+    monkeypatch.setattr("automail.billing.plans.IS_SAAS", True)
+    monkeypatch.setattr("automail.billing.plans.DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setattr(
+        "automail.billing.plans.get_effective_tenant_plan",
+        lambda tenant_id: "pro",
+    )
+
+    assert get_tenant_edition("tenant") == "community"
+    assert entitlement_context("tenant") == {
+        "deployment": "cloud",
+        "edition": "community",
+    }
 
 
 def test_demo_tenant_gets_business_feature_surface(monkeypatch):

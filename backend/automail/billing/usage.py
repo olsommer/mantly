@@ -20,6 +20,7 @@ def _pb_date_filter_value(value: datetime) -> str:
     """Format a datetime for PocketBase date comparisons."""
     return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.000Z")
 
+
 def _current_period_start_iso(tenant_id: str) -> str:
     """Return the start of the current billing period as ISO string.
 
@@ -42,22 +43,32 @@ def _current_period_start_iso(tenant_id: str) -> str:
     period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return _pb_date_filter_value(period_start)
 
+
+def get_agent_runs_this_period(tenant_id: str) -> int:
+    """Return canonical inbound agent-run usage for the billing period."""
+    from automail.db.pocketbase.client import _escape_pb, _list_all
+
+    period_start = _current_period_start_iso(tenant_id)
+    esc_tid = _escape_pb(tenant_id)
+    runs = _list_all(
+        "agent_runs",
+        f"tenant='{esc_tid}' && created>='{period_start}'",
+    )
+    return len(runs)
+
+
 def get_usage(tenant_id: str) -> dict[str, int]:
     """Return current usage counts for the tenant.
 
-    Keys: ``emails_this_period``, ``projects``, ``users``, ``eval_runs_this_period``,
-    ``eval_sets``.
+    ``agent_runs_this_period`` is canonical. ``emails_this_period`` remains a
+    transitional alias for older callers and reports the same ledger count.
     """
     from automail.db.pocketbase.client import _escape_pb, _list_all
 
     period_start = _current_period_start_iso(tenant_id)
     esc_tid = _escape_pb(tenant_id)
 
-    # Emails this period
-    emails = _list_all(
-        "chats",
-        f"tenant='{esc_tid}' && status='analyzed' && created>='{period_start}'",
-    )
+    agent_runs = get_agent_runs_this_period(tenant_id)
 
     # Total projects
     projects = _list_all("projects", f"tenant='{esc_tid}'")
@@ -75,12 +86,14 @@ def get_usage(tenant_id: str) -> dict[str, int]:
     eval_sets = _list_all("eval_sets", f"tenant='{esc_tid}'")
 
     return {
-        "emails_this_period": len(emails),
+        "agent_runs_this_period": agent_runs,
+        "emails_this_period": agent_runs,
         "projects": len(projects),
         "users": len(users),
         "eval_runs_this_period": len(eval_runs),
         "eval_sets": len(eval_sets),
     }
+
 
 def get_llm_billing_usage(tenant_id: str) -> dict[str, Any]:
     """Return current-period LLM cost summary for billing visibility."""
@@ -105,30 +118,40 @@ def get_llm_billing_usage(tenant_id: str) -> dict[str, Any]:
         "billed_cost_usd": round(billed_micros / 1_000_000, 6),
     }
 
+
 def _get_limit(plan: str, resource: str) -> int:
     """Return the limit for a given resource on a plan."""
-    return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]).get(resource, 0)
+    canonical_resource = {
+        "agent_runs_per_month": "emails_per_month",
+    }.get(resource, resource)
+    return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]).get(canonical_resource, 0)
+
 
 def get_tenant_limit(tenant_id: str | None, resource: str) -> int:
     if not IS_SAAS or not tenant_id:
         return UNLIMITED
     return _get_limit(get_effective_tenant_plan(tenant_id), resource)
 
+
 def _is_unlimited(limit: int) -> bool:
     return limit < 0
 
+
 def _addon_price_for_resource(resource: str) -> str:
     return {
+        "agent_runs_per_month": STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID,
         "emails_per_month": STRIPE_EXTRA_EMAIL_BLOCK_PRICE_ID,
         "projects": STRIPE_EXTRA_PROJECT_PRICE_ID,
         "users": STRIPE_EXTRA_USER_PRICE_ID,
     }.get(resource, "")
 
+
 def check_limit(tenant_id: str, resource: str) -> None:
     """Raise ``HTTPException(402)`` if the tenant has exceeded the limit for *resource*.
 
-    *resource* must be one of: ``emails_per_month``, ``projects``, ``users``,
-    ``eval_runs_per_month``, ``eval_sets``.
+    *resource* must be one of: ``agent_runs_per_month`` (or its transitional
+    ``emails_per_month`` alias), ``projects``, ``users``,
+    ``eval_runs_per_month``, or ``eval_sets``.
 
     No-op when ``IS_SAAS`` is false (on-prem deployments are unlimited).
     """
@@ -140,18 +163,18 @@ def check_limit(tenant_id: str, resource: str) -> None:
     if _is_unlimited(limit):
         return
 
-    usage = get_usage(tenant_id)
-
-    # Map resource name to usage key
-    usage_key_map = {
-        "emails_per_month": "emails_this_period",
-        "projects": "projects",
-        "users": "users",
-        "eval_runs_per_month": "eval_runs_this_period",
-        "eval_sets": "eval_sets",
-    }
-    usage_key = usage_key_map.get(resource, resource)
-    current = usage.get(usage_key, 0)
+    if resource in {"agent_runs_per_month", "emails_per_month"}:
+        current = get_agent_runs_this_period(tenant_id)
+    else:
+        usage = get_usage(tenant_id)
+        usage_key_map = {
+            "projects": "projects",
+            "users": "users",
+            "eval_runs_per_month": "eval_runs_this_period",
+            "eval_sets": "eval_sets",
+        }
+        usage_key = usage_key_map.get(resource, resource)
+        current = usage.get(usage_key, 0)
 
     if current >= limit:
         if plan != "free" and _addon_price_for_resource(resource):
@@ -170,6 +193,7 @@ def check_limit(tenant_id: str, resource: str) -> None:
                 ),
             },
         )
+
 
 def check_eval_cases_limit(tenant_id: str | None, set_id: str) -> None:
     """Enforce per-eval-set case limits."""

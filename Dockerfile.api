@@ -19,6 +19,7 @@ COPY demo /app/demo
 COPY e2e/ /app/e2e/
 COPY addin/manifest.xml /app/backend/resources/manifest.xml
 COPY backend/assets/ /app/backend/assets/
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/mantly/THIRD_PARTY_NOTICES.md
 
 RUN mkdir -p /app/data/attachments && chown -R appuser:appuser /app
 RUN chmod +x /app/backend/start.sh

@@ -103,6 +103,7 @@ RUN mkdir -p /app/backend/resources
 COPY demo /app/demo
 COPY e2e/ /app/e2e/
 COPY addin/manifest.xml /app/backend/resources/manifest.xml
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/mantly/THIRD_PARTY_NOTICES.md
 
 # Copy icon assets for Outlook manifest
 COPY backend/assets/ /app/backend/assets/

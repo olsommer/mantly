@@ -17,9 +17,9 @@ const content = {
     eyebrow: "Managed pilot",
     title: "Mantly Pilot Playbook",
     subtitle:
-      "A focused operating plan for proving one Outlook-based email workflow before rolling Mantly out wider.",
+      "A focused operating plan for proving one agentic support workflow before rolling Mantly out wider.",
     intro:
-      "The pilot is for teams with recurring client, support, insurance, legal, or back-office requests that already start in Outlook. It launches one controlled workflow with human review, evaluation cases, and weekly tuning.",
+      "The pilot is for teams with recurring client, support, insurance, legal, or back-office requests across their connected channels. It launches one controlled workflow with explicit runbooks, evaluation cases, and weekly tuning.",
     bestFitTitle: "Best-fit workflow",
     bestFitIntro:
       "The first workflow should be narrow, repeated, and valuable enough that faster preparation matters.",
@@ -28,11 +28,11 @@ const content = {
       "Prepare standard replies with the right case, CRM, policy, or document context.",
       "Attach recurring documents such as certificates, forms, or confirmations.",
       "Create a clean human handoff when the case needs expert review.",
-      "Test intent recognition, response copy, and actions against real example emails.",
+      "Test concern recognition, runbooks, response copy, and actions against real example messages.",
     ],
     poorFitsTitle: "Poor fits",
     poorFits: [
-      "Fully autonomous sending without human approval.",
+      "Automatic sending before policies and evaluation cases are defined.",
       "Legal, regulated, payment, or contractual final decisions.",
       "High-volume consumer support without an accountable owner.",
       "Workflows that require hiding AI usage from staff or customers.",
@@ -40,11 +40,11 @@ const content = {
     ],
     deliverablesTitle: "Pilot deliverables",
     deliverables: [
-      { title: "One scoped project", desc: "A single project with one inbox workflow and clear owner." },
+      { title: "One scoped project", desc: "A single project with one support workflow and clear owner." },
       { title: "Identity source", desc: "Customer, case, policy, or account lookup wired into the pipeline." },
-      { title: "3-5 intents", desc: "The first intent types, each with match rules and response behavior." },
-      { title: "Reviewable response", desc: "Draft copy, attachments, and actions prepared in Outlook for human approval." },
-      { title: "Evaluation set", desc: "Representative emails with expected intent, response, and handoff outcomes." },
+      { title: "3-5 concerns", desc: "The first concern types, each with a matching runbook and expected outcome." },
+      { title: "Governed response", desc: "One grounded reply prepared in the Inbox for approval or policy-based delivery." },
+      { title: "Evaluation set", desc: "Representative messages with expected concerns, responses, and action outcomes." },
       { title: "Weekly tuning", desc: "Corrections from real usage converted into prompt, rule, or evaluation updates." },
     ],
     proofTitle: "What month one should prove",
@@ -55,16 +55,16 @@ const content = {
       "Clear escalation rules for sensitive or complex cases.",
       "Enough measurable value to add the next workflow.",
     ],
-    exampleTitle: "Example workflow: document request in Outlook",
+    exampleTitle: "Example workflow: omnichannel document request",
     triggerTitle: "Trigger",
     trigger:
-      "A customer sends an email asking for a certificate, policy document, contract confirmation, or recurring case update.",
+      "A customer sends a message asking for a certificate, policy document, contract confirmation, or recurring case update.",
     goalTitle: "Mantly goal",
     goal:
-      "Identify the sender, understand the Anliegen, collect the right context, prepare the response and attachment, and leave final approval with the human owner.",
+      "Identify the sender and detected concerns, run the matching procedures, collect trusted context, execute permitted actions, and prepare one grounded response.",
     questionsTitle: "Questions Mantly can surface",
     questions: [
-      "Which customer, policy, matter, or account does this email belong to?",
+      "Which customer, policy, matter, or account does this message belong to?",
       "Which document or confirmation is requested?",
       "Is any required detail missing before a reply can be prepared?",
       "Does the request require legal, payment, security, or expert review?",
@@ -82,7 +82,7 @@ const content = {
     handoff: [
       "Customer: <name / account / policy / matter>",
       "Fit: routine | review needed | blocked",
-      "Anliegen: <one-sentence request>",
+      "Concern: <one-sentence request>",
       "Context collected: <facts from source systems>",
       "Missing: <details still needed>",
       "Risk: <legal/security/payment/customer note, if any>",
@@ -95,31 +95,31 @@ const content = {
       "Keep response copy professional, concise, and source-grounded.",
       "Show what context was used and what is missing.",
       "Escalate sensitive cases early.",
-      "Keep a human owner in control of send and irreversible actions.",
+      "Keep a human owner in control wherever policy requires approval.",
     ],
     dontTitle: "Do not",
     dontRules: [
       "Promise legal, compliance, payment, or contract outcomes.",
       "Request secrets, passwords, private keys, or production credentials.",
       "Pretend to be a human.",
-      "Send or trigger irreversible actions without approval.",
+      "Send or trigger irreversible actions outside the configured policy.",
       "Guess when source data is missing or contradictory.",
     ],
     demoTitle: "Demo script",
     demo: [
-      "Upload or select a representative email in Preview & Publish.",
-      "Mantly identifies the sender and matched Anliegen.",
+      "Upload or select a representative customer message in Preview & Publish.",
+      "Mantly identifies the sender, detected concerns, and the matching runbooks.",
       "The configured tools collect customer or case context.",
-      "Mantly prepares the response, attachments, and any configured actions.",
-      "The owner reviews the result, applies the draft in Outlook, or records feedback.",
-      "The same email becomes part of the evaluation set before going live.",
+      "Mantly executes permitted actions and prepares one grounded response.",
+      "The result is approved or delivered according to policy, with feedback captured in the Inbox.",
+      "The same message becomes part of the evaluation set before going live.",
     ],
     expansionTitle: "Expansion after the pilot",
     expansion: [
-      "Add more Anliegen and higher-volume workflows.",
+      "Add more concerns and higher-volume workflows.",
       "Connect more source systems and actions.",
-      "Move from preview to production add-in rollout.",
-      "Add SSO, RBAC, on-premise, or dedicated deployment if needed.",
+      "Move from preview to a production channel rollout.",
+      "Add roles, approval controls, self-hosting, or dedicated deployment if needed.",
       "Define monitoring, retention, and response-time targets.",
     ],
   },
@@ -127,9 +127,9 @@ const content = {
     eyebrow: "Managed Pilot",
     title: "Mantly Pilot Playbook",
     subtitle:
-      "Ein fokussierter Betriebsplan, um einen Outlook-basierten E-Mail-Workflow zu beweisen, bevor Mantly breiter ausgerollt wird.",
+      "Ein fokussierter Betriebsplan, um einen agentischen Support-Workflow zu beweisen, bevor Mantly breiter ausgerollt wird.",
     intro:
-      "Der Pilot ist für Teams mit wiederkehrenden Kunden-, Support-, Versicherungs-, Kanzlei- oder Backoffice-Anliegen, die bereits in Outlook starten. Er bringt einen kontrollierten Workflow mit menschlicher Prüfung, Evaluationen und wöchentlicher Feinjustierung live.",
+      "Der Pilot ist für Teams mit wiederkehrenden Kunden-, Support-, Versicherungs-, Kanzlei- oder Backoffice-Anliegen aus ihren verbundenen Kanälen. Er bringt einen kontrollierten Workflow mit eindeutigen Runbooks, Evaluationen und wöchentlicher Feinjustierung live.",
     bestFitTitle: "Geeigneter Workflow",
     bestFitIntro:
       "Der erste Workflow sollte eng gefasst, wiederkehrend und wertvoll genug sein, dass schnellere Vorbereitung spürbar hilft.",
@@ -138,23 +138,23 @@ const content = {
       "Standardantworten mit passendem Kunden-, Akten-, Vertrags- oder Dokumentenkontext vorbereiten.",
       "Wiederkehrende Dokumente wie Bestätigungen, Formulare oder Nachweise anhängen.",
       "Eine klare Übergabe erstellen, wenn ein Anliegen fachliche Prüfung braucht.",
-      "Anliegenerkennung, Antworttext und Aktionen mit echten Beispiel-E-Mails testen.",
+      "Anliegenerkennung, Runbooks, Antworttext und Aktionen mit echten Beispielnachrichten testen.",
     ],
     poorFitsTitle: "Nicht geeignet",
     poorFits: [
-      "Vollautomatisches Versenden ohne menschliche Freigabe.",
+      "Automatisches Versenden, bevor Richtlinien und Evaluationsfälle definiert sind.",
       "Juristische, regulierte, zahlungsbezogene oder vertragliche Endentscheidungen.",
-      "Hochvolumiger Consumer-Support ohne verantwortlichen Owner.",
+      "Hochvolumiger Endkundensupport ohne klare Verantwortung.",
       "Workflows, bei denen KI-Nutzung vor Mitarbeitenden oder Kunden versteckt werden soll.",
       "Irreversible Aktionen ohne Prüfschritt.",
     ],
     deliverablesTitle: "Pilot-Ergebnisse",
     deliverables: [
-      { title: "Ein fokussiertes Projekt", desc: "Ein Projekt mit einem Inbox-Workflow und klarem Owner." },
+      { title: "Ein fokussiertes Projekt", desc: "Ein Projekt mit einem Support-Workflow und klarer Verantwortung." },
       { title: "Identitätsquelle", desc: "Kunden-, Akten-, Vertrags- oder Account-Lookup in der Pipeline." },
-      { title: "3-5 Anliegen", desc: "Die ersten Anliegen-Typen mit Erkennungsregeln und Antwortverhalten." },
-      { title: "Prüfbare Antwort", desc: "Antworttext, Anhänge und Aktionen werden in Outlook zur Freigabe vorbereitet." },
-      { title: "Evaluationsset", desc: "Repräsentative E-Mails mit erwarteten Anliegen, Antworten und Übergaben." },
+      { title: "3-5 Anliegen", desc: "Die ersten Anliegen-Typen mit passendem Runbook und erwartetem Ergebnis." },
+      { title: "Kontrollierte Antwort", desc: "Eine fundierte Antwort wird im Posteingang zur Freigabe oder richtlinienbasierten Zustellung vorbereitet." },
+      { title: "Evaluationsset", desc: "Repräsentative Nachrichten mit erwarteten Anliegen, Antworten und Aktionsergebnissen." },
       { title: "Wöchentliche Feinjustierung", desc: "Korrekturen aus der Nutzung werden in Prompts, Regeln oder Evaluationen übertragen." },
     ],
     proofTitle: "Was Monat eins beweisen soll",
@@ -165,16 +165,16 @@ const content = {
       "Klare Eskalationsregeln für sensible oder komplexe Anliegen.",
       "Genug messbarer Wert, um den nächsten Workflow aufzunehmen.",
     ],
-    exampleTitle: "Beispiel-Workflow: Dokumentenanfrage in Outlook",
+    exampleTitle: "Beispiel-Workflow: Omnichannel-Dokumentenanfrage",
     triggerTitle: "Auslöser",
     trigger:
-      "Ein Kunde sendet eine E-Mail und fragt nach einer Bestätigung, einem Vertragsdokument, einer Versicherungsinformation oder einem wiederkehrenden Vorgangsupdate.",
+      "Ein Kunde sendet eine Nachricht und fragt nach einer Bestätigung, einem Vertragsdokument, einer Versicherungsinformation oder einem wiederkehrenden Vorgangsupdate.",
     goalTitle: "Ziel von Mantly",
     goal:
-      "Absender erkennen, Anliegen verstehen, passenden Kontext holen, Antwort und Anhang vorbereiten und die finale Freigabe beim menschlichen Owner lassen.",
+      "Absender und erkannte Anliegen zuordnen, passende Runbooks ausführen, verlässlichen Kontext holen, erlaubte Aktionen ausführen und eine fundierte Antwort vorbereiten.",
     questionsTitle: "Fragen, die Mantly sichtbar machen kann",
     questions: [
-      "Zu welchem Kunden, Vertrag, Vorgang oder Account gehört diese E-Mail?",
+      "Zu welchem Kunden, Vertrag, Vorgang oder Account gehört diese Nachricht?",
       "Welches Dokument oder welche Bestätigung wird angefragt?",
       "Fehlt ein Pflichtdetail, bevor eine Antwort vorbereitet werden kann?",
       "Braucht das Anliegen rechtliche, zahlungsbezogene, sicherheitsrelevante oder fachliche Prüfung?",
@@ -199,38 +199,38 @@ const content = {
       "Empfohlene nächste menschliche Aktion: <senden, anpassen, nachfragen, eskalieren oder ablehnen>",
     ],
     rulesTitle: "Operator-Regeln",
-    doTitle: "Do",
+    doTitle: "Tun",
     doRules: [
       "Fakten und Entwürfe vorbereiten, keine finalen Zusagen machen.",
       "Antworttexte professionell, knapp und quellenbasiert halten.",
       "Zeigen, welcher Kontext genutzt wurde und was fehlt.",
       "Sensible Fälle früh eskalieren.",
-      "Senden und irreversible Aktionen beim menschlichen Owner lassen.",
+      "Verantwortliche Personen überall einbinden, wo die Richtlinie eine Freigabe verlangt.",
     ],
-    dontTitle: "Do not",
+    dontTitle: "Nicht tun",
     dontRules: [
       "Juristische, Compliance-, Zahlungs- oder Vertragsausgänge versprechen.",
       "Secrets, Passwörter, private Keys oder Produktionszugänge anfragen.",
       "So tun, als wäre die KI ein Mensch.",
-      "Ohne Freigabe senden oder irreversible Aktionen starten.",
+      "Außerhalb der konfigurierten Richtlinie senden oder irreversible Aktionen starten.",
       "Raten, wenn Quelldaten fehlen oder widersprüchlich sind.",
     ],
     demoTitle: "Demo-Skript",
     demo: [
-      "Eine repräsentative E-Mail in Vorschau & Veröffentlichung auswählen oder hochladen.",
-      "Mantly erkennt Absender und passendes Anliegen.",
+      "Eine repräsentative Kundennachricht in Vorschau & Veröffentlichung auswählen oder hochladen.",
+      "Mantly erkennt Absender, erkannte Anliegen und die passenden Runbooks.",
       "Konfigurierte Tools holen Kunden- oder Vorgangskontext.",
-      "Mantly bereitet Antwort, Anhänge und konfigurierte Aktionen vor.",
-      "Der Owner prüft das Ergebnis, übernimmt den Entwurf in Outlook oder gibt Feedback.",
-      "Die gleiche E-Mail wird Teil des Evaluationssets, bevor live geschaltet wird.",
+      "Mantly führt erlaubte Aktionen aus und bereitet eine fundierte Antwort vor.",
+      "Das Ergebnis wird gemäß Richtlinie freigegeben oder zugestellt; Feedback bleibt im Posteingang.",
+      "Die gleiche Nachricht wird Teil des Evaluationssets, bevor live geschaltet wird.",
     ],
     expansionTitle: "Ausbau nach dem Pilot",
     expansion: [
       "Weitere Anliegen und volumenstärkere Workflows ergänzen.",
       "Mehr Quellsysteme und Aktionen anbinden.",
-      "Von der Vorschau in den produktiven Add-in-Rollout wechseln.",
-      "SSO, RBAC, On-premise oder dediziertes Deployment ergänzen, falls nötig.",
-      "Monitoring-, Retention- und Antwortzeit-Ziele definieren.",
+      "Von der Vorschau in den produktiven Kanal-Rollout wechseln.",
+      "Rollen, Freigabekontrollen, Self-Hosting oder dediziertes Deployment ergänzen, falls nötig.",
+      "Ziele für Monitoring, Aufbewahrung und Antwortzeiten definieren.",
     ],
   },
 };
@@ -270,6 +270,7 @@ export function PilotPlaybookPage() {
   const { lang } = useTranslation();
   const copy = content[lang];
   const mockStatus = lang === "de" ? "Menschliche Prüfung" : "Human review";
+  const mockTitle = lang === "de" ? "Dokumentenanfrage" : "Document request";
   const mockRows = lang === "de"
     ? [
       ["Identität", "Kunde gefunden"],
@@ -279,7 +280,7 @@ export function PilotPlaybookPage() {
     ]
     : [
       ["Identity", "Customer found"],
-      ["Intent", "Policy document request"],
+      ["Concern", "Policy document request"],
       ["Context", "Policy and certificate ready"],
       ["Response", "Draft prepared"],
     ];
@@ -307,8 +308,8 @@ export function PilotPlaybookPage() {
             <div className="rounded-md border bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between border-b pb-3">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Outlook</p>
-                  <p className="mt-1 text-sm font-medium">Document request</p>
+                  <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Omnichannel Inbox</p>
+                  <p className="mt-1 text-sm font-medium">{mockTitle}</p>
                 </div>
                 <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
                   {mockStatus}

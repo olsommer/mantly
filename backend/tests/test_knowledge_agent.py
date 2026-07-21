@@ -5620,6 +5620,7 @@ def _recent_change_grounding_issue(
     status: str = "success",
     response_facts: Any = None,
     evidence_concern_id: str = "webhook",
+    duplicate_method: str = "",
 ) -> dict[str, Any]:
     issue = _issue_with_grounding_obligations(
         concern_id="webhook",
@@ -5645,6 +5646,13 @@ def _recent_change_grounding_issue(
     }
     if evidence_concern_id == "webhook":
         concern["outcome"]["toolEvidence"] = [tool_evidence]
+        if duplicate_method:
+            concern["outcome"]["toolEvidence"].append(
+                {
+                    **tool_evidence,
+                    "method": duplicate_method,
+                }
+            )
     else:
         issue["aiRuns"][0]["intentResult"]["concerns"].append(
             {
@@ -7292,6 +7300,342 @@ def test_atomic_recent_change_grounding_accepts_exact_same_tool_value(
 
     assert result.verified is True
     assert result.obligation_assessments[0]["resolution"] == "answered"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Our lookup shows a recent change: customer certificate rotation.",
+        "The lookup reports the relevant recent change: a customer certificate rotation.",
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "Delivery remains unverified."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "The root cause is unknown."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "Recovery remains unverified."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "The actual change was customer certificate rotation."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "The lookup result was customer certificate rotation."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "The actual result was customer certificate rotation."
+        ),
+        (
+            "Our lookup shows a recent change: customer certificate rotation. "
+            "That is customer certificate rotation."
+        ),
+    ],
+    ids=(
+        "live-our-lookup",
+        "the-lookup",
+        "unrelated-delivery-caveat",
+        "unrelated-root-cause-caveat",
+        "unrelated-recovery-caveat",
+        "same-change-corroboration",
+        "same-lookup-result-corroboration",
+        "same-actual-result-corroboration",
+        "same-anaphoric-corroboration",
+    ),
+)
+def test_atomic_recent_change_grounding_promotes_exact_appositive_fact_when_model_marks_not_covered(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    issue = _recent_change_grounding_issue()
+    evidence_id = "tool:webhook:fixture_saas_webhook_acme_orders"
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("webhook:recent-change", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments[0] == {
+        "obligationId": "webhook:recent-change",
+        "resolution": "answered",
+        "covered": True,
+        "answerUnitIds": ["u001"],
+    }
+    assert result.unit_assessments[0]["evidenceIds"] == [evidence_id]
+
+
+@pytest.mark.parametrize(
+    ("issue", "answer", "evidence_id"),
+    [
+        (
+            _recent_change_grounding_issue(),
+            "Our lookup shows a recent change: proxy migration.",
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            "Our lookup does not show a recent change: customer certificate rotation.",
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation; "
+                "the actual change was proxy migration."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "However, actual change was proxy migration."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "That statement is false."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The lookup actually reports proxy migration."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The lookup does not report customer certificate rotation."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The actual change is unknown."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The lookup actually reports no recent change."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "It was actually proxy migration."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The lookup result was proxy migration."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "That statement is unverified."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "The actual result is unknown."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "Actually, the result is unknown."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(),
+            (
+                "Our lookup shows a recent change: customer certificate rotation. "
+                "That is unknown."
+            ),
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(evidence_concern_id="other"),
+            "Our lookup shows a recent change: customer certificate rotation.",
+            "tool:other:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(method="POST"),
+            "Our lookup shows a recent change: customer certificate rotation.",
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(duplicate_method="POST"),
+            "Our lookup shows a recent change: customer certificate rotation.",
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+        (
+            _recent_change_grounding_issue(duplicate_method="GET"),
+            "Our lookup shows a recent change: customer certificate rotation.",
+            "tool:webhook:fixture_saas_webhook_acme_orders",
+        ),
+    ],
+    ids=(
+        "wrong-value",
+        "negated",
+        "same-unit-reversal",
+        "separate-change-reversal",
+        "separate-false-reference",
+        "separate-lookup-reversal",
+        "separate-negated-lookup",
+        "separate-unknown-change",
+        "separate-no-change",
+        "separate-pronoun-alternative",
+        "separate-lookup-result-alternative",
+        "separate-unverified-reference",
+        "separate-unknown-actual-result",
+        "separate-unknown-prefixed-result",
+        "separate-unknown-bare-reference",
+        "foreign-concern",
+        "mutation-evidence",
+        "duplicate-read-mutation-evidence-id",
+        "duplicate-read-evidence-id",
+    ),
+)
+def test_atomic_recent_change_grounding_does_not_promote_unsafe_appositive_fact(
+    monkeypatch: pytest.MonkeyPatch,
+    issue: dict[str, Any],
+    answer: str,
+    evidence_id: str,
+) -> None:
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[("webhook:recent-change", "not_covered", ["u001"])],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.uncovered_obligations == (
+        "What relevant recent change does the lookup show?",
+    )
+    assert result.obligation_assessments[0]["resolution"] == "not_covered"
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        "The lookup may report customer certificate rotation.",
+        "Whether the lookup reports customer certificate rotation is unknown.",
+        "The recent change remains unconfirmed.",
+        "This lookup result is unavailable.",
+        "This finding is incorrect.",
+        "It is instead billing system migration.",
+        "That result was billing system migration.",
+        "The lookup was a proxy migration.",
+        "The lookup result is a billing system migration.",
+        "The correct change was proxy migration.",
+        "The lookup hasn't shown customer certificate rotation.",
+        "The lookup failed to report customer certificate rotation.",
+        "The recent change is inconclusive.",
+        "Apparently, the lookup reports customer certificate rotation.",
+        "Actually, it was proxy migration.",
+        "It was proxy migration instead.",
+        "Actual change: proxy migration.",
+        "The lookup result: proxy migration.",
+        "Instead, proxy migration was the actual change.",
+        "The result from the lookup was proxy migration.",
+        "The lookup contradicts customer certificate rotation.",
+        "That statement is unsupported.",
+        "The lookup lacks evidence for customer certificate rotation.",
+        "The actual result is unknown.",
+        "Actually, the result is unknown.",
+        "That is unknown.",
+        "This finding remains unsupported.",
+        "It cannot be verified.",
+        "The statement is inaccurate.",
+        "The evidence contradicts that.",
+    ],
+    ids=(
+        "modal-lookup",
+        "whether-lookup",
+        "unconfirmed-change",
+        "unavailable-lookup-result",
+        "incorrect-finding",
+        "pronoun-instead",
+        "anaphoric-result",
+        "lookup-was-alternative",
+        "lookup-result-is-alternative",
+        "correct-change-alternative",
+        "contracted-negation",
+        "failed-lookup",
+        "inconclusive-change",
+        "reported-lookup",
+        "prefixed-pronoun-alternative",
+        "suffixed-pronoun-alternative",
+        "colon-change-alternative",
+        "colon-lookup-result-alternative",
+        "reordered-change-alternative",
+        "lookup-result-from-alternative",
+        "contradicted-lookup",
+        "unsupported-statement",
+        "lookup-lacks-evidence",
+        "unknown-actual-result",
+        "unknown-prefixed-result",
+        "unknown-bare-reference",
+        "unsupported-finding-reference",
+        "unverified-pronoun-reference",
+        "inaccurate-statement-subject",
+        "evidence-contradicts-reference",
+    ),
+)
+def test_atomic_recent_change_cross_unit_reversal_veto_is_bounded(
+    sibling: str,
+) -> None:
+    answer = (
+        "Our lookup shows a recent change: customer certificate rotation. "
+        + sibling
+    )
+
+    assert issue_agent._atomic_lookup_answer_has_conflicting_change_assertion(
+        answer,
+        "customer certificate rotation",
+    ) is True
 
 
 @pytest.mark.parametrize(

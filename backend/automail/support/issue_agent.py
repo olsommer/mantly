@@ -3793,6 +3793,49 @@ _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE = re.compile(
     r"\b(?:but|however|although|though|yet|instead|rather)\b",
     re.IGNORECASE,
 )
+_ATOMIC_LOOKUP_CROSS_UNIT_TOPIC_RE = re.compile(
+    r"\blookup\b|"
+    r"\b(?:(?:actual|correct|real|relevant|recent)\s+)+"
+    r"(?:change|finding|result|statement)\b|"
+    r"^(?:(?:actually|but|however|instead|rather),?\s+)?"
+    r"(?:the\s+)?(?:change|finding|result|statement)\b|"
+    r"^(?:(?:actually|but|however|instead|rather),?\s+)?"
+    r"(?:that|this|it)\s+(?:is|was|remains?|seems?|appears?|cannot|can't|"
+    r"couldn't|isn't|wasn't|hasn't|has\s+not|may\s+be|might\s+be|could\s+be)\b|"
+    r"\b(?:that|this)\s+(?:(?:lookup)\s+)?(?:claim|fact|finding|result|statement)\b|"
+    r"\b(?:data|evidence|records?)\s+"
+    r"(?:contradict(?:s|ed|ing)?|disprov(?:e|es|ed|ing)|"
+    r"refut(?:e|es|ed|ing))\s+(?:that|this|it)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_NON_AFFIRMATIVE_EXTRA_RE = re.compile(
+    r"\b(?:ambiguous|doubtful|inconclusive|indeterminate|insufficient|questionable|"
+    r"silent|tbd|unlikely|unresolved|unsupported)\b|"
+    r"\b(?:hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|shouldn['’]?t)\b|"
+    r"\b(?:fail(?:s|ed|ing)?\s+to|rule(?:s|d)?\s+out)\b|"
+    r"\b(?:contradict(?:s|ed|ing)?|den(?:y|ies|ied|ying)|disprov(?:e|es|ed|ing)|"
+    r"disput(?:e|es|ed|ing)|exclud(?:e|es|ed|ing)|lack(?:s|ed|ing)?|"
+    r"refut(?:e|es|ed|ing)|reject(?:s|ed|ing)?|suggest(?:s|ed|ing)?)\b|"
+    r"\b(?:allegedly|apparently|reportedly|purportedly)\b|"
+    r"\b(?:appears?|seems?)\s+to\b|\bother\s+than\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_ALTERNATE_CONTEXT_RE = re.compile(
+    r"\blookup\b|"
+    r"\b(?:actual|correct|real|relevant|recent)\s+(?:change|finding|result)\b|"
+    r"\b(?:actual(?:ly)?|contrary|instead|rather)\b|"
+    r"\b(?:it|that|this)\s+(?:is|was)\b|"
+    r"\b(?:change|finding|result)\s+(?:is|was)\b|"
+    r"\b(?:change|finding|result)\s*:",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_FALSE_REFERENCE_RE = re.compile(
+    r"^(?:(?:but|however|instead|rather),?\s+)?"
+    r"(?:that|this)(?:\s+(?:lookup\s+)?(?:claim|fact|finding|result|statement))?\s+"
+    r"(?:is|was)\s+(?:false|incorrect|inaccurate|untrue|wrong|"
+    r"not\s+(?:accurate|correct|true))\s*[.!]?$",
+    re.IGNORECASE,
+)
 _TERMINAL_ENGLISH_REPLY_CLOSING_RE = re.compile(
     r"^(?:(?:with\s+)?(?:best|kind|warm)\s+regards|regards|sincerely|cordially|"
     r"cheers|best|all\s+the\s+best|best\s+wishes|with\s+thanks|"
@@ -3898,6 +3941,7 @@ def _atomic_recent_change_requirement(
         or _ATOMIC_RECENT_CHANGE_QUESTION_RE.fullmatch(question.strip()) is None
     ):
         return None
+    unambiguous_read_only_evidence = _read_only_tool_evidence_fingerprints(ticket)
     values: dict[str, dict[str, Any]] = {}
     for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
         if evidence_concern_id != concern_id:
@@ -3905,6 +3949,7 @@ def _atomic_recent_change_requirement(
         evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
         if (
             not evidence_id
+            or evidence_id not in unambiguous_read_only_evidence
             or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}
         ):
             continue
@@ -4443,6 +4488,11 @@ def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> boo
         rf"(?:\s+(?:shown|reported|returned|identified|indicated|found)\s+"
         rf"(?:by|in|from)\s+(?:the\s+)?lookup)?\s+(?:is|was)\s+"
         rf"{article}{value_pattern}\b",
+        rf"\b(?:our|the)\s+lookup(?:\s+result)?\s+"
+        rf"(?:shows?|showed|reports?|reported|identifies?|identified|indicates?|"
+        rf"indicated|found|confirms?|confirmed)\s+(?:that\s+)?"
+        rf"(?:a|the)\s+(?:(?:relevant|recent)\s+)*change\s*:\s*"
+        rf"{article}{value_pattern}\b",
     )
     clauses = tuple(
         clause.strip()
@@ -4469,6 +4519,77 @@ def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> boo
         ):
             continue
         return True
+    return False
+
+
+def _atomic_lookup_change_value_candidates(unit: str) -> tuple[str, ...]:
+    """Extract only bounded allowlisted noun phrases ending in a change event."""
+
+    tokens = re.findall(r"[^\W_]+(?:-[^\W_]+)*", unit, flags=re.UNICODE)
+    candidates: list[str] = []
+    for index, token in enumerate(tokens):
+        if _ATOMIC_LOOKUP_CHANGE_EVENT_RE.fullmatch(token) is None:
+            continue
+        start = index
+        while (
+            start > 0
+            and index - start < 9
+            and _ATOMIC_LOOKUP_CHANGE_MODIFIER_RE.fullmatch(tokens[start - 1])
+            is not None
+        ):
+            start -= 1
+        candidate = " ".join(tokens[start : index + 1])
+        if _is_safe_atomic_recent_change_value(candidate):
+            candidates.append(candidate)
+    unique_candidates = tuple(dict.fromkeys(candidates))
+    if len(unique_candidates) > 1:
+        unique_candidates = tuple(
+            candidate
+            for candidate in unique_candidates
+            if candidate.casefold() != "change"
+        )
+    return unique_candidates
+
+
+def _atomic_lookup_answer_has_conflicting_change_assertion(answer: str, value: str) -> bool:
+    """Reject a sibling sentence that reverses one exact recent-change fact."""
+
+    normalized_value = " ".join(value.casefold().split())
+    answer_units = tuple(
+        _string_from(unit.get("text"))
+        for unit in _grounding_answer_units(answer)
+        if _string_from(unit.get("text"))
+    )
+    if not normalized_value or not any(
+        _atomic_lookup_unit_affirmatively_states_value(unit, value)
+        for unit in answer_units
+    ):
+        return False
+    for unit in answer_units:
+        if _atomic_lookup_unit_affirmatively_states_value(unit, value):
+            continue
+        normalized_unit = " ".join(unit.split()).strip()
+        if _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(normalized_unit):
+            continue
+        if (
+            _ATOMIC_LOOKUP_CROSS_UNIT_TOPIC_RE.search(normalized_unit)
+            and (
+                _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(normalized_unit)
+                or _ATOMIC_LOOKUP_CROSS_UNIT_NON_AFFIRMATIVE_EXTRA_RE.search(
+                    normalized_unit
+                )
+            )
+        ):
+            return True
+        if _ATOMIC_LOOKUP_CROSS_UNIT_FALSE_REFERENCE_RE.fullmatch(normalized_unit):
+            return True
+        if _ATOMIC_LOOKUP_CROSS_UNIT_ALTERNATE_CONTEXT_RE.search(
+            normalized_unit
+        ) and any(
+            candidate.casefold() != normalized_value
+            for candidate in _atomic_lookup_change_value_candidates(normalized_unit)
+        ):
+            return True
     return False
 
 
@@ -8899,20 +9020,35 @@ def assess_issue_automation_grounding(
                     )
                     if _string_from(evidence_id)
                 )
-                exact_fact_is_linked = requested_resolution == "answered" and any(
-                    _atomic_lookup_unit_affirmatively_states_value(
-                        _string_from(expected_units.get(unit_id, {}).get("text")),
+                exact_fact_is_linked = bool(
+                    linked_units_are_supported
+                    and obligation_has_usable_evidence
+                    and any(
+                        _atomic_lookup_unit_affirmatively_states_value(
+                            _string_from(expected_units.get(unit_id, {}).get("text")),
+                            required_value,
+                        )
+                        and bool(
+                            supported_unit_evidence_ids.get(
+                                unit_id,
+                                frozenset(),
+                            ).intersection(required_evidence_ids)
+                        )
+                        for unit_id in answer_unit_ids
+                    )
+                    and not _atomic_lookup_answer_has_conflicting_change_assertion(
+                        answer,
                         required_value,
                     )
-                    and bool(
-                        supported_unit_evidence_ids.get(
-                            unit_id,
-                            frozenset(),
-                        ).intersection(required_evidence_ids)
-                    )
-                    for unit_id in answer_unit_ids
                 )
-                if not exact_fact_is_linked:
+                # Correct only the evaluator's narrow internal contradiction:
+                # it linked an exhaustively supported unit to this obligation,
+                # while the unit states the exact safe scalar from the same-
+                # concern read-only evidence used to derive the requirement.
+                if requested_resolution == "not_covered" and exact_fact_is_linked:
+                    resolution = "answered"
+                    deterministically_resolved_obligation_ids.add(obligation_id)
+                elif requested_resolution != "answered" or not exact_fact_is_linked:
                     resolution = "not_covered"
             atomic_http_response_code = atomic_http_response_code_requirements.get(obligation_id)
             if atomic_http_response_code is not None:

@@ -8,6 +8,7 @@ import { ProductPillarsSection } from "@/components/ProductPillarsSection";
 import { PricingSection } from "@/components/PricingSection";
 import { FAQSection } from "@/components/FAQSection";
 import { CTASection } from "@/components/CTASection";
+import { DemoLauncher } from "@/components/DemoLauncher";
 import { Footer } from "@/components/Footer";
 import { SeoMetadata, type LandingPage } from "@/components/SeoMetadata";
 import { LegalPage } from "@/pages/LegalPage";
@@ -60,16 +61,19 @@ export function App() {
           </Suspense>
         </div>
       ) : (
-        <main id="main-content" tabIndex={-1}>
-          <HeroSection />
-          <ProblemSection />
-          <HowItWorks />
-          <FeaturesSection />
-          <ProductPillarsSection />
-          <PricingSection />
-          <FAQSection />
-          <CTASection />
-        </main>
+        <>
+          <main id="main-content" tabIndex={-1}>
+            <HeroSection />
+            <ProblemSection />
+            <HowItWorks />
+            <FeaturesSection />
+            <ProductPillarsSection />
+            <PricingSection />
+            <FAQSection />
+            <CTASection />
+          </main>
+          <DemoLauncher />
+        </>
       )}
       <Footer />
     </div>

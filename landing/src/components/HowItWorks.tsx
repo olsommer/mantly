@@ -37,39 +37,43 @@ export function HowItWorks() {
   ];
 
   return (
-    <section id="how-it-works" className="py-24 sm:py-32 bg-muted/40">
+    <section id="how-it-works" className="scroll-mt-16 bg-muted/40 py-14 sm:py-32">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         {/* Section header */}
         <div className="mx-auto max-w-2xl text-center">
           <p className="text-xs font-semibold uppercase tracking-widest text-primary">
             {t("how.tagline")}
           </p>
-          <h2 className="mt-4 text-[2.5rem] leading-tight sm:text-[3rem] lg:text-[3.5rem]">
+          <h2 className="mt-3 text-[2rem] leading-tight sm:mt-4 sm:text-[3rem] lg:text-[3.5rem]">
             {t("how.title")}
           </h2>
           {subtitle && (
-            <p className="mt-5 text-lg text-muted-foreground">{subtitle}</p>
+            <p className="mt-3 text-base text-muted-foreground sm:mt-5 sm:text-lg">{subtitle}</p>
           )}
         </div>
 
         {/* Steps */}
-        <div className="mt-20 grid gap-12 sm:grid-cols-2 lg:grid-cols-4 sm:gap-8">
+        <div className="mt-9 grid gap-3 sm:mt-20 sm:grid-cols-2 sm:gap-8 lg:grid-cols-4">
           {steps.map((step) => (
-            <div key={step.num} className="relative">
-              <div className="flex flex-col items-center text-center">
+            <div key={step.num} className="relative rounded-xl border border-border/60 bg-background/70 p-4 sm:border-0 sm:bg-transparent sm:p-0">
+              <div className="flex items-start gap-4 text-left sm:flex-col sm:items-center sm:gap-0 sm:text-center">
                 {/* Step number */}
-                <span className="text-xs font-mono font-semibold text-muted-foreground/40 mb-4 tracking-wider">
-                  {step.num}
-                </span>
-                <div
-                  className={`mb-6 flex h-14 w-14 items-center justify-center rounded-2xl ${step.color}`}
-                >
-                  <step.icon className="h-6 w-6" />
+                <div className="flex shrink-0 flex-col items-center gap-1.5 sm:gap-4">
+                  <span className="font-mono text-[0.65rem] font-semibold tracking-wider text-muted-foreground/50 sm:text-xs">
+                    {step.num}
+                  </span>
+                  <div
+                    className={`flex size-11 items-center justify-center rounded-xl sm:mb-6 sm:size-14 sm:rounded-2xl ${step.color}`}
+                  >
+                    <step.icon className="h-5 w-5 sm:h-6 sm:w-6" />
+                  </div>
                 </div>
-                <h3 className="text-[2rem] leading-tight">{step.title}</h3>
-                <p className="mt-3 text-base text-muted-foreground leading-relaxed max-w-[280px]">
-                  {step.desc}
-                </p>
+                <div>
+                  <h3 className="text-xl leading-tight sm:text-[2rem]">{step.title}</h3>
+                  <p className="mt-1.5 max-w-[280px] text-sm leading-relaxed text-muted-foreground sm:mt-3 sm:text-base">
+                    {step.desc}
+                  </p>
+                </div>
               </div>
             </div>
           ))}

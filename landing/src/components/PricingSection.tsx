@@ -9,6 +9,12 @@ import {
 } from "@/components/ui/card";
 import { useTranslation } from "@/i18n/useTranslation";
 import type { TranslationKey } from "@/i18n/translations";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 
 type PlanCopy = {
   name: TranslationKey;
@@ -18,10 +24,17 @@ type PlanCopy = {
   features: TranslationKey[];
 };
 
+type Plan = PlanCopy & {
+  icon: typeof Cloud;
+  href: string;
+  featured: boolean;
+  hidePeriod?: boolean;
+};
+
 export function PricingSection() {
   const { t } = useTranslation();
   const subtitle = t("pricing.subtitle");
-  const plans: Array<PlanCopy & { icon: typeof Cloud; href: string; featured: boolean; hidePeriod?: boolean }> = [
+  const plans: Plan[] = [
     {
       name: "pricing.community.name",
       price: "pricing.community.price",
@@ -97,23 +110,88 @@ export function PricingSection() {
       hidePeriod: true,
     },
   ];
+  const mobilePlans: Plan[] = [plans[1], plans[0], plans[2], plans[3]];
 
   return (
-    <section id="pricing" className="py-24 sm:py-32 bg-muted/40">
+    <section id="pricing" className="scroll-mt-16 bg-muted/40 py-14 sm:py-32">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="text-xs font-semibold uppercase tracking-widest text-primary">
             {t("pricing.tagline")}
           </p>
-          <h2 className="mt-4 text-[2.5rem] leading-tight sm:text-[3rem] lg:text-[3.5rem]">
+          <h2 className="mt-3 text-[2rem] leading-tight sm:mt-4 sm:text-[3rem] lg:text-[3.5rem]">
             {t("pricing.title")}
           </h2>
           {subtitle && (
-            <p className="mt-5 text-lg text-muted-foreground">{subtitle}</p>
+            <p className="mt-3 text-base text-muted-foreground sm:mt-5 sm:text-lg">{subtitle}</p>
           )}
         </div>
 
-        <div className="mt-16 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-8 grid gap-3 md:hidden">
+          <Button asChild size="lg" className="h-12 w-full rounded-lg">
+            <a href={plans[1].href}>{t(plans[1].cta)}</a>
+          </Button>
+          <Button asChild variant="outline" size="lg" className="h-12 w-full rounded-lg">
+            <a href={plans[0].href}>
+              <Github className="size-4" />
+              {t(plans[0].cta)}
+            </a>
+          </Button>
+        </div>
+
+        <div className="mt-6 md:hidden">
+          <Accordion type="single" collapsible className="w-full">
+            {mobilePlans.map((plan) => (
+              <AccordionItem key={plan.name} value={plan.name} className="border-border/60">
+                <AccordionTrigger className="min-h-[4.5rem] py-3 hover:no-underline">
+                  <span className="flex min-w-0 flex-1 items-center gap-3 pr-2 text-left">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-background">
+                      <plan.icon className="size-4 text-primary" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2">
+                        <span className="text-lg font-normal leading-tight">{t(plan.name)}</span>
+                        {plan.featured && (
+                          <span className="rounded-full bg-primary px-2 py-1 text-[0.65rem] font-medium leading-none text-primary-foreground">
+                            {t("pricing.popular")}
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        {t(plan.desc)}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-right text-lg font-semibold">
+                      {t(plan.price)}
+                      {!plan.hidePeriod && (
+                        <span className="block text-[0.65rem] font-normal text-muted-foreground">{t("pricing.month")}</span>
+                      )}
+                    </span>
+                  </span>
+                </AccordionTrigger>
+                <AccordionContent className="pb-5 pl-12 pr-3">
+                  <ul className="space-y-2">
+                    {plan.features.map((feature) => (
+                      <li key={feature} className="flex gap-2 text-sm leading-relaxed text-muted-foreground">
+                        <Check className="mt-0.5 size-4 shrink-0 text-primary" />
+                        <span>{t(feature)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <Button
+                    asChild
+                    variant={plan.featured ? "default" : "outline"}
+                    className="mt-5 h-11 w-full rounded-lg"
+                  >
+                    <a href={plan.href}>{t(plan.cta)}</a>
+                  </Button>
+                </AccordionContent>
+              </AccordionItem>
+            ))}
+          </Accordion>
+        </div>
+
+        <div className="mt-16 hidden gap-5 md:grid md:grid-cols-2 xl:grid-cols-4">
           {plans.map((plan) => (
             <Card
               key={plan.name}
@@ -159,7 +237,7 @@ export function PricingSection() {
                 <Button
                   asChild
                   variant={plan.featured ? "default" : "outline"}
-                  className="w-full rounded-lg"
+                  className="h-11 w-full rounded-lg"
                 >
                   <a href={plan.href}>{t(plan.cta)}</a>
                 </Button>
@@ -167,10 +245,10 @@ export function PricingSection() {
             </Card>
           ))}
         </div>
-        <p className="mx-auto mt-10 max-w-3xl text-center text-sm leading-relaxed text-muted-foreground">
+        <p className="mx-auto mt-6 max-w-3xl text-center text-xs leading-relaxed text-muted-foreground sm:mt-10 sm:text-sm">
           {t("pricing.runDefinition")}
         </p>
-        <p className="mx-auto mt-3 max-w-3xl text-center text-sm leading-relaxed text-muted-foreground">
+        <p className="mx-auto mt-3 max-w-3xl text-center text-xs leading-relaxed text-muted-foreground sm:text-sm">
           {t("pricing.usageNote")}
         </p>
       </div>

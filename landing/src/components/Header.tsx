@@ -38,7 +38,7 @@ export function Header() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
           {/* Logo */}
-          <a href={homePath} className="flex items-baseline gap-1.5 group">
+          <a href={homePath} className="group flex min-h-11 items-center gap-1.5">
             <span className="font-display text-2xl font-normal leading-tight tracking-tight text-foreground">
               {t("brand.name")}
             </span>
@@ -78,8 +78,8 @@ export function Header() {
           <Button
             type="button"
             variant="ghost"
-            size="icon-sm"
-            className="lg:hidden text-muted-foreground hover:text-foreground"
+            size="icon"
+            className="size-11 lg:hidden text-muted-foreground hover:text-foreground"
             onClick={() => setMobileOpen(!mobileOpen)}
             aria-label={t(mobileOpen ? "a11y.closeMenu" : "a11y.openMenu")}
             aria-expanded={mobileOpen}
@@ -100,23 +100,23 @@ export function Header() {
                 <a
                   key={link.href}
                   href={link.href}
-                  className="text-base text-muted-foreground hover:text-foreground transition-colors py-2 px-1"
+                  className="flex min-h-11 items-center px-1 text-base text-muted-foreground transition-colors hover:text-foreground"
                   onClick={() => setMobileOpen(false)}
                 >
                   {link.label}
                 </a>
               ))}
               <div className="grid grid-cols-2 gap-2 pt-3 mt-2 border-t border-border/50">
-                <Button asChild variant="ghost" size="sm">
+                <Button asChild variant="ghost" size="sm" className="h-11">
                   <a href="https://github.com/olsommer/mantly">
                     <Github className="h-4 w-4" />
                     {t("nav.github")}
                   </a>
                 </Button>
-                <Button asChild variant="ghost" size="sm">
+                <Button asChild variant="ghost" size="sm" className="h-11">
                   <a href="https://app.mantly.io">{t("nav.login")}</a>
                 </Button>
-                <Button asChild size="sm" className="col-span-2">
+                <Button asChild size="sm" className="col-span-2 h-11">
                   <a href="https://app.mantly.io?view=signup">{t("nav.cloud")}</a>
                 </Button>
               </div>

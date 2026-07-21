@@ -56,6 +56,12 @@ class E2EResponseJudgeInput(BaseModel):
     must_mark_unverified: list[str] = Field(default_factory=list, max_length=30)
 
 
+def _rubric_items(items: list[str]) -> list[str]:
+    if not items:
+        return ["- NONE (this section imposes zero requirements)."]
+    return [f"- {item}" for item in items]
+
+
 @router.post("/e2e-response-judge")
 async def judge_e2e_response(
     body: E2EResponseJudgeInput,
@@ -72,17 +78,22 @@ async def judge_e2e_response(
             "response asserts the prohibited proposition as true. Mentioning it "
             "to explicitly deny it, say it is unconfirmed, ask about it, or "
             "attribute it to the customer does not violate the constraint.",
+            "Only bullet items directly listed under each heading are requirements. "
+            "Never infer a requirement, move an item between sections, or apply a "
+            "MUST MARK UNVERIFIED requirement to a MUST COVER item unless it is "
+            "separately listed there. A section containing NONE imposes zero "
+            "requirements.",
             "The response must satisfy every MUST COVER item, must not make any "
             "MUST NOT CLAIM statement, and must explicitly describe every MUST MARK "
             "UNVERIFIED item as unknown, pending, unavailable, or requiring approval. "
             "A prohibited claim or omitted required item is a material error and must "
             "score below 90.",
             "MUST COVER:",
-            *(f"- {item}" for item in body.must_cover),
+            *_rubric_items(body.must_cover),
             "MUST NOT CLAIM:",
-            *(f"- {item}" for item in body.must_not_claim),
+            *_rubric_items(body.must_not_claim),
             "MUST EXPLICITLY MARK UNVERIFIED OR PENDING:",
-            *(f"- {item}" for item in body.must_mark_unverified),
+            *_rubric_items(body.must_mark_unverified),
         ]
     )
     expected = {
@@ -93,7 +104,7 @@ async def judge_e2e_response(
         "expected_customer_found": True,
         "expected_customer_data": {},
         "expected_intent_matched": True,
-        "expected_intent_name": "e2e-response-rubric",
+        "expected_intent_name": "e2e-synthetic-response",
         "expected_actions": [],
         "expected_requires_human": True,
         "expected_response": expected_response,
@@ -102,7 +113,7 @@ async def judge_e2e_response(
         "identityResult": {"found": True},
         "intentResult": {
             "matched": True,
-            "intentName": "e2e-response-rubric",
+            "intentName": "e2e-synthetic-response",
             "actions": [],
         },
         "agentResponse": {

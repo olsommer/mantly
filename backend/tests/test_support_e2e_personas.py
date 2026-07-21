@@ -1347,11 +1347,44 @@ def test_e2e_semantic_judge_is_gated_and_uses_response_rubric(monkeypatch) -> No
     assert captured["actual"]["identityResult"]["found"] is True
     assert captured["actual"]["intentResult"] == {
         "matched": True,
-        "intentName": "e2e-response-rubric",
+        "intentName": "e2e-synthetic-response",
         "actions": [],
     }
+    assert captured["expected"]["expected_intent_name"] == "e2e-synthetic-response"
     assert captured["kwargs"]["timeout"] == 60
     assert captured["kwargs"]["max_retries"] == 1
+
+
+def test_e2e_semantic_judge_marks_empty_rubric_sections_as_none(monkeypatch) -> None:
+    body = evals_api.E2EResponseJudgeInput(
+        response_text="The estimated delivery window is the next business day.",
+        must_cover=["Every shipment field returned by the lookup."],
+    )
+    ctx = SimpleNamespace(project_id="project1", tenant_id="tenant1")
+    captured: dict = {}
+
+    def fake_judge(expected, actual, has_response, **kwargs):
+        captured.update(expected=expected, actual=actual, has_response=has_response)
+        return SimpleNamespace(
+            response=SimpleNamespace(score=100, reasoning="All criteria satisfied."),
+            token_usage={},
+        )
+
+    monkeypatch.setattr(evals_api, "e2e_fixture_runtime_enabled", lambda: True)
+    monkeypatch.setattr(evals_api, "get_draft_source", lambda *_args, **_kwargs: "draft")
+    monkeypatch.setattr(evals_api, "run_judge", fake_judge)
+
+    result = asyncio.run(evals_api.judge_e2e_response(body, ctx))
+
+    assert result["passed"] is True
+    expected_response = captured["expected"]["expected_response"]
+    assert "Never infer a requirement, move an item between sections" in expected_response
+    assert "A section containing NONE imposes zero requirements" in expected_response
+    assert expected_response.count("- NONE (this section imposes zero requirements).") == 2
+    assert expected_response.endswith(
+        "MUST EXPLICITLY MARK UNVERIFIED OR PENDING:\n"
+        "- NONE (this section imposes zero requirements)."
+    )
 
 
 class _FakeSemanticJudgeApi:
@@ -1584,6 +1617,94 @@ def test_live_semantic_judge_excludes_exact_live_rubric_protocol_errors() -> Non
         True,
         False,
     ]
+
+
+def test_live_semantic_judge_excludes_e01_live_rubric_protocol_wording() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was the text of a grading rubric, as "
+                    "indicated by the 'e2e-response-rubric' intent. However, the "
+                    "actual pipeline output a customer-facing shipment status update. "
+                    "This is a complete mismatch; the pipeline failed to convey the "
+                    "expected rubric content."
+                ),
+            },
+            {
+                "passed": True,
+                "score": 100,
+                "threshold": 90,
+                "reasoning": "The customer response correctly applies the rubric.",
+            },
+            {
+                "passed": False,
+                "score": 0,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was the text of a grading rubric. The "
+                    "pipeline failed to convey the expected rubric content."
+                ),
+            },
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is True
+    assert result["score"] == 100
+    assert result["validAttemptCount"] == 1
+    assert result["invalidProtocolAttemptCount"] == 2
+    assert result["passedAttemptCount"] == 1
+    assert [item.get("invalidProtocol", False) for item in result["attempts"]] == [
+        True,
+        False,
+        True,
+    ]
+
+
+def test_live_semantic_judge_preserves_e01_shaped_requirement_failures() -> None:
+    result, api = _run_semantic_judge(
+        [
+            {
+                "passed": False,
+                "score": 70,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was the text of a grading rubric. The "
+                    "actual response failed to convey the expected rubric requirement "
+                    "that the resolution date remain unverified; instead it guaranteed "
+                    "tomorrow."
+                ),
+            },
+            {
+                "passed": True,
+                "score": 100,
+                "threshold": 90,
+                "reasoning": "The customer response correctly applies the rubric.",
+            },
+            {
+                "passed": False,
+                "score": 75,
+                "threshold": 90,
+                "reasoning": (
+                    "The expected response was the text of a grading rubric. The "
+                    "actual response failed to reproduce the expected rubric item "
+                    "requiring every returned shipment field because it omitted the "
+                    "tracking number."
+                ),
+            },
+        ]
+    )
+
+    assert len(api.calls) == 3
+    assert result["passed"] is False
+    assert result["validAttemptCount"] == 3
+    assert result["invalidProtocolAttemptCount"] == 0
+    assert result["passedAttemptCount"] == 1
+    assert all("invalidProtocol" not in item for item in result["attempts"])
 
 
 def test_live_semantic_judge_preserves_genuine_rubric_failures() -> None:

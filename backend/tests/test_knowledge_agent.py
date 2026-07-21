@@ -2262,6 +2262,141 @@ def test_action_state_repair_canonicalizes_live_e09_confirmation_gerunds() -> No
     )
 
 
+def test_action_state_repair_keeps_single_delivery_exception_customer_visible() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=[
+            "Has it already opened, and when will it be resolved?",
+            (
+                "Provide the resolution timeline for the delivery-exception "
+                "investigation for ZF-88310."
+            ),
+        ]
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["intentName"] = "fulfillment-delivery-exception"
+    action = issue["actionExecutions"][0]
+    action["label"] = "Open Delivery Exception"
+    action["metadata"]["runbook"] = "fulfillment-delivery-exception"
+    action["result"]["proposedAction"] = {
+        "name": "open_delivery_exception",
+        "label": "Open Delivery Exception",
+    }
+    messages = [
+        {
+            "direction": "customer",
+            "body": (
+                "Order ZF-88310 has not moved for 3 days. Give the last scan, "
+                "location, and delivery window, and open a delivery-exception "
+                "investigation now. Has it already opened, and when will it be "
+                "resolved?"
+            ),
+        }
+    ]
+    unsafe_answer = (
+        "A delivery-exception investigation has been opened and will be resolved "
+        "tomorrow."
+    )
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=unsafe_answer,
+    )
+    repaired_again = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=messages,
+        answer=repaired,
+    )
+
+    assert repaired == (
+        "The delivery-exception investigation remains pending human review and is "
+        "not confirmed as opened. No resolution timeline is confirmed for this "
+        "investigation."
+    )
+    assert repaired_again == repaired
+    assert "tomorrow" not in repaired
+    ticket = issue_agent._automatic_ticket_context(issue)
+    assert issue_agent.check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_single_pending_action_repair_notice_falls_back_to_human_label() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Has it already happened?"],
+    )
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    notice = issue_agent._single_pending_action_repair_notice(
+        ticket=ticket,
+        language="en",
+    )
+
+    assert notice == (
+        "The P1 incident ticket remains pending human review and is not confirmed "
+        "as opened."
+    )
+    assert issue_agent.check_pending_action_claims(
+        answer=notice,
+        runbook_actions=ticket["runbookActions"],
+    ).blocked is False
+
+
+def test_single_pending_action_repair_never_discloses_scoped_agent_triage() -> None:
+    issue = _pending_action_obligation_issue(
+        questions=["Confirm executive escalation."],
+    )
+    action = issue["actionExecutions"][0]
+    action.update(
+        {
+            "actionKey": "agent_triage",
+            "type": "agent_triage",
+            "label": "Prepare P1 incident triage",
+        }
+    )
+    action["metadata"].update(
+        {
+            "source": "agent_triage",
+            "concernId": "concern-b2b-urgent",
+        }
+    )
+    action["result"]["proposedAction"] = {
+        "type": "triage_ticket",
+        "label": "Prepare P1 incident triage",
+    }
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert ticket["runbookActions"] == [
+        {
+            "name": "agent_triage",
+            "label": "Prepare P1 incident triage",
+            "status": "pending_approval",
+            "concernId": "concern-b2b-urgent",
+            "runbook": "b2b-sla-urgent",
+        }
+    ]
+    assert issue_agent._single_pending_action_repair_notice(
+        ticket=ticket,
+        language="en",
+    ) == ""
+
+    repaired = issue_agent.repair_issue_automation_answer_action_state(
+        issue=issue,
+        messages=[
+            {
+                "direction": "customer",
+                "body": "Confirm executive escalation.",
+            }
+        ],
+        answer="We opened the executive escalation.",
+    )
+
+    assert "Prepare P1 incident triage" not in repaired
+    assert "agent triage" not in repaired.casefold()
+    assert PENDING_ACTION_REPAIR_NOTICE in repaired
+
+
 def test_action_state_repair_closes_live_fulfillment_e10_return_details() -> None:
     issue = _pending_return_details_issue()
     answer = (

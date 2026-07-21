@@ -1607,17 +1607,17 @@ def _semantic_judge_attempt_is_invalid_protocol(result: dict[str, Any]) -> bool:
         return False
     reasoning = " ".join(str(result.get("reasoning") or "").casefold().split())
     if not re.search(
-        r"\bthe expected response (?:is|was) (?:a )?(?:detailed )?grading rubric\b",
+        r"\bthe expected response (?:is|was) "
+        r"(?:(?:the )?text of )?(?:a )?(?:detailed )?grading rubric\b",
         reasoning,
     ):
         return False
-    return any(
-        marker in reasoning
-        for marker in (
-            "failed to produce the expected rubric",
-            "failed to reproduce the expected rubric",
-            "does not convey the expected rubric",
-            "does not reproduce the expected rubric",
+    return bool(
+        re.search(
+            r"\b(?:failed to (?:produce|reproduce|convey)|"
+            r"does not (?:convey|reproduce)) the expected rubric"
+            r"(?: (?:text|content))?(?=$|[.,;:])",
+            reasoning,
         )
     )
 

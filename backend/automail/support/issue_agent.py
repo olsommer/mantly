@@ -1382,6 +1382,16 @@ _SEPARATE_PENDING_ACTION_STATE_RE = re.compile(
     r"contrôle\s+humain|revisión\s+humana|revisione\s+umana)\b",
     re.IGNORECASE,
 )
+_PENDING_ACTION_TIMELINE_QUESTION_RE = re.compile(
+    r"\b(?:resolution|completion)\s+(?:date|time|timeline|timing)\b|"
+    r"\bwhen\b[^?\n]{0,160}\b(?:resolved|completed|finished)\b",
+    re.IGNORECASE,
+)
+_PENDING_INVESTIGATION_TOPIC_RE = re.compile(
+    r"\b(?:an?|the|your)\s+"
+    r"(?P<topic>(?:[^\W_]+(?:-[^\W_]+)*\s+){0,3}investigation)\b",
+    re.IGNORECASE,
+)
 _SEPARATE_PENDING_ACTION_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _SEPARATE_PENDING_ACTION_TOKEN_STOP_WORDS = frozenset(
     {
@@ -6097,6 +6107,117 @@ def _answer_unit_mentions_pending_action(unit: str, action: dict[str, Any]) -> b
     return False
 
 
+def _single_pending_action_repair_notice(
+    *,
+    ticket: dict[str, Any],
+    language: str,
+) -> str:
+    """Keep a repaired single-action answer customer-visible and unambiguous."""
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    pending_actions = [
+        action
+        for raw_action in actions
+        if (
+            (action := _record_from(raw_action))
+            and _string_from(action.get("status")).lower().replace("-", "_")
+            == "pending_approval"
+        )
+    ]
+    if len(pending_actions) != 1:
+        return ""
+    action = pending_actions[0]
+    if _is_internal_agent_triage_action(action):
+        return ""
+    concern_ids = _runbook_action_concern_ids(action)
+    if len(concern_ids) != 1:
+        return ""
+    concern_id = concern_ids[0]
+
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and candidate.get("matched") is True
+            and _string_from(
+                candidate.get("id")
+                or candidate.get("concernId")
+                or candidate.get("concern_id")
+            )
+            == concern_id
+        ),
+        {},
+    )
+    if not concern:
+        return ""
+
+    raw_obligations = concern.get("answerObligations")
+    obligations = raw_obligations if isinstance(raw_obligations, list) else []
+    questions = tuple(
+        question
+        for raw_obligation in obligations[:20]
+        if (
+            question := _string_from(
+                _record_from(raw_obligation).get("question")
+                or _record_from(raw_obligation).get("text")
+                or (raw_obligation if isinstance(raw_obligation, str) else "")
+            )
+        )
+    )
+    label = re.sub(
+        r"\s+",
+        " ",
+        _string_from(action.get("label") or action.get("name") or "pending action"),
+    ).strip(" \t\r\n.,;:!?\"'“”‘’")[:160]
+    if not label:
+        return ""
+    if language != "en":
+        return _SEPARATE_PENDING_ACTION_NOTICES[language].format(label=label)
+
+    question_text = "\n".join(questions)
+    topic_match = _PENDING_INVESTIGATION_TOPIC_RE.search(question_text)
+    action_tokens = _separate_pending_action_tokens(
+        _string_from(action.get("name") or label)
+    )
+    action_topic_tokens = frozenset(action_tokens[1:] if action_tokens[:1] == ("open",) else ())
+    matched_topic_tokens = (
+        frozenset(_separate_pending_action_tokens(topic_match.group("topic")))
+        if topic_match is not None
+        else frozenset()
+    )
+    if action_topic_tokens and action_topic_tokens.issubset(matched_topic_tokens):
+        assert topic_match is not None
+        topic = re.sub(r"\s+", " ", topic_match.group("topic")).strip()
+        notice = (
+            f"The {topic} remains pending human review and is not confirmed as "
+            "opened."
+        )
+        timeline_subject = "investigation"
+    elif action_tokens[:1] == ("open",) and re.match(r"^open\s+", label, re.IGNORECASE):
+        object_label = re.sub(r"^open\s+", "", label, flags=re.IGNORECASE).strip()
+        object_label = " ".join(
+            token if token.isupper() or any(character.isdigit() for character in token) else token.casefold()
+            for token in object_label.split()
+        )
+        article = "" if re.match(r"^(?:a|an|the)\b", object_label, re.IGNORECASE) else "the "
+        subject = f"{article}{object_label}"
+        notice = f"{subject[:1].upper() + subject[1:]} remains pending human review and is not confirmed as opened."
+        timeline_subject = "request"
+    else:
+        notice = (
+            f'The requested action "{label}" remains pending human review and is '
+            "not confirmed as started or completed."
+        )
+        timeline_subject = "request"
+    if any(_PENDING_ACTION_TIMELINE_QUESTION_RE.search(question) for question in questions):
+        notice += f" No resolution timeline is confirmed for this {timeline_subject}."
+    return notice
+
+
 def _separate_pending_action_notices(
     *,
     ticket: dict[str, Any],
@@ -6535,7 +6656,11 @@ def repair_issue_automation_answer_action_state(
         runbook_actions=guard_actions,
         tool_evidence=_automatic_tool_evidence_records(ticket),
         repair_notice=(
-            "\n\n".join(
+            _single_pending_action_repair_notice(
+                ticket=ticket,
+                language=language,
+            )
+            or "\n\n".join(
                 _separate_pending_action_notices(
                     ticket=ticket,
                     answer="",

@@ -6,7 +6,6 @@ from automail.api.admin import actions as admin_actions
 from automail.db.pocketbase import issues
 from automail.support import issue_agent
 from automail.support.issue_agent import AutomationGroundingAssessment, IssueAgentDraft
-from automail.support.pending_action_claims import PENDING_ACTION_REPAIR_NOTICE
 
 
 def test_runbook_webhook_action_preparation_is_filtered_and_idempotent(monkeypatch):
@@ -898,7 +897,8 @@ def test_channel_autopilot_preserves_s02_start_time_after_action_repair_then_reg
         "2026-07-19T07:40:00Z."
     )
     repaired_answer = (
-        f"{PENDING_ACTION_REPAIR_NOTICE}\n\n"
+        "The P1 escalation remains pending human review and is not confirmed as "
+        "opened.\n\n"
         "The incident began at 2026-07-19T07:40:00Z."
     )
     incident_issue = {
@@ -1239,11 +1239,15 @@ def test_channel_grounding_repairs_against_pending_actions_created_during_compos
 
     assert len(issue_reads) == 2
     assert grounding_calls[0]["issue"] is fresh_issue
-    assert grounding_calls[0]["answer"] == PENDING_ACTION_REPAIR_NOTICE
+    assert grounding_calls[0]["answer"] == (
+        "The ticket remains pending human review and is not confirmed as opened."
+    )
     assert result is not None
     assert result["draftBlockedReason"] == ""
     assert result["reply"]["id"] == "reply1"
-    assert reply_calls[0]["body"] == PENDING_ACTION_REPAIR_NOTICE
+    assert reply_calls[0]["body"] == (
+        "The ticket remains pending human review and is not confirmed as opened."
+    )
 
 
 @pytest.mark.parametrize(

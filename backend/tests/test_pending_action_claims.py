@@ -36,6 +36,16 @@ def _security_actions() -> list[dict[str, str]]:
     ]
 
 
+def _pending_invoice_reissue_actions() -> list[dict[str, str]]:
+    return [
+        {
+            "name": "reissue_corrected_invoice",
+            "label": "Reissue corrected invoice",
+            "status": "pending_approval",
+        }
+    ]
+
+
 def _tracking_evidence(
     *,
     method: str = "GET",
@@ -790,6 +800,367 @@ def test_pending_action_guard_blocks_conditional_action_artifact_delivery(
 
     assert result.blocked is True
     assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "A corrected invoice will be reissued once these pending actions are complete.",
+        "The corrected invoice will be reissued after the pending actions are complete.",
+        "We will reissue the corrected invoice once human review is complete.",
+        "The corrected invoice is going to be reissued once review is complete.",
+        "The corrected invoice is set to be reissued.",
+        "The corrected invoice will get reissued.",
+        "The corrected invoice will be re-issued.",
+        "We will re-issue the corrected invoice.",
+        "Your corrected invoice is to be reissued.",
+        "Your corrected invoice is to be re-issued.",
+        (
+            "We cannot confirm that a corrected invoice will be reissued, "
+            "but it will be reissued."
+        ),
+        (
+            "We cannot confirm that a corrected invoice will be reissued; "
+            "however, it will be reissued."
+        ),
+    ],
+)
+def test_pending_action_guard_blocks_conditional_invoice_reissue_guarantee(
+    answer: str,
+) -> None:
+    actions = [
+        {
+            "name": "open_invoice_investigation",
+            "label": "Open invoice investigation",
+            "status": "pending_approval",
+        },
+        {
+            "name": "update_billing_profile",
+            "label": "Update billing profile",
+            "status": "pending_approval",
+        },
+    ]
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is True
+    assert result.pending_actions == (
+        "Open invoice investigation",
+        "Update billing profile",
+    )
+    assert result.claims == (answer,)
+
+
+def test_pending_action_repair_removes_only_live_invoice_reissue_guarantee() -> None:
+    grounded_invoice = "Invoice INV-9012 is open and due on 2026-08-15."
+    unsupported_guarantee = (
+        "A corrected invoice will be reissued once these pending actions are complete."
+    )
+    pending_review = (
+        "The invoice investigation and billing-address update remain pending human review."
+    )
+    answer = "\n\n".join(
+        (
+            "Hello Lea,",
+            grounded_invoice,
+            unsupported_guarantee,
+            pending_review,
+        )
+    )
+    actions = [
+        {
+            "name": "open_invoice_investigation",
+            "label": "Open invoice investigation",
+            "status": "pending_approval",
+        },
+        {
+            "name": "update_billing_profile",
+            "label": "Update billing profile",
+            "status": "pending_approval",
+        },
+    ]
+
+    repaired = repair_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert grounded_invoice in repaired
+    assert pending_review in repaired
+    assert unsupported_guarantee not in repaired
+    assert repaired.count(PENDING_ACTION_REPAIR_NOTICE) == 1
+    assert check_pending_action_claims(
+        answer=repaired,
+        runbook_actions=actions,
+    ).blocked is False
+
+
+def test_pending_action_guard_allows_explicit_invoice_reissue_pending_human_review() -> None:
+    answer = "Reissuing a corrected invoice remains pending human review."
+    actions = _pending_invoice_reissue_actions()
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "We cannot confirm that a corrected invoice will be reissued.",
+        "No corrected invoice will be reissued.",
+        "There is no guarantee that the invoice will be reissued.",
+        "It is not confirmed that the invoice will be reissued.",
+        "Whether a corrected invoice will be reissued remains unconfirmed.",
+        "A corrected invoice may be reissued after human review.",
+        "A corrected invoice might be reissued after human review.",
+        "It is uncertain whether your corrected invoice will be reissued.",
+        "It is not guaranteed that your corrected invoice will be reissued.",
+        "We do not know whether your corrected invoice will be reissued.",
+        "We are not sure whether the invoice will be reissued.",
+        "It is not certain whether the invoice will be reissued.",
+        "It is unlikely that the invoice will be reissued.",
+        "Your corrected invoice will not be reissued.",
+        "Your corrected invoice is not expected to be reissued.",
+        "Your corrected invoice should not be reissued.",
+        "Your corrected invoice does not need to be reissued.",
+        "Your corrected invoice has not yet been reissued.",
+        "Your corrected invoice is not awaiting being reissued.",
+        "Your corrected invoice will definitely not be reissued.",
+        "Your corrected invoice has not been successfully reissued.",
+    ],
+)
+def test_pending_action_guard_allows_nondefinite_invoice_reissue(answer: str) -> None:
+    actions = _pending_invoice_reissue_actions()
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Invoice INV-9012 was issued on 2026-07-01.",
+        "The original invoice was issued on 2026-07-01.",
+        "The invoice was issued before the correction request.",
+        "The invoice has been issued already.",
+    ],
+)
+def test_pending_action_guard_allows_historical_initial_invoice_issue(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The corrected invoice will be issued tomorrow.",
+        "The corrected invoice is being issued now.",
+        "The corrected invoice has been issued already.",
+        "The replacement invoice was issued yesterday.",
+        "The revised invoice has been issued already.",
+        "The updated invoice was issued yesterday.",
+        "The invoice will be issued tomorrow.",
+        "The invoice is being issued now.",
+        "The invoice will have been issued by tomorrow.",
+        "The invoice shall have been issued by tomorrow.",
+        "The corrected customer invoice has been issued already.",
+        "The invoice corrected yesterday has been issued already.",
+    ],
+)
+def test_pending_action_guard_blocks_nonhistorical_or_corrected_invoice_issue(
+    answer: str,
+) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The corrected invoice was reissued by the vendor.",
+        "The corrected invoice was reissued by the customer.",
+    ],
+)
+def test_pending_action_guard_allows_external_invoice_reissue_state(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is False
+    assert result.claims == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The corrected invoice was reissued by our billing team.",
+        "The corrected invoice was reissued by our support team.",
+        "The corrected invoice was reissued by our customer service team.",
+        "The corrected invoice was reissued by the customer service team.",
+        "The corrected invoice was reissued by the customer-service-team.",
+        "The corrected invoice was reissued by the customer support team.",
+    ],
+)
+def test_pending_action_guard_blocks_first_party_invoice_reissue_state(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Your corrected invoice is expected to be reissued.",
+        "Your corrected invoice is intended to be reissued.",
+        "Your corrected invoice is planned to be reissued.",
+        "Your corrected invoice is about to be reissued.",
+        "Your corrected invoice is ready to be reissued.",
+        "Your corrected invoice is queued to be reissued.",
+        "Your corrected invoice needs to be reissued.",
+        "Your corrected invoice remains to be reissued.",
+        "Your corrected invoice has yet to be reissued.",
+        "Your corrected invoice is awaiting being reissued.",
+        "Your corrected invoice should be reissued.",
+        "Your corrected invoice ought to be reissued.",
+        "Your corrected invoice would be reissued.",
+        "Your corrected invoice can be reissued.",
+        "Your corrected invoice must be reissued.",
+    ],
+)
+def test_pending_action_guard_blocks_invoice_reissue_state_guarantees(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Your corrected invoice will definitely be reissued.",
+        "Your corrected invoice will certainly be reissued.",
+        "Your corrected invoice will promptly be reissued.",
+        "Your corrected invoice will be promptly reissued.",
+        "Your corrected invoice is definitely going to be reissued.",
+    ],
+)
+def test_pending_action_guard_blocks_modified_invoice_reissue_guarantees(answer: str) -> None:
+    result = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=_pending_invoice_reissue_actions(),
+    )
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Corrected invoice INV-9012-R1 has been reissued.",
+        "Corrected invoice INV-9012-R1 has successfully been reissued.",
+        "Corrected invoice INV-9012-R1 has been successfully reissued.",
+        "Corrected invoice INV-9012-R1 has been now reissued.",
+        "Corrected invoice INV-9012-R1 has been re-issued.",
+        "The corrected invoice got reissued.",
+        "The corrected invoice had been reissued.",
+        "We re-issued the corrected invoice.",
+        "We have re-issued the corrected invoice.",
+    ],
+)
+def test_pending_action_guard_blocks_completed_invoice_reissue_without_durable_proof(
+    answer: str,
+) -> None:
+    actions = _pending_invoice_reissue_actions()
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+def test_invoice_issue_proof_does_not_back_completed_invoice_reissue() -> None:
+    answer = "Corrected invoice INV-9012-R1 has been reissued."
+    actions = [
+        _durable_success_action(
+            name="issue_invoice",
+            label="Issue invoice",
+            concern_id="concern-invoice-issue",
+            proof={
+                "reference": "INV-9012-R1",
+                "status": "issued",
+            },
+        ),
+        {
+            "name": "reissue_corrected_invoice",
+            "label": "Reissue corrected invoice",
+            "status": "pending_approval",
+        },
+    ]
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is True
+    assert result.claims == (answer,)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Corrected invoice INV-9012-R1 has been reissued.",
+        "Corrected invoice INV-9012-R1 has successfully been reissued.",
+        "Corrected invoice INV-9012-R1 has been successfully reissued.",
+        "Corrected invoice INV-9012-R1 has been now reissued.",
+        "Corrected invoice INV-9012-R1 has been re-issued.",
+        "The corrected invoice got reissued.",
+        "The corrected invoice had been reissued.",
+        "We re-issued the corrected invoice.",
+        "We have re-issued the corrected invoice.",
+    ],
+)
+def test_pending_action_guard_allows_completed_invoice_reissue_with_durable_proof(
+    answer: str,
+) -> None:
+    actions = [
+        _durable_success_action(
+            name="reissue_corrected_invoice",
+            label="Reissue corrected invoice",
+            concern_id="concern-invoice",
+            proof={
+                "reference": "INV-9012-R1",
+                "status": "reissued",
+            },
+        ),
+        {
+            "name": "update_billing_profile",
+            "label": "Update billing profile",
+            "status": "pending_approval",
+        },
+    ]
+
+    result = check_pending_action_claims(answer=answer, runbook_actions=actions)
+
+    assert result.blocked is False
+    assert result.claims == ()
 
 
 def test_pending_action_repair_removes_exact_live_prepared_export_claim() -> None:

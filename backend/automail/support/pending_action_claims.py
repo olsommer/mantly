@@ -27,6 +27,7 @@ _PROGRESSIVE_ACTIONS = (
     r"arranging",
     r"scheduling",
     r"issuing",
+    r"reissuing",
     r"refunding",
     r"cancell?ing",
     r"closing",
@@ -67,6 +68,7 @@ _COMPLETED_ACTIONS = (
     r"arranged",
     r"scheduled",
     r"issued",
+    r"reissued",
     r"refunded",
     r"cancelled",
     r"canceled",
@@ -106,6 +108,7 @@ _FUTURE_ACTIONS = (
     r"arrange",
     r"schedule",
     r"issue",
+    r"reissue",
     r"refund",
     r"cancel",
     r"close",
@@ -1016,6 +1019,88 @@ _FUTURE_ACTION_COMPLETION_CONFIRMATION_PROMISE_PATTERN = re.compile(
     rf"{_ACTION_MODIFIER_PATTERN}been\s+(?:completed|confirmed|successful))\b",
     re.IGNORECASE,
 )
+_INVOICE_REISSUE_SUBJECT_PATTERN = (
+    r"(?:(?:a|an|the|this|your|our)\s+)?"
+    r"(?:(?:corrected|replacement|revised|updated)\s+)?invoice"
+)
+_INVOICE_REISSUE_HYPHEN_PATTERN = r"[\-‐‑‒–—]?"
+_INVOICE_REISSUE_BASE_PATTERN = rf"re{_INVOICE_REISSUE_HYPHEN_PATTERN}issue"
+_INVOICE_REISSUE_COMPLETED_PATTERN = rf"{_INVOICE_REISSUE_BASE_PATTERN}d"
+_INVOICE_REISSUE_ACTION_SURFACE_PATTERN = re.compile(
+    rf"\bre{_INVOICE_REISSUE_HYPHEN_PATTERN}issu(?:e|ed|ing)\b",
+    re.IGNORECASE,
+)
+_CORRECTED_INVOICE_SCOPE_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:corrected|replacement|revised|updated)\b"
+    r"(?:\s+[a-z][a-z0-9-]*){0,3}\s+invoice\b|"
+    r"\binvoice\b[^.!?\n]{0,48}\b(?:corrected|replacement|revised|updated)\b"
+    r")",
+    re.IGNORECASE,
+)
+_HISTORICAL_INITIAL_INVOICE_ISSUE_PATTERN = re.compile(
+    rf"\binvoice\b(?:(?!\b(?:will|shall|should|would|can|could|may|might|must|ought)\b)"
+    rf"[^.!?\n]){{0,80}}?\b(?:"
+    rf"(?:has|have|had)\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}been\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}issued|"
+    rf"(?:was|were)\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}issued"
+    rf")\b",
+    re.IGNORECASE,
+)
+_COMPLETED_INVOICE_REISSUE_PATTERN = re.compile(
+    rf"\b{_INVOICE_REISSUE_SUBJECT_PATTERN}\b"
+    r"[^.!?\n]{0,80}?\b(?:has|have|had|is|are|was|were|got)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"(?:been\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN})?"
+    rf"{_INVOICE_REISSUE_COMPLETED_PATTERN}\b",
+    re.IGNORECASE,
+)
+_COMPLETED_ACTIVE_INVOICE_REISSUE_PATTERN = re.compile(
+    rf"\b(?:we|i)\s+(?:(?:have|had)\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN})?"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}{_INVOICE_REISSUE_COMPLETED_PATTERN}\s+"
+    rf"{_INVOICE_REISSUE_SUBJECT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_INVOICE_REISSUE_PASSIVE_FUTURE_STATE_PATTERN = (
+    rf"(?:"
+    rf"(?:will|shall|should|would|can|must)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:be|get)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}{_INVOICE_REISSUE_COMPLETED_PATTERN}|"
+    rf"ought\s+to\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:be|get)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}{_INVOICE_REISSUE_COMPLETED_PATTERN}|"
+    rf"(?:is|are)\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}(?:"
+    rf"(?:(?:going|set|due|scheduled|expected|intended|planned|about|ready|queued)\s+)?"
+    rf"to\s+(?:be|get)\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"{_INVOICE_REISSUE_COMPLETED_PATTERN}|"
+    rf"awaiting\s+being\s+(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"{_INVOICE_REISSUE_COMPLETED_PATTERN})|"
+    rf"(?:need|needs|remain|remains)\s+(?!(?:not|never)\b)to\s+(?:be|get)\s+"
+    rf"{_ACTION_MODIFIER_PATTERN}{_INVOICE_REISSUE_COMPLETED_PATTERN}|"
+    rf"(?:has|have)\s+(?!(?:not|never)\b)yet\s+to\s+(?:be|get)\s+"
+    rf"{_ACTION_MODIFIER_PATTERN}{_INVOICE_REISSUE_COMPLETED_PATTERN}"
+    rf")"
+)
+_FUTURE_INVOICE_REISSUE_PROMISE_PATTERN = re.compile(
+    r"\b(?:"
+    rf"{_INVOICE_REISSUE_SUBJECT_PATTERN}\b"
+    rf"(?:(?!\b(?:not|never)\b)[^.!?\n]){{0,60}}?\b"
+    rf"{_INVOICE_REISSUE_PASSIVE_FUTURE_STATE_PATTERN}|"
+    rf"it\s+{_INVOICE_REISSUE_PASSIVE_FUTURE_STATE_PATTERN}|"
+    r"(?:(?:we|i)['’]ll|(?:we|i|(?:the|our)\s+(?:billing|support)\s+team)\s+"
+    rf"(?:will|shall))\s+(?!(?:not|never)\b)[^.!?\n]{{0,40}}?\b"
+    rf"{_INVOICE_REISSUE_BASE_PATTERN}\s+"
+    rf"{_INVOICE_REISSUE_SUBJECT_PATTERN}|"
+    r"(?:(?:we|i)\s+(?:are|am)|(?:the|our)\s+(?:billing|support)\s+team\s+is)\s+"
+    rf"(?!(?:not|never)\b){_ACTION_MODIFIER_PATTERN}"
+    rf"(?:(?:going|set|due|scheduled|expected|intended|planned|about|ready|queued)\s+)?"
+    rf"to\s+{_INVOICE_REISSUE_BASE_PATTERN}\s+"
+    rf"{_INVOICE_REISSUE_SUBJECT_PATTERN}|"
+    r"(?:you['’]ll|(?:you|the\s+customer)\s+(?:will|shall))\s+"
+    r"(?!(?:not|never)\b)(?:get|receive)\s+"
+    rf"{_INVOICE_REISSUE_SUBJECT_PATTERN}"
+    r")\b",
+    re.IGNORECASE,
+)
 _SAFE_NONCOMPLETION_CONFIRMATION_TAIL_PATTERN = re.compile(
     r"^\s+(?:"
     r"(?:is|are|remain|remains)\s+(?:(?:still|currently)\s+)*(?:"
@@ -1047,6 +1132,7 @@ _NONCONTINGENT_PENDING_ACTION_PROMISE_PATTERNS = (
     _FUTURE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN,
     _FUTURE_PASSIVE_ACTION_ARTIFACT_DELIVERY_PROMISE_PATTERN,
     _FUTURE_ACTION_COMPLETION_CONFIRMATION_PROMISE_PATTERN,
+    _FUTURE_INVOICE_REISSUE_PROMISE_PATTERN,
 )
 _PASSIVE_CUSTOMER_CONTACT_PROMISE_PATTERNS = frozenset(
     {
@@ -1296,6 +1382,8 @@ _PENDING_FINANCIAL_OUTCOME_NONAPPROVAL_PATTERN = re.compile(
 )
 _ANSWER_UNIT_PATTERN = re.compile(r"[^.!?\n]+(?:[.!?]+(?:[*_`~\]\)]|</[A-Za-z][^>\n]{0,60}>)*|(?=\n)|$)")
 _CLAIM_PATTERNS = (
+    _COMPLETED_INVOICE_REISSUE_PATTERN,
+    _COMPLETED_ACTIVE_INVOICE_REISSUE_PATTERN,
     _PENDING_FINANCIAL_OUTCOME_PURPOSE_PATTERN,
     _PROGRESSIVE_ACTION_PATTERN,
     _PRE_AUX_PROGRESSIVE_ACTION_PATTERN,
@@ -1390,6 +1478,8 @@ _FUTURE_CLAIM_PATTERNS = (
 )
 _SUCCESS_ELIGIBLE_CLAIM_PATTERNS = frozenset(
     {
+        _COMPLETED_INVOICE_REISSUE_PATTERN,
+        _COMPLETED_ACTIVE_INVOICE_REISSUE_PATTERN,
         _PERFECT_ACTION_PATTERN,
         _PRE_AUX_PERFECT_ACTION_PATTERN,
         _COORDINATED_PERFECT_ACTION_PATTERN,
@@ -1537,6 +1627,34 @@ _SAFE_NEGATIVE_EPISTEMIC_PREFIX_PATTERN = re.compile(
     r")\s*$",
     re.IGNORECASE,
 )
+_INVOICE_REISSUE_PREFIX_FILLER_PATTERN = re.compile(
+    r"\b(?:(?:a|an|the|this|your|our|corrected|replacement|revised|updated)\s+){1,4}$",
+    re.IGNORECASE,
+)
+_INVOICE_REISSUE_NEGATIVE_PREFIX_PATTERN = re.compile(
+    r"(?:"
+    r"\bno\s+|"
+    r"\bthere\s+is\s+no\s+guarantee\s+that\s+|"
+    r"\bit\s+is\s+not\s+confirmed\s+that\s+|"
+    r"\bit\s+is\s+uncertain\s+whether\s+|"
+    r"\bit\s+is\s+not\s+guaranteed\s+that\s+|"
+    r"\bwe\s+do\s+not\s+know\s+whether\s+|"
+    r"\bwe\s+are\s+not\s+sure\s+whether\s+|"
+    r"\bit\s+is\s+not\s+certain\s+whether\s+|"
+    r"\bit\s+is\s+unlikely\s+that\s+"
+    r")"
+    r"(?:(?:a|an|the|this|your|our|corrected|replacement|revised|updated)\s+){0,4}$",
+    re.IGNORECASE,
+)
+_INVOICE_REISSUE_UNCERTAIN_PREFIX_PATTERN = re.compile(
+    r"\bwhether\s+"
+    r"(?:(?:a|an|the|this|your|our|corrected|replacement|revised|updated)\s+){0,4}$",
+    re.IGNORECASE,
+)
+_INVOICE_REISSUE_UNCONFIRMED_TAIL_PATTERN = re.compile(
+    r"^\s+(?:remains?|is)\s+(?:(?:still|currently)\s+)*unconfirmed\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _TRACKING_TOOL_DOMAIN_PATTERN = re.compile(
     r"(?:tracking|shipment|parcel|delivery)",
     re.IGNORECASE,
@@ -1590,6 +1708,11 @@ _EXTERNAL_STATE_ATTRIBUTION_PATTERN = re.compile(
     r"automatically\s+(?:at|on|upon)\s+(?:expiry|expiration|checkout))\b",
     re.IGNORECASE,
 )
+_CONTROLLED_CUSTOMER_TEAM_ATTRIBUTION_PATTERN = re.compile(
+    r"by\s+(?:the\s+)?customer(?:['’]s)?[\s\-‐‑‒–—]+"
+    r"(?:service|success|support)(?:[\s\-‐‑‒–—]+team)?\b",
+    re.IGNORECASE,
+)
 _EXTERNAL_CUSTOMER_CONTACT_ATTRIBUTION_PATTERN = re.compile(
     r"^[^.!?\n]{0,100}\b(?:by|from)\s+(?:the\s+)?(?:customer|client|user|court|judge|carrier|"
     r"shipping\s+(?:carrier|provider)|opposing\s+counsel|outside\s+counsel|"
@@ -1607,6 +1730,7 @@ _CUSTOMER_CONTACT_TARGET_PATTERN = re.compile(
 )
 _EXTERNAL_STATE_PASSIVE_PATTERNS = frozenset(
     {
+        _COMPLETED_INVOICE_REISSUE_PATTERN,
         _PASSIVE_ACTION_PATTERN,
         _BARE_PASSIVE_ACTION_PATTERN,
         _BARE_LIFECYCLE_PASSIVE_ACTION_PATTERN,
@@ -1667,6 +1791,7 @@ _ACTION_TOKEN_PATTERNS = (
     (re.compile(r"arrang(?:e|ed|ing|ement)?$"), "arrange"),
     (re.compile(r"schedul(?:e|ed|ing)?$"), "schedule"),
     (re.compile(r"issu(?:e|ed|ing)?$"), "issue"),
+    (re.compile(r"reissu(?:e|ed|ing)?$"), "reissue"),
     (re.compile(r"refund(?:ed|ing)?$"), "refund"),
     (re.compile(r"chang(?:e|ed|ing)?$"), "update"),
     (re.compile(r"updat(?:e|ed|ing)?$"), "update"),
@@ -1840,7 +1965,7 @@ _POSITIVE_TERMINAL_PROOF_VALUE_PATTERN = re.compile(
     r"^(?:ok|success(?:ful)?|complete(?:d)?|done|applied|executed|confirmed|"
     r"clear(?:ed)?|verified|resolved|closed|passed|active|inactive|"
     r"initiated|checked|escalated|investigated|opened|submitted|processed|"
-    r"reviewed|contacted|arranged|scheduled|issued|refunded|cancelled|canceled|"
+    r"reviewed|contacted|arranged|scheduled|issued|reissued|refunded|cancelled|canceled|"
     r"terminated|rescinded|approved|archived|deleted|"
     r"changed|updated|dispatched|reshipped|replaced|created|started|begun|"
     r"activated|authorized|prioritized|prioritised|forwarded|recorded|logged)$",
@@ -3279,6 +3404,26 @@ def _successful_action_records(
     return tuple(records[:20])
 
 
+def _matched_action_tokens(
+    *,
+    pattern: re.Pattern[str],
+    match: re.Match[str],
+) -> tuple[tuple[str, int], ...]:
+    """Keep hyphenated reissue surfaces bound to reissue, never initial issue."""
+    if pattern in {
+        _COMPLETED_INVOICE_REISSUE_PATTERN,
+        _COMPLETED_ACTIVE_INVOICE_REISSUE_PATTERN,
+    }:
+        reissue_match = _INVOICE_REISSUE_ACTION_SURFACE_PATTERN.search(match.group(0))
+        if reissue_match is not None:
+            return (("reissue", reissue_match.start()),)
+    return tuple(
+        (canonical, token_match.start())
+        for token_match in _TEXT_TOKEN_PATTERN.finditer(match.group(0))
+        if (canonical := _canonical_action_token(token_match.group(0).lower()))
+    )
+
+
 def _is_success_backed_action_claim(
     *,
     pattern: re.Pattern[str],
@@ -3288,11 +3433,7 @@ def _is_success_backed_action_claim(
 ) -> bool:
     if pattern not in _SUCCESS_ELIGIBLE_CLAIM_PATTERNS:
         return False
-    matched_action_tokens = [
-        (canonical, token_match.start())
-        for token_match in _TEXT_TOKEN_PATTERN.finditer(match.group(0))
-        if (canonical := _canonical_action_token(token_match.group(0).lower()))
-    ]
+    matched_action_tokens = _matched_action_tokens(pattern=pattern, match=match)
     if not matched_action_tokens:
         return False
     # The action/state at the end of a claim is the asserted mutation. This is
@@ -3490,6 +3631,7 @@ _ACTION_IMPERATIVE_SURFACES = {
     "open": "Open",
     "record": "Record",
     "refund": "Refund",
+    "reissue": "Reissue",
     "submit": "Submit",
     "update": "Update",
 }
@@ -3590,11 +3732,7 @@ def has_success_backed_action_claim(
         shadow = _action_claim_shadow(unit)
         for pattern in _CLAIM_PATTERNS:
             for match in pattern.finditer(shadow):
-                matched_action_tokens = [
-                    (canonical, token_match.start())
-                    for token_match in _TEXT_TOKEN_PATTERN.finditer(match.group(0))
-                    if (canonical := _canonical_action_token(token_match.group(0).lower()))
-                ]
+                matched_action_tokens = _matched_action_tokens(pattern=pattern, match=match)
                 if not matched_action_tokens:
                     continue
                 claimed_action, relative_action_start = matched_action_tokens[-1]
@@ -3920,6 +4058,41 @@ def _is_scoped_negative_epistemic_claim(*, prefix: str, claim: str) -> bool:
     )
 
 
+def _invoice_reissue_claim_is_nondefinite(
+    *,
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    """Keep explicit negative or uncertain reissue statements non-committal."""
+    prefix = unit[: match.start()]
+    if _INVOICE_REISSUE_NEGATIVE_PREFIX_PATTERN.search(prefix):
+        return True
+    trimmed_prefix = _INVOICE_REISSUE_PREFIX_FILLER_PATTERN.sub("", prefix)
+    if _is_scoped_negative_epistemic_claim(
+        prefix=trimmed_prefix,
+        claim=match.group(0),
+    ):
+        return True
+    return bool(
+        _INVOICE_REISSUE_UNCERTAIN_PREFIX_PATTERN.search(prefix)
+        and _INVOICE_REISSUE_UNCONFIRMED_TAIL_PATTERN.fullmatch(unit[match.end() :])
+    )
+
+
+def _is_historical_initial_invoice_issue(
+    *,
+    unit: str,
+    match: re.Match[str],
+) -> bool:
+    """Separate a prior initial issuance from a pending corrected reissue."""
+    scope = unit[max(0, match.start() - 48) : match.end()]
+    return (
+        _INVOICE_REISSUE_ACTION_SURFACE_PATTERN.search(scope) is None
+        and _CORRECTED_INVOICE_SCOPE_PATTERN.search(scope) is None
+        and _HISTORICAL_INITIAL_INVOICE_ISSUE_PATTERN.search(scope) is not None
+    )
+
+
 def _is_external_state_attribution(
     *,
     pattern: re.Pattern[str],
@@ -3934,12 +4107,7 @@ def _is_external_state_attribution(
     if attribution is None:
         return False
     return (
-        re.match(
-            r"by\s+(?:the\s+)?customer\s+service\s+team\b",
-            immediate_tail,
-            re.IGNORECASE,
-        )
-        is None
+        _CONTROLLED_CUSTOMER_TEAM_ATTRIBUTION_PATTERN.match(immediate_tail) is None
     )
 
 
@@ -4064,12 +4232,7 @@ def _has_unsafe_dynamic_subject_claim(
                 attribution = _EXTERNAL_STATE_ATTRIBUTION_PATTERN.match(immediate_tail)
                 if (
                     attribution is not None
-                    and re.match(
-                        r"by\s+(?:the\s+)?customer\s+service\s+team\b",
-                        immediate_tail,
-                        re.IGNORECASE,
-                    )
-                    is None
+                    and _CONTROLLED_CUSTOMER_TEAM_ATTRIBUTION_PATTERN.match(immediate_tail) is None
                 ):
                     continue
                 claimed_actions = [
@@ -4077,6 +4240,21 @@ def _has_unsafe_dynamic_subject_claim(
                     for token in _text_tokens(match.group(0))
                     if (canonical := _canonical_action_token(token))
                 ]
+                if (
+                    claimed_actions
+                    and pending_action_token == "reissue"
+                    and claimed_actions[-1] == "issue"
+                    and _is_historical_initial_invoice_issue(unit=shadow, match=match)
+                ):
+                    # An invoice's initial issuance is a separate historical
+                    # fact from the currently pending corrected reissuance.
+                    continue
+                if (
+                    claimed_actions
+                    and claimed_actions[-1] == "reissue"
+                    and _invoice_reissue_claim_is_nondefinite(unit=shadow, match=match)
+                ):
+                    continue
                 if (
                     claimed_actions
                     and claimed_actions[-1] in {"approve", "archive", "delete"}
@@ -4104,6 +4282,15 @@ def _has_unsafe_claim(
     shadow = _action_claim_shadow(unit)
     for pattern in _CLAIM_PATTERNS:
         for match in pattern.finditer(shadow):
+            if (
+                pattern
+                in {
+                    _COMPLETED_INVOICE_REISSUE_PATTERN,
+                    _COMPLETED_ACTIVE_INVOICE_REISSUE_PATTERN,
+                }
+                and _invoice_reissue_claim_is_nondefinite(unit=shadow, match=match)
+            ):
+                continue
             if (
                 pattern is _PENDING_FINANCIAL_OUTCOME_PURPOSE_PATTERN
                 and (
@@ -4176,6 +4363,11 @@ def _has_unsafe_claim(
     # "after review" or "once complete" does not prove the promised outcome.
     for promise_pattern in _NONCONTINGENT_PENDING_ACTION_PROMISE_PATTERNS:
         for match in promise_pattern.finditer(shadow):
+            if (
+                promise_pattern is _FUTURE_INVOICE_REISSUE_PROMISE_PATTERN
+                and _invoice_reissue_claim_is_nondefinite(unit=shadow, match=match)
+            ):
+                continue
             if _is_scoped_negative_epistemic_claim(
                 prefix=shadow[: match.start()],
                 claim=match.group(0),

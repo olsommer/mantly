@@ -11456,7 +11456,7 @@ def _effective_grounding_coverage(
         seen_assessments.add(obligation_id)
         if assessment.get("covered") is True and _string_from(
             assessment.get("resolution")
-        ).lower() in {"answered", "fulfilled_action", "pending_or_unavailable"}:
+        ).lower() in {"answered", "fulfilled_action", "not_applicable", "pending_or_unavailable"}:
             covered_assessments.add(obligation_id)
     if covered_assessments != set(customer_obligations):
         return base_concerns, base_obligations, base_source

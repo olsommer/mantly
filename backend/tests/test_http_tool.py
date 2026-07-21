@@ -6,10 +6,127 @@ import pytest
 from automail.integrations.http_tool import (
     ToolDefinition,
     _make_http_tool,
+    _record_tool_call,
+    _response_facts,
     begin_tool_call_collection,
     collect_tool_calls,
     current_tool_calls,
 )
+
+
+def test_response_facts_preserve_bounded_matter_lookup_contract() -> None:
+    facts, truncated = _response_facts(
+        json.dumps(
+            {
+                "found": None,
+                "matter_id": "MAT-2026-104",
+                "status": "Awaiting counterparty response",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+                "customer_name": "Must not be persisted",
+            }
+        )
+    )
+
+    assert truncated is False
+    assert facts == [
+        {"path": "found", "value": None},
+        {"path": "matter_id", "value": "MAT-2026-104"},
+        {"path": "status", "value": "Awaiting counterparty response"},
+        {"path": "next_deadline", "value": "2026-08-05"},
+        {"path": "responsible_lawyer", "value": "Dr Nora Keller"},
+    ]
+
+
+@pytest.mark.parametrize("signal", [False, None, {}, []], ids=("false", "null", "object", "array"))
+def test_matter_tool_audit_preserves_nonaffirmative_raw_lookup_signal(signal) -> None:
+    token = begin_tool_call_collection()
+    try:
+        _record_tool_call(
+            ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(
+                {
+                    "found": signal,
+                    "matter_id": "MAT-2026-104",
+                    "status": "Awaiting counterparty response",
+                    "next_deadline": "2026-08-05",
+                    "responsible_lawyer": "Dr Nora Keller",
+                }
+            ),
+        )
+        calls = collect_tool_calls(token)
+    except Exception:
+        collect_tool_calls(token)
+        raise
+
+    assert calls[0]["hasNonaffirmativeLookupResult"] is True
+
+
+def test_matter_tool_audit_marks_truncated_response_before_late_false_signal() -> None:
+    response = {
+        "matter_id": "MAT-2026-104",
+        "status": "Awaiting counterparty response",
+        "next_deadline": "2026-08-05",
+        "responsible_lawyer": "Dr Nora Keller",
+    }
+    response.update({f"noise_{index}": {"status": "ok"} for index in range(24)})
+    response["found"] = False
+    token = begin_tool_call_collection()
+    try:
+        _record_tool_call(
+            ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(response),
+        )
+        calls = collect_tool_calls(token)
+    except Exception:
+        collect_tool_calls(token)
+        raise
+
+    assert calls[0]["responseFactsTruncated"] is True
+    assert calls[0]["hasNonaffirmativeLookupResult"] is True
+    assert not any(fact["path"] == "found" for fact in calls[0]["responseFacts"])
+
+
+def test_matter_tool_audit_vetoes_incomplete_raw_scan_before_hidden_signal() -> None:
+    response = {
+        "matter_id": "MAT-2026-104",
+        "status": "Awaiting counterparty response",
+        "next_deadline": "2026-08-05",
+        "responsible_lawyer": "Dr Nora Keller",
+        "debug": {f"ignored_{index}": "value" for index in range(300)},
+        "result": {"found": {}},
+    }
+    token = begin_tool_call_collection()
+    try:
+        _record_tool_call(
+            ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(response),
+        )
+        calls = collect_tool_calls(token)
+    except Exception:
+        collect_tool_calls(token)
+        raise
+
+    assert calls[0].get("responseFactsTruncated") is not True
+    assert calls[0]["hasNonaffirmativeLookupResult"] is True
 
 
 @pytest.mark.no_gemini

@@ -12752,6 +12752,36 @@ def test_effective_grounding_coverage_rejects_unverified_partial_or_duplicate_ga
     assert source == "composer"
 
 
+def test_effective_grounding_coverage_accepts_code_proven_not_applicable() -> None:
+    answer_sha256 = grounding_text_sha256("answer")
+    concerns, obligations, source = issues._effective_grounding_coverage(
+        grounding_gate={
+            "verified": True,
+            "status": "passed",
+            "answerSha256": answer_sha256,
+            "answerObligations": [
+                {"id": "matter:facts", "concernId": "matter"},
+                {"id": "matter:not-found", "concernId": "matter"},
+            ],
+            "obligationAssessments": [
+                {"obligationId": "matter:facts", "covered": True, "resolution": "answered"},
+                {
+                    "obligationId": "matter:not-found",
+                    "covered": True,
+                    "resolution": "not_applicable",
+                },
+            ],
+        },
+        expected_answer_sha256=answer_sha256,
+        composer_concern_ids=(),
+        composer_obligation_ids=(),
+    )
+
+    assert concerns == ("matter",)
+    assert obligations == ("matter:facts", "matter:not-found")
+    assert source == "grounding_gate"
+
+
 def test_effective_grounding_coverage_uses_none_without_any_valid_source() -> None:
     concerns, obligations, source = issues._effective_grounding_coverage(
         grounding_gate={},

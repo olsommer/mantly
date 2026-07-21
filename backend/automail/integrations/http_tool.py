@@ -143,15 +143,19 @@ _RESPONSE_FACT_ALLOWED_KEYS = frozenset({
     "estimateddeliverydate",
     "estimateddeliverywindow",
     "eta",
+    "exists",
     "found",
     "greencardeligible",
     "invoiceid",
     "invoicenumber",
     "licenseplate",
+    "matched",
+    "matterid",
     "matchedby",
     "ok",
     "orderid",
     "ordernumber",
+    "nextdeadline",
     "policyid",
     "policynumber",
     "price",
@@ -161,6 +165,7 @@ _RESPONSE_FACT_ALLOWED_KEYS = frozenset({
     "quantity",
     "reference",
     "result",
+    "responsiblelawyer",
     "shipmentfound",
     "shipmentid",
     "sku",
@@ -175,6 +180,7 @@ _RESPONSE_FACT_ALLOWED_KEYS = frozenset({
     "validfrom",
     "validto",
 })
+_RESPONSE_FACT_NULLABLE_LOOKUP_KEYS = frozenset({"exists", "found", "matched"})
 _RESPONSE_FACT_ALLOWED_NESTED_KEYS = frozenset({
     ("event", "label"),
     ("event", "location"),
@@ -215,6 +221,8 @@ _RESPONSE_FACT_MAX_INSPECTED_NODES = 256
 _RESPONSE_FACT_MAX_PATH_CHARS = 240
 _RESPONSE_FACT_MAX_STRING_CHARS = 240
 _RESPONSE_FACT_MAX_SERIALIZED_BYTES = 4_096
+_LOOKUP_RESULT_SIGNAL_KEYS = frozenset({"exists", "found", "matched"})
+_AFFIRMATIVE_LOOKUP_RESULT_VALUES = frozenset({"1", "true", "yes"})
 
 
 def begin_generated_attachment_collection() -> Token:
@@ -377,10 +385,15 @@ def _response_facts(response_text: str) -> tuple[list[dict[str, Any]], bool]:
                     break
                 _visit(child, (*path, str(index)), depth + 1)
             return
-        if not path or not _allowed_fact_path(path) or value is None:
+        if not path or not _allowed_fact_path(path):
             return
-        if isinstance(value, bool):
-            safe_value: str | bool | int | float = value
+        normalized_leaf_path = _normalized_fact_key(path[-1])
+        if value is None:
+            if normalized_leaf_path not in _RESPONSE_FACT_NULLABLE_LOOKUP_KEYS:
+                return
+            safe_value: str | bool | int | float | None = None
+        elif isinstance(value, bool):
+            safe_value = value
         elif isinstance(value, int):
             safe_value = value
         elif isinstance(value, float):
@@ -415,6 +428,68 @@ def _response_facts(response_text: str) -> tuple[list[dict[str, Any]], bool]:
     return facts, truncated
 
 
+def _response_has_nonaffirmative_lookup_result(response_text: str) -> bool:
+    """Reject negative lookup signals or a raw scan that cannot finish safely."""
+
+    try:
+        data = json.loads(response_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    found_signal = False
+    nonaffirmative = False
+    scan_incomplete = False
+    inspected_nodes = 0
+
+    def _visit(value: Any, depth: int) -> None:
+        nonlocal found_signal, inspected_nodes, nonaffirmative, scan_incomplete
+        if nonaffirmative or scan_incomplete:
+            return
+        if depth > _RESPONSE_FACT_MAX_DEPTH or inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+            scan_incomplete = True
+            return
+        inspected_nodes += 1
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                if nonaffirmative or scan_incomplete:
+                    break
+                if inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+                    scan_incomplete = True
+                    break
+                if not isinstance(raw_key, str):
+                    continue
+                normalized_key = _normalized_fact_key(raw_key)
+                if normalized_key in _LOOKUP_RESULT_SIGNAL_KEYS:
+                    found_signal = True
+                    if isinstance(child, bool):
+                        affirmative = child
+                    elif isinstance(child, int) and not isinstance(child, bool):
+                        affirmative = child == 1
+                    elif isinstance(child, str):
+                        affirmative = (
+                            " ".join(child.casefold().split())
+                            in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+                        )
+                    else:
+                        affirmative = False
+                    if not affirmative:
+                        nonaffirmative = True
+                        return
+                else:
+                    _visit(child, depth + 1)
+            return
+        if isinstance(value, list):
+            for child in value:
+                if nonaffirmative or scan_incomplete:
+                    break
+                if inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+                    scan_incomplete = True
+                    break
+                _visit(child, depth + 1)
+
+    _visit(data, 0)
+    return scan_incomplete or (found_signal and nonaffirmative)
+
+
 def _record_tool_call(
     defn: ToolDefinition,
     *,
@@ -434,6 +509,11 @@ def _record_tool_call(
                 audit["responseFacts"] = response_facts
             if truncated:
                 audit["responseFactsTruncated"] = True
+            if (
+                (defn.name == "matter_lookup" or defn.name.startswith("fixture_matter_"))
+                and _response_has_nonaffirmative_lookup_result(response_text)
+            ):
+                audit["hasNonaffirmativeLookupResult"] = True
         collector.append(audit)
 
 

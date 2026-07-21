@@ -44,6 +44,7 @@ from automail.pipeline.intent.agent import (
     _route_concerns_call_is_invalid,
     _select_deterministic_prompt_injection_incident_action,
     _source_bound_repeat_guidance,
+    _tool_evidence,
     run_intent_agent,
 )
 from automail.pipeline.response.composer import _available_attachments
@@ -4679,6 +4680,29 @@ def test_only_audited_http_facts_become_verified_evidence(monkeypatch):
     assert [item.tool_name for item in outcome.tool_evidence] == ["contract_lookup"]
     assert [item.method for item in outcome.tool_evidence] == ["GET"]
     assert "Invented" not in outcome.model_dump_json()
+
+
+def test_tool_evidence_preserves_only_nullable_lookup_state_veto() -> None:
+    evidence = _tool_evidence(
+        [
+            {
+                "name": "matter_lookup",
+                "method": "GET",
+                "status": "success",
+                "responseFacts": [
+                    {"path": "found", "value": None},
+                    {"path": "status", "value": None},
+                    {"path": "matter_id", "value": "MAT-2026-104"},
+                ],
+            }
+        ]
+    )
+
+    assert len(evidence) == 1
+    assert [(fact.path, fact.value) for fact in evidence[0].facts] == [
+        ("found", None),
+        ("matter_id", "MAT-2026-104"),
+    ]
 
 
 def test_concern_collectors_isolate_tools_actions_knowledge_and_composer_order(monkeypatch):

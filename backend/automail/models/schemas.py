@@ -130,6 +130,8 @@ class RunbookToolEvidence(CamelCaseModel):
     method: str = ""
     facts: list[VerifiedFact] = Field(default_factory=list)
     status: str = "success"
+    response_facts_truncated: bool = False
+    has_nonaffirmative_lookup_result: bool = False
 
 
 class RunbookActionOutcome(CamelCaseModel):

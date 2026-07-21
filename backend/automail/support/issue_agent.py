@@ -91,6 +91,11 @@ _ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset(
         "pending_or_unavailable",
     }
 )
+# The evaluator cannot select ``not_applicable``. It is an audit-only state
+# produced by narrow deterministic checks after every model assessment has been
+# validated. Keeping it out of the model-facing set prevents an unsupported N/A
+# decision from satisfying an answer obligation.
+_FINAL_COVERED_OBLIGATION_RESOLUTIONS = _ADDRESSED_OBLIGATION_RESOLUTIONS | {"not_applicable"}
 _GROUNDING_INCONSISTENT_VERDICT_ERROR = (
     "Evaluator verdict contradicts exhaustive grounded assessments"
 )
@@ -2476,6 +2481,50 @@ def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) 
     return [clean[:item_limit] for item in values[:limit] if (clean := _string_from(item))]
 
 
+_LOOKUP_RESULT_SIGNAL_PATHS = frozenset({"exists", "found", "matched"})
+_AFFIRMATIVE_LOOKUP_RESULT_VALUES = frozenset({"1", "true", "yes"})
+
+
+def _lookup_result_signal_values(value: Any) -> tuple[Any, ...]:
+    """Retain bounded found/exists/matched values, including null and empty."""
+
+    signals: list[Any] = []
+
+    def collect(candidate: Any, *, depth: int = 0) -> None:
+        if depth > 8 or len(signals) >= 20:
+            return
+        if isinstance(candidate, dict):
+            explicit_path = _string_from(candidate.get("path"))
+            if explicit_path and "value" in candidate:
+                leaf_path = explicit_path.rsplit(".", 1)[-1].casefold().replace("-", "_")
+                if leaf_path in _LOOKUP_RESULT_SIGNAL_PATHS:
+                    signals.append(candidate.get("value"))
+                return
+            for raw_key, child in list(candidate.items())[:100]:
+                key = _string_from(raw_key).casefold().replace("-", "_")
+                if key in _LOOKUP_RESULT_SIGNAL_PATHS:
+                    signals.append(child)
+                else:
+                    collect(child, depth=depth + 1)
+            return
+        if isinstance(candidate, list):
+            for child in candidate[:100]:
+                collect(child, depth=depth + 1)
+
+    collect(value)
+    return tuple(signals)
+
+
+def _has_nonaffirmative_lookup_result(value: Any) -> bool:
+    """Fail closed when an explicit lookup-result signal is not clearly true."""
+
+    return any(
+        " ".join(_string_from(signal).casefold().split())
+        not in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+        for signal in _lookup_result_signal_values(value)
+    )
+
+
 def _tool_evidence_id(name: str, *, concern_id: str = "") -> str:
     """Build the exact evidence identity for legacy or concern-scoped tools."""
     return f"tool:{concern_id}:{name}" if concern_id else f"tool:{name}"
@@ -2500,8 +2549,27 @@ def _automatic_tool_evidence_context(
             "method": _string_from(item.get("method"))[:16],
             "status": status[:80],
         }
+        if item.get("responseFactsTruncated") is True or item.get("response_facts_truncated") is True:
+            record["responseFactsTruncated"] = True
+        if (
+            item.get("hasNonaffirmativeLookupResult") is True
+            or item.get("has_nonaffirmative_lookup_result") is True
+        ):
+            record["hasNonaffirmativeLookupResult"] = True
         facts = item.get("responseFacts") or item.get("response_facts") or item.get("facts")
         safe_facts = sanitize_tool_response_facts(facts)
+        if (
+            status == "success"
+            and (
+                record["name"] == "matter_lookup"
+                or record["name"].startswith("fixture_matter_")
+            )
+            and _has_nonaffirmative_lookup_result(facts)
+        ):
+            # Preserve only the veto bit. Sanitization intentionally drops null
+            # children, but a null/false found signal must still prevent a later
+            # deterministic positive lookup inference.
+            record["hasNonaffirmativeLookupResult"] = True
         if status == "success" and any(
             _is_affirmative_return_refund_fact(path, value, tool_name=record["name"])
             for path, value in _tool_fact_scalar_entries(facts)
@@ -3896,6 +3964,219 @@ def _tool_record_exact_scalars(
         if exact_path and clean_value:
             entries.append((exact_path, clean_value))
     return tuple(entries)
+
+
+_MATTER_STATUS_NOT_FOUND_CONDITIONAL_TOKENS = (
+    "if information is not found state that and request a safe identifier"
+)
+_MATTER_STATUS_PRIMARY_QUESTION_RE = re.compile(
+    r"^What is the latest verified status of (?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79}), "
+    r"the next recorded deadline, and the responsible lawyer\?\s*$",
+    re.IGNORECASE,
+)
+_MATTER_STATUS_FOUND_PATHS = (
+    "status",
+    "next_deadline",
+    "responsible_lawyer",
+)
+_MATTER_STATUS_NOT_FOUND_VALUES = frozenset(
+    {
+        "missing",
+        "no match",
+        "no_match",
+        "n/a",
+        "na",
+        "none",
+        "not applicable",
+        "not available",
+        "not found",
+        "not_found",
+        "null",
+        "unavailable",
+        "unknown",
+    }
+)
+
+
+def _normalized_obligation_tokens(value: str) -> str:
+    """Normalize one bounded English obligation for exact policy matching."""
+
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _matter_status_found_evidence(
+    ticket: dict[str, Any],
+    *,
+    concern_id: str,
+    matter_id: str,
+) -> dict[str, dict[str, str]]:
+    """Return unambiguous, same-concern proof that a matter lookup succeeded.
+
+    A successful HTTP status alone is deliberately insufficient. The lookup
+    must return all three matter-status fields and no missing/not-found signal.
+    Values must also agree across every eligible record so a stale or conflicting
+    row cannot make the conditional fallback disappear.
+    """
+
+    clean_matter_id = matter_id.strip()
+    if not concern_id or not clean_matter_id:
+        return {}
+    expected_fixture_name = "fixture_matter_" + re.sub(
+        r"[^a-z0-9]+", "_", clean_matter_id.casefold()
+    ).strip("_")
+    values_by_path: dict[str, set[str]] = {path: set() for path in _MATTER_STATUS_FOUND_PATHS}
+    record_values_by_evidence: dict[str, dict[str, str]] = {}
+    saw_candidate = False
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        tool_name = _string_from(record.get("name"))
+        if tool_name not in {"matter_lookup", expected_fixture_name}:
+            continue
+        if _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id:
+            continue
+        if (
+            record.get("hasNonaffirmativeLookupResult") is True
+            or record.get("responseFactsTruncated") is True
+        ):
+            return {}
+        exact_scalars = _tool_record_exact_scalars(record)
+        if tool_name == "matter_lookup":
+            returned_matter_ids = {
+                value.casefold()
+                for path, value in exact_scalars
+                if path == "matter_id"
+            }
+            if returned_matter_ids != {clean_matter_id.casefold()}:
+                continue
+        saw_candidate = True
+        record_values: dict[str, set[str]] = {}
+        for path, value in exact_scalars:
+            leaf_path = path.rsplit(".", 1)[-1]
+            normalized_value = " ".join(value.casefold().split())
+            if leaf_path in {"found", "exists", "matched"} and normalized_value == "false":
+                return {}
+            if normalized_value in _MATTER_STATUS_NOT_FOUND_VALUES:
+                return {}
+            if path in _MATTER_STATUS_FOUND_PATHS:
+                record_values.setdefault(path, set()).add(value)
+                values_by_path[path].add(value)
+        if all(len(record_values.get(path, set())) == 1 for path in _MATTER_STATUS_FOUND_PATHS):
+            record_values_by_evidence[evidence_id] = {
+                path: next(iter(record_values[path]))
+                for path in _MATTER_STATUS_FOUND_PATHS
+            }
+    if not saw_candidate or any(len(values_by_path[path]) != 1 for path in _MATTER_STATUS_FOUND_PATHS):
+        return {}
+    canonical_values = {path: next(iter(values_by_path[path])) for path in _MATTER_STATUS_FOUND_PATHS}
+    return {
+        evidence_id: values
+        for evidence_id, values in record_values_by_evidence.items()
+        if values == canonical_values
+    }
+
+
+def _matter_status_not_found_condition_resolution(
+    *,
+    ticket: dict[str, Any],
+    obligation: dict[str, Any],
+    clean_obligation_assessments: list[dict[str, Any]],
+    expected_obligations: dict[str, dict[str, Any]],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Prove that the exact matter-not-found fallback is not applicable.
+
+    The proof is intentionally code-only and joins three independent facts:
+    the exact runbook/conditional, a fully answered sibling question, and the
+    exact successful lookup evidence supporting that sibling's answer unit.
+    """
+
+    concern_id = _string_from(obligation.get("concernId"))
+    question = _string_from(obligation.get("question"))
+    if (
+        _string_from(obligation.get("kind")) not in {"", "customer_question"}
+        or _normalized_obligation_tokens(question) != _MATTER_STATUS_NOT_FOUND_CONDITIONAL_TOKENS
+    ):
+        return None
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and _string_from(candidate.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or _string_from(concern.get("runbook")) != "law-matter-status":
+        return None
+    assessments_by_id = {
+        _string_from(assessment.get("obligationId")): assessment
+        for assessment in clean_obligation_assessments
+        if _string_from(assessment.get("obligationId"))
+    }
+    sibling_obligations = [
+        sibling
+        for sibling_id, sibling in expected_obligations.items()
+        if sibling_id != _string_from(obligation.get("id"))
+        and _string_from(sibling.get("concernId")) == concern_id
+    ]
+    if not sibling_obligations or any(
+        _string_from(assessments_by_id.get(_string_from(sibling.get("id")), {}).get("resolution"))
+        != "answered"
+        for sibling in sibling_obligations
+    ):
+        return None
+    primary_obligations = [
+        (sibling, match)
+        for sibling in sibling_obligations
+        if (match := _MATTER_STATUS_PRIMARY_QUESTION_RE.fullmatch(_string_from(sibling.get("question"))))
+        is not None
+    ]
+    if len(primary_obligations) != 1:
+        return None
+    primary_obligation, primary_match = primary_obligations[0]
+    found_evidence = _matter_status_found_evidence(
+        ticket,
+        concern_id=concern_id,
+        matter_id=primary_match.group("matter_id"),
+    )
+    if not found_evidence:
+        return None
+    primary_assessment = assessments_by_id.get(_string_from(primary_obligation.get("id")), {})
+    unit_ids = tuple(
+        dict.fromkeys(
+            unit_id
+            for raw_unit_id in primary_assessment.get("answerUnitIds", [])
+            if (unit_id := _string_from(raw_unit_id))
+        )
+    )
+    if not unit_ids:
+        return None
+
+    matching_evidence_ids: set[str] = set()
+    for evidence_id, exact_values in found_evidence.items():
+        linked_units = [
+            unit_id
+            for unit_id in unit_ids
+            if evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+        ]
+        if not linked_units:
+            continue
+        linked_text = " ".join(
+            _string_from(expected_units.get(unit_id, {}).get("text"))
+            for unit_id in linked_units
+        ).casefold()
+        if all(value.casefold() in linked_text for value in exact_values.values()):
+            matching_evidence_ids.add(evidence_id)
+    if not matching_evidence_ids:
+        return None
+    return unit_ids, tuple(sorted(matching_evidence_ids))
 
 
 def _atomic_http_response_code_requirement(
@@ -7909,6 +8190,56 @@ def assess_issue_automation_grounding(
                     if (evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids)
                 ]
             clean_obligation_assessments.append(clean_assessment)
+
+        # The evaluator intentionally has no model-selectable N/A state. Resolve
+        # the exact matter-status fallback only after every sibling assessment
+        # and its supporting units have passed the ordinary fail-closed checks.
+        for clean_assessment in clean_obligation_assessments:
+            if clean_assessment.get("resolution") != "not_covered":
+                continue
+            obligation_id = _string_from(clean_assessment.get("obligationId"))
+            obligation = expected_obligations.get(obligation_id)
+            if obligation is None:
+                continue
+            not_applicable_proof = _matter_status_not_found_condition_resolution(
+                ticket=ticket_evidence,
+                obligation=obligation,
+                clean_obligation_assessments=clean_obligation_assessments,
+                expected_obligations=expected_obligations,
+                expected_units=expected_units,
+                supported_unit_evidence_ids=supported_unit_evidence_ids,
+            )
+            if not_applicable_proof is None:
+                continue
+            proof_unit_ids, proof_evidence_ids = not_applicable_proof
+            linked_conditional_unit_ids = {
+                _string_from(unit_id)
+                for unit_id in clean_assessment.get("answerUnitIds", [])
+                if _string_from(unit_id)
+            }
+            if not linked_conditional_unit_ids.issubset(proof_unit_ids):
+                continue
+            clean_assessment.update(
+                {
+                    "resolution": "not_applicable",
+                    "covered": True,
+                    "answerUnitIds": list(proof_unit_ids),
+                    "evidenceIds": list(proof_evidence_ids),
+                }
+            )
+            deterministically_resolved_obligation_ids.add(obligation_id)
+
+        # Rebuild this list from the final assessments so a deterministic
+        # code-proven N/A cannot retain the model's earlier uncovered entry.
+        uncovered_obligations = [
+            _string_from(expected_obligations.get(obligation_id, {}).get("question"))[:500]
+            for clean_assessment in clean_obligation_assessments
+            if (
+                (obligation_id := _string_from(clean_assessment.get("obligationId")))
+                and _string_from(clean_assessment.get("resolution"))
+                not in _FINAL_COVERED_OBLIGATION_RESOLUTIONS
+            )
+        ]
         if seen_obligation_ids != set(expected_obligations):
             protocol_errors.append("Evaluator did not assess every answer obligation exactly once")
             uncovered_obligations.extend(

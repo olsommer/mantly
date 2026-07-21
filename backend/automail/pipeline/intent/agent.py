@@ -2348,7 +2348,15 @@ def _tool_evidence(tool_calls: list[dict[str, Any]]) -> list[RunbookToolEvidence
                 continue
             path = str(raw_fact.get("path") or "").strip()
             value = raw_fact.get("value")
-            if not path or not isinstance(value, (str, bool, int, float)):
+            nullable_lookup_state = bool(
+                value is None
+                and path.rsplit(".", 1)[-1].casefold().replace("-", "_")
+                in {"exists", "found", "matched"}
+            )
+            if not path or (
+                not nullable_lookup_state
+                and not isinstance(value, (str, bool, int, float))
+            ):
                 continue
             facts.append(
                 VerifiedFact(
@@ -2363,6 +2371,10 @@ def _tool_evidence(tool_calls: list[dict[str, Any]]) -> list[RunbookToolEvidence
                 method=str(call.get("method") or ""),
                 facts=facts,
                 status=str(call.get("status") or "unknown"),
+                response_facts_truncated=call.get("responseFactsTruncated") is True,
+                has_nonaffirmative_lookup_result=(
+                    call.get("hasNonaffirmativeLookupResult") is True
+                ),
             )
         )
     return evidence

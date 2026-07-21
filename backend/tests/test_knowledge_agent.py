@@ -16,7 +16,10 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from automail import llm as llm_module
 from automail.core import config as config_module
 from automail.db.pocketbase import issues
+from automail.demo import e2e_fixtures as e2e_fixtures_module
+from automail.integrations import http_tool as http_tool_module
 from automail.llm import usage as usage_module
+from automail.pipeline.intent import agent as intent_agent_module
 from automail.support import issue_agent
 from automail.support import knowledge_workspace as knowledge_workspace_module
 from automail.support.issue_agent import (
@@ -5512,6 +5515,510 @@ def _false_pause_grounding_issue(
             }
         )
     return issue
+
+
+def _matter_status_grounding_issue(
+    *,
+    method: str = "GET",
+    status: str = "success",
+    response_facts: Any = None,
+    evidence_concern_id: str = "matter-status",
+    runbook: str = "law-matter-status",
+    tool_name: str = "fixture_matter_mat_2026_104",
+) -> dict[str, Any]:
+    issue = _issue_with_grounding_obligations(
+        concern_id="matter-status",
+        questions=[
+            (
+                "matter-status:facts",
+                (
+                    "What is the latest verified status of MAT-2026-104, the "
+                    "next recorded deadline, and the responsible lawyer?"
+                ),
+            ),
+            (
+                "matter-status:not-found",
+                "If information is not found, state that and request a safe identifier.",
+            ),
+        ],
+    )
+    concern = issue["aiRuns"][0]["intentResult"]["concerns"][0]
+    concern["intentName"] = runbook
+    tool_evidence = {
+        "name": tool_name,
+        "method": method,
+        "status": status,
+        "responseFacts": response_facts
+        or [
+            {"path": "status", "value": "Awaiting counterparty response"},
+            {"path": "fixture_evidence.result.1", "value": "next_deadline: 2026-08-05"},
+            {"path": "fixture_evidence.result.2", "value": "responsible_lawyer: Dr Nora Keller"},
+        ],
+    }
+    if evidence_concern_id == "matter-status":
+        concern["outcome"]["toolEvidence"] = [tool_evidence]
+    else:
+        issue["aiRuns"][0]["intentResult"]["concerns"].append(
+            {
+                "concernId": evidence_concern_id,
+                "matched": True,
+                "intentName": "other-runbook",
+                "outcome": {"toolEvidence": [tool_evidence]},
+            }
+        )
+    return issue
+
+
+@pytest.mark.parametrize(
+    "conditional_unit_ids",
+    [[], ["u001"]],
+    ids=("unlinked-conditional", "primary-unit-linked"),
+)
+def test_grounding_marks_proven_matter_not_found_fallback_not_applicable(
+    monkeypatch: pytest.MonkeyPatch,
+    conditional_unit_ids: list[str],
+) -> None:
+    evidence_id = "tool:matter-status:fixture_matter_mat_2026_104"
+    answer = (
+        "The latest verified status of MAT-2026-104 is Awaiting counterparty "
+        "response, the next recorded deadline is 2026-08-05, and the responsible "
+        "lawyer is Dr Nora Keller."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=_matter_status_grounding_issue(),
+        answer=answer,
+        resolutions=[
+            ("matter-status:facts", "answered", ["u001"]),
+            ("matter-status:not-found", "not_covered", conditional_unit_ids),
+        ],
+        unit_evidence_ids=[evidence_id],
+    )
+
+    assert result.verified is True
+    assert result.status == "passed"
+    assert result.uncovered_obligations == ()
+    assert result.obligation_assessments == (
+        {
+            "obligationId": "matter-status:facts",
+            "resolution": "answered",
+            "covered": True,
+            "answerUnitIds": ["u001"],
+        },
+        {
+            "obligationId": "matter-status:not-found",
+            "resolution": "not_applicable",
+            "covered": True,
+            "answerUnitIds": ["u001"],
+            "evidenceIds": [evidence_id],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "response_facts",
+    [
+        {
+            "matter_id": "MAT-2026-104",
+            "status": "Awaiting counterparty response",
+            "next_deadline": "2026-08-05",
+            "responsible_lawyer": "Dr Nora Keller",
+        },
+        {
+            "found": True,
+            "matter_id": "MAT-2026-104",
+            "status": "Awaiting counterparty response",
+            "next_deadline": "2026-08-05",
+            "responsible_lawyer": "Dr Nora Keller",
+        },
+    ],
+    ids=("native-fields", "explicit-found"),
+)
+def test_matter_status_found_evidence_accepts_complete_read_only_facts(
+    response_facts: dict[str, Any],
+) -> None:
+    audited_facts, truncated = http_tool_module._response_facts(json.dumps(response_facts))
+    assert truncated is False
+    ticket = issue_agent._automatic_ticket_context(
+        _matter_status_grounding_issue(response_facts=audited_facts, tool_name="matter_lookup")
+    )
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {
+        "tool:matter-status:matter_lookup": {
+            "status": "Awaiting counterparty response",
+            "next_deadline": "2026-08-05",
+            "responsible_lawyer": "Dr Nora Keller",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _matter_status_grounding_issue(method="POST"),
+        _matter_status_grounding_issue(status="failed"),
+        _matter_status_grounding_issue(evidence_concern_id="other"),
+        _matter_status_grounding_issue(tool_name="customer_lookup"),
+        _matter_status_grounding_issue(tool_name="fixture_matter_mat_2026_999"),
+        _matter_status_grounding_issue(
+            tool_name="matter_lookup",
+            response_facts={
+                "status": "Awaiting counterparty response",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+            },
+        ),
+        _matter_status_grounding_issue(
+            tool_name="matter_lookup",
+            response_facts={
+                "matter_id": "MAT-2026-999",
+                "status": "Awaiting counterparty response",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+            },
+        ),
+        _matter_status_grounding_issue(response_facts={"matter_id": "MAT-2026-104"}),
+        _matter_status_grounding_issue(
+            response_facts={
+                "found": False,
+                "status": "Awaiting counterparty response",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+            }
+        ),
+        _matter_status_grounding_issue(
+            response_facts={
+                "status": "not_found",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+            }
+        ),
+        _matter_status_grounding_issue(
+            response_facts={
+                "status": "Awaiting counterparty response",
+                "next_deadline": "unknown",
+                "responsible_lawyer": "Dr Nora Keller",
+            }
+        ),
+        _matter_status_grounding_issue(
+            response_facts=[
+                {"path": "status", "value": "Awaiting counterparty response"},
+                {"path": "status", "value": "Closed"},
+                {"path": "next_deadline", "value": "2026-08-05"},
+                {"path": "responsible_lawyer", "value": "Dr Nora Keller"},
+            ]
+        ),
+    ],
+    ids=(
+        "post",
+        "failed",
+        "foreign",
+        "unrelated-tool",
+        "wrong-fixture-matter",
+        "generic-without-matter-id",
+        "generic-wrong-matter-id",
+        "identifier-echo-only",
+        "found-false",
+        "not-found-status",
+        "unknown-field",
+        "conflicting-status",
+    ),
+)
+def test_matter_status_found_evidence_fails_closed(issue: dict[str, Any]) -> None:
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    "found_value",
+    [False, 0, "no", None, "n/a", "not available", "maybe"],
+    ids=("false", "zero", "no", "null", "n-a", "not-available", "ambiguous"),
+)
+def test_matter_status_found_evidence_rejects_nonaffirmative_lookup_signals(
+    found_value: Any,
+) -> None:
+    audited_facts, truncated = http_tool_module._response_facts(
+        json.dumps(
+            {
+                "found": found_value,
+                "matter_id": "MAT-2026-104",
+                "status": "Awaiting counterparty response",
+                "next_deadline": "2026-08-05",
+                "responsible_lawyer": "Dr Nora Keller",
+            }
+        )
+    )
+    assert truncated is False
+    issue = _matter_status_grounding_issue(
+        response_facts=audited_facts,
+        tool_name="matter_lookup",
+    )
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+def test_fixture_matter_status_null_found_signal_survives_real_audit_pipeline() -> None:
+    fixture_result = e2e_fixtures_module._with_fixture_evidence(
+        {
+            "found": None,
+            "matter_id": "MAT-2026-104",
+            "status": "Awaiting counterparty response",
+            "next_deadline": "2026-08-05",
+            "responsible_lawyer": "Dr Nora Keller",
+        }
+    )
+    audited_facts, truncated = http_tool_module._response_facts(json.dumps(fixture_result))
+    assert truncated is False
+    assert {"path": "found", "value": None} in audited_facts
+    converted_evidence = intent_agent_module._tool_evidence(
+        [
+            {
+                "name": "fixture_matter_mat_2026_104",
+                "method": "GET",
+                "status": "success",
+                "responseFacts": audited_facts,
+            }
+        ]
+    )
+    assert converted_evidence[0].facts[0].value is None
+    issue = _matter_status_grounding_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["outcome"]["toolEvidence"] = [
+        converted_evidence[0].model_dump(by_alias=True)
+    ]
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+@pytest.mark.parametrize("signal", [{}, []], ids=("object", "array"))
+def test_malformed_matter_lookup_signal_veto_survives_full_pipeline(signal: Any) -> None:
+    token = http_tool_module.begin_tool_call_collection()
+    try:
+        http_tool_module._record_tool_call(
+            http_tool_module.ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(
+                {
+                    "found": signal,
+                    "matter_id": "MAT-2026-104",
+                    "status": "Awaiting counterparty response",
+                    "next_deadline": "2026-08-05",
+                    "responsible_lawyer": "Dr Nora Keller",
+                }
+            ),
+        )
+        calls = http_tool_module.collect_tool_calls(token)
+    except Exception:
+        http_tool_module.collect_tool_calls(token)
+        raise
+    converted_evidence = intent_agent_module._tool_evidence(calls)
+    assert converted_evidence[0].has_nonaffirmative_lookup_result is True
+    issue = _matter_status_grounding_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["outcome"]["toolEvidence"] = [
+        converted_evidence[0].model_dump(by_alias=True)
+    ]
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+def test_truncated_matter_lookup_veto_survives_full_pipeline() -> None:
+    response = {
+        "matter_id": "MAT-2026-104",
+        "status": "Awaiting counterparty response",
+        "next_deadline": "2026-08-05",
+        "responsible_lawyer": "Dr Nora Keller",
+    }
+    response.update({f"noise_{index}": {"status": "ok"} for index in range(24)})
+    response["found"] = False
+    token = http_tool_module.begin_tool_call_collection()
+    try:
+        http_tool_module._record_tool_call(
+            http_tool_module.ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(response),
+        )
+        calls = http_tool_module.collect_tool_calls(token)
+    except Exception:
+        http_tool_module.collect_tool_calls(token)
+        raise
+    converted_evidence = intent_agent_module._tool_evidence(calls)
+    assert converted_evidence[0].response_facts_truncated is True
+    issue = _matter_status_grounding_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["outcome"]["toolEvidence"] = [
+        converted_evidence[0].model_dump(by_alias=True)
+    ]
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+def test_incomplete_raw_matter_scan_veto_survives_full_pipeline() -> None:
+    response = {
+        "matter_id": "MAT-2026-104",
+        "status": "Awaiting counterparty response",
+        "next_deadline": "2026-08-05",
+        "responsible_lawyer": "Dr Nora Keller",
+        "debug": {f"ignored_{index}": "value" for index in range(300)},
+        "result": {"found": {}},
+    }
+    token = http_tool_module.begin_tool_call_collection()
+    try:
+        http_tool_module._record_tool_call(
+            http_tool_module.ToolDefinition(
+                name="matter_lookup",
+                description="Look up a matter",
+                method="GET",
+                url_template="https://example.test/matters",
+            ),
+            status="success",
+            response_text=json.dumps(response),
+        )
+        calls = http_tool_module.collect_tool_calls(token)
+    except Exception:
+        http_tool_module.collect_tool_calls(token)
+        raise
+    assert calls[0].get("responseFactsTruncated") is not True
+    converted_evidence = intent_agent_module._tool_evidence(calls)
+    assert converted_evidence[0].has_nonaffirmative_lookup_result is True
+    issue = _matter_status_grounding_issue()
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["outcome"]["toolEvidence"] = [
+        converted_evidence[0].model_dump(by_alias=True)
+    ]
+    ticket = issue_agent._automatic_ticket_context(issue)
+
+    assert issue_agent._matter_status_found_evidence(
+        ticket,
+        concern_id="matter-status",
+        matter_id="MAT-2026-104",
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    ("runbook", "conditional_question", "primary_resolution", "unit_evidence_ids"),
+    [
+        (
+            "other-runbook",
+            "If information is not found, state that and request a safe identifier.",
+            "answered",
+            ["tool:matter-status:fixture_matter_mat_2026_104"],
+        ),
+        (
+            "law-matter-status",
+            "State that information was not found and request a safe identifier.",
+            "answered",
+            ["tool:matter-status:fixture_matter_mat_2026_104"],
+        ),
+        (
+            "law-matter-status",
+            "If information is not found, state that and request a safe identifier.",
+            "pending_or_unavailable",
+            ["tool:matter-status:fixture_matter_mat_2026_104"],
+        ),
+        (
+            "law-matter-status",
+            "If information is not found, state that and request a safe identifier.",
+            "answered",
+            ["ticket"],
+        ),
+    ],
+    ids=("wrong-runbook", "unconditional", "primary-not-answered", "tool-not-linked"),
+)
+def test_matter_status_not_applicable_override_requires_exact_joined_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    runbook: str,
+    conditional_question: str,
+    primary_resolution: str,
+    unit_evidence_ids: list[str],
+) -> None:
+    issue = _matter_status_grounding_issue(runbook=runbook)
+    issue["aiRuns"][0]["intentResult"]["concerns"][0]["answerObligations"][1]["question"] = (
+        conditional_question
+    )
+    answer = (
+        "The latest verified status of MAT-2026-104 is Awaiting counterparty "
+        "response, the next recorded deadline is 2026-08-05, and the responsible "
+        "lawyer is Dr Nora Keller."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            ("matter-status:facts", primary_resolution, ["u001"]),
+            ("matter-status:not-found", "not_covered", []),
+        ],
+        unit_evidence_ids=unit_evidence_ids,
+    )
+
+    assert result.verified is False
+    assert result.reason_code == "incomplete_answer"
+    assert result.obligation_assessments[1]["resolution"] == "not_covered"
+
+
+def test_actual_matter_lookup_miss_is_never_marked_not_applicable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = _matter_status_grounding_issue(response_facts={"found": False, "status": "not_found"})
+    answer = (
+        "The requested matter information was not found; please provide the safe "
+        "matter identifier so we can verify it."
+    )
+
+    result, _prompt = _assess_with_grounding_output(
+        monkeypatch,
+        issue=issue,
+        answer=answer,
+        resolutions=[
+            ("matter-status:facts", "pending_or_unavailable", ["u001"]),
+            ("matter-status:not-found", "pending_or_unavailable", ["u001"]),
+        ],
+        unit_evidence_ids=["tool:matter-status:fixture_matter_mat_2026_104"],
+        verdict="grounded",
+    )
+
+    assert result.verified is True
+    assert {assessment["resolution"] for assessment in result.obligation_assessments} == {
+        "pending_or_unavailable"
+    }
 
 
 def test_atomic_http_response_code_grounding_rejects_omitted_exact_code(

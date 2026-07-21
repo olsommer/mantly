@@ -1670,7 +1670,7 @@ def _assert_case(
         for item in assessments
         if item.get("covered") is True
         and str(item.get("resolution") or "answered").lower()
-        in {"answered", "fulfilled_action", "pending_or_unavailable"}
+        in {"answered", "fulfilled_action", "not_applicable", "pending_or_unavailable"}
         and str(item.get("obligationId") or item.get("obligation_id") or "")
     }
     recorder.check(

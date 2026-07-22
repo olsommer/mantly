@@ -91,7 +91,7 @@ export const GUIDED_DEMO_SCENARIO_IDS: GuidedDemoScenarioId[] = [
 
 export const guidedDemoCopy = {
   en: {
-    launcher: "Try Mantly",
+    launcher: "Demo",
     close: "Close guided simulation",
     simulationLabel: "Guided product simulation",
     title: "Watch Mantly handle one ticket",
@@ -104,8 +104,8 @@ export const guidedDemoCopy = {
       "Choose the example. Mantly—not the visitor—detects its concerns.",
     from: "From",
     subject: "Subject",
-    runReplay: "Run guided replay",
-    replay: "Replay simulation",
+    runReplay: "Run",
+    replay: "Replay",
     replayProgress: "Guided replay progress",
     replayReady: "Ready to replay",
     replayReadyDetail:
@@ -313,7 +313,7 @@ export const guidedDemoCopy = {
     },
   },
   de: {
-    launcher: "Mantly testen",
+    launcher: "Demo",
     close: "Geführte Simulation schließen",
     simulationLabel: "Geführte Produktsimulation",
     title: "So bearbeitet Mantly ein Ticket",
@@ -326,8 +326,8 @@ export const guidedDemoCopy = {
       "Wählen Sie das Beispiel. Mantly – nicht der Besucher – erkennt die Anliegen.",
     from: "Von",
     subject: "Betreff",
-    runReplay: "Geführten Ablauf starten",
-    replay: "Simulation wiederholen",
+    runReplay: "Start",
+    replay: "Nochmal",
     replayProgress: "Fortschritt der geführten Simulation",
     replayReady: "Bereit zur Wiedergabe",
     replayReadyDetail:

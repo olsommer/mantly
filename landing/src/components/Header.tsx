@@ -18,9 +18,8 @@ export function Header() {
   }, []);
 
   const navLinks = [
-    { href: `${homePath}#how-it-works`, label: t("nav.howItWorks") },
-    { href: `${homePath}#features`, label: t("nav.product") },
     { href: `${homePath}#pricing`, label: t("nav.pricing") },
+    { href: `${homePath}#features`, label: t("nav.product") },
     {
       href: "https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md",
       label: t("nav.docs"),
@@ -42,7 +41,6 @@ export function Header() {
             <span className="font-display text-2xl font-normal leading-tight tracking-tight text-foreground">
               {t("brand.name")}
             </span>
-            
           </a>
 
           {/* Desktop nav */}
@@ -65,9 +63,6 @@ export function Header() {
                 <Github className="h-4 w-4" />
                 {t("nav.github")}
               </a>
-            </Button>
-            <Button asChild variant="ghost" size="sm">
-              <a href="https://app.mantly.io">{t("nav.login")}</a>
             </Button>
             <Button asChild size="sm">
               <a href="https://app.mantly.io?view=signup">{t("nav.cloud")}</a>
@@ -113,10 +108,7 @@ export function Header() {
                     {t("nav.github")}
                   </a>
                 </Button>
-                <Button asChild variant="ghost" size="sm" className="h-11">
-                  <a href="https://app.mantly.io">{t("nav.login")}</a>
-                </Button>
-                <Button asChild size="sm" className="col-span-2 h-11">
+                <Button asChild size="sm" className="h-11">
                   <a href="https://app.mantly.io?view=signup">{t("nav.cloud")}</a>
                 </Button>
               </div>

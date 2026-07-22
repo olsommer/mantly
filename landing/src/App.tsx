@@ -4,7 +4,6 @@ import { HeroSection } from "@/components/HeroSection";
 import { ProblemSection } from "@/components/ProblemSection";
 import { HowItWorks } from "@/components/HowItWorks";
 import { FeaturesSection } from "@/components/FeaturesSection";
-import { ProductPillarsSection } from "@/components/ProductPillarsSection";
 import { PricingSection } from "@/components/PricingSection";
 import { FAQSection } from "@/components/FAQSection";
 import { CTASection } from "@/components/CTASection";
@@ -67,7 +66,6 @@ export function App() {
             <ProblemSection />
             <HowItWorks />
             <FeaturesSection />
-            <ProductPillarsSection />
             <PricingSection />
             <FAQSection />
             <CTASection />

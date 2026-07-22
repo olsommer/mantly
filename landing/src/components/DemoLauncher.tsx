@@ -50,7 +50,7 @@ export function DemoLauncher() {
             type="button"
             data-testid="demo-launcher"
             size="lg"
-            className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-40 h-12 rounded-full px-5 shadow-xl shadow-primary/20 sm:bottom-6 sm:right-6"
+            className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-40 h-12 w-12 rounded-full px-0 shadow-xl shadow-primary/20 sm:bottom-6 sm:right-6 sm:w-auto sm:px-5"
             aria-label={copy.launcher}
             onPointerDown={(event) => {
               openerRef.current = event.currentTarget
@@ -60,8 +60,8 @@ export function DemoLauncher() {
             }}
           >
             <Sparkles className="size-4" aria-hidden="true" />
-            {copy.launcher}
-            <ArrowUpRight className="size-4" aria-hidden="true" />
+            <span className="hidden sm:inline">{copy.launcher}</span>
+            <ArrowUpRight className="hidden size-4 sm:block" aria-hidden="true" />
           </Button>
         </SheetTrigger>
       ) : null}

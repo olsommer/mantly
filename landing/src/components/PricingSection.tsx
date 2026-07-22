@@ -1,20 +1,20 @@
 import { Building2, Check, Cloud, Github, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-} from "@/components/ui/card";
-import { useTranslation } from "@/i18n/useTranslation";
-import type { TranslationKey } from "@/i18n/translations";
-import {
   Accordion,
   AccordionContent,
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import { useTranslation } from "@/i18n/useTranslation";
+import type { TranslationKey } from "@/i18n/translations";
+import { cn } from "@/lib/utils";
 
 type PlanCopy = {
   name: TranslationKey;
@@ -30,6 +30,75 @@ type Plan = PlanCopy & {
   featured: boolean;
   hidePeriod?: boolean;
 };
+
+type Translator = ReturnType<typeof useTranslation>["t"];
+
+function PlanFeatures({
+  plan,
+  t,
+  className,
+}: {
+  plan: Plan;
+  t: Translator;
+  className?: string;
+}) {
+  return (
+    <ul className={cn("grid gap-x-6 gap-y-2.5", className)}>
+      {plan.features.map((feature) => (
+        <li key={feature} className="flex gap-2.5 text-sm leading-relaxed text-muted-foreground">
+          <Check className="mt-0.5 size-4 shrink-0 text-primary" />
+          <span>{t(feature)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PaidPlanPanel({ plan }: { plan: Plan }) {
+  const { t } = useTranslation();
+
+  return (
+    <div className="flex h-full flex-col px-4 pb-5 pt-5 sm:px-5 md:px-7 md:pb-7 md:pt-6 lg:px-8">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10">
+            <plan.icon className="size-5 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-2xl leading-tight">{t(plan.name)}</h3>
+              {plan.featured && (
+                <span className="rounded-full bg-primary px-2.5 py-1 text-[0.65rem] font-medium leading-none text-primary-foreground">
+                  {t("pricing.popular")}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <span className="text-2xl font-semibold leading-none sm:text-3xl">{t(plan.price)}</span>
+          {!plan.hidePeriod && (
+            <span className="mt-1 block text-xs text-muted-foreground">{t("pricing.month")}</span>
+          )}
+        </div>
+      </div>
+
+      <p className="mt-4 max-w-xl text-sm leading-relaxed text-muted-foreground sm:text-base">
+        {t(plan.desc)}
+      </p>
+
+      <PlanFeatures plan={plan} t={t} className="mt-6 md:grid-cols-2" />
+
+      <Button
+        asChild
+        variant={plan.featured ? "default" : "outline"}
+        className="mt-7 h-12 w-full rounded-lg sm:w-fit sm:min-w-44"
+      >
+        <a href={plan.href}>{t(plan.cta)}</a>
+      </Button>
+    </div>
+  );
+}
 
 export function PricingSection() {
   const { t } = useTranslation();
@@ -110,7 +179,7 @@ export function PricingSection() {
       hidePeriod: true,
     },
   ];
-  const mobilePlans: Plan[] = [plans[1], plans[0], plans[2], plans[3]];
+  const [community, cloud, business, enterprise] = plans;
 
   return (
     <section id="pricing" className="scroll-mt-16 bg-muted/40 py-14 sm:py-32">
@@ -127,62 +196,65 @@ export function PricingSection() {
           )}
         </div>
 
-        <div className="mt-8 grid gap-3 md:hidden">
-          <Button asChild size="lg" className="h-12 w-full rounded-lg">
-            <a href={plans[1].href}>{t(plans[1].cta)}</a>
-          </Button>
-          <Button asChild variant="outline" size="lg" className="h-12 w-full rounded-lg">
-            <a href={plans[0].href}>
-              <Github className="size-4" />
-              {t(plans[0].cta)}
-            </a>
-          </Button>
-        </div>
+        {/* Purpose-built mobile pricing */}
+        <div className="mt-8 space-y-4 md:hidden">
+          <div className="grid gap-2.5">
+            <Button asChild size="lg" className="h-12 w-full rounded-lg">
+              <a href={cloud.href}>{t(cloud.cta)}</a>
+            </Button>
+            <Button asChild variant="outline" size="lg" className="h-12 w-full rounded-lg bg-background">
+              <a href={community.href}>
+                <Github className="size-4" />
+                {t(community.cta)}
+              </a>
+            </Button>
+          </div>
 
-        <div className="mt-6 md:hidden">
-          <Accordion type="single" collapsible className="w-full">
-            {mobilePlans.map((plan) => (
+          <div className="overflow-hidden rounded-2xl border border-primary/25 bg-background shadow-lg shadow-primary/[0.06]">
+            <Tabs defaultValue="cloud">
+              <div className="border-b border-border/60 bg-primary/[0.035] p-3">
+                <TabsList aria-label={`${t(cloud.name)} / ${t(business.name)}`}>
+                  <TabsTrigger value="cloud">
+                    <Cloud className="size-4" />
+                    {t(cloud.name)}
+                  </TabsTrigger>
+                  <TabsTrigger value="business">
+                    <ShieldCheck className="size-4" />
+                    {t(business.name)}
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+              <TabsContent value="cloud" className="mt-0">
+                <PaidPlanPanel plan={cloud} />
+              </TabsContent>
+              <TabsContent value="business" className="mt-0">
+                <PaidPlanPanel plan={business} />
+              </TabsContent>
+            </Tabs>
+          </div>
+
+          <Accordion
+            type="single"
+            collapsible
+            className="rounded-2xl border border-border/70 bg-background px-4"
+          >
+            {[community, enterprise].map((plan) => (
               <AccordionItem key={plan.name} value={plan.name} className="border-border/60">
                 <AccordionTrigger className="min-h-[4.5rem] py-3 hover:no-underline">
                   <span className="flex min-w-0 flex-1 items-center gap-3 pr-2 text-left">
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-background">
+                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10">
                       <plan.icon className="size-4 text-primary" />
                     </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="text-lg font-normal leading-tight">{t(plan.name)}</span>
-                        {plan.featured && (
-                          <span className="rounded-full bg-primary px-2 py-1 text-[0.65rem] font-medium leading-none text-primary-foreground">
-                            {t("pricing.popular")}
-                          </span>
-                        )}
-                      </span>
-                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
-                        {t(plan.desc)}
-                      </span>
+                    <span className="min-w-0 flex-1 text-lg font-normal leading-tight">
+                      {t(plan.name)}
                     </span>
-                    <span className="shrink-0 text-right text-lg font-semibold">
-                      {t(plan.price)}
-                      {!plan.hidePeriod && (
-                        <span className="block text-[0.65rem] font-normal text-muted-foreground">{t("pricing.month")}</span>
-                      )}
-                    </span>
+                    <span className="shrink-0 text-base font-semibold">{t(plan.price)}</span>
                   </span>
                 </AccordionTrigger>
-                <AccordionContent className="pb-5 pl-12 pr-3">
-                  <ul className="space-y-2">
-                    {plan.features.map((feature) => (
-                      <li key={feature} className="flex gap-2 text-sm leading-relaxed text-muted-foreground">
-                        <Check className="mt-0.5 size-4 shrink-0 text-primary" />
-                        <span>{t(feature)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <Button
-                    asChild
-                    variant={plan.featured ? "default" : "outline"}
-                    className="mt-5 h-11 w-full rounded-lg"
-                  >
+                <AccordionContent className="pb-5 pl-[3.25rem] pr-2">
+                  <p className="text-sm leading-relaxed text-muted-foreground">{t(plan.desc)}</p>
+                  <PlanFeatures plan={plan} t={t} className="mt-5" />
+                  <Button asChild variant="outline" className="mt-5 h-11 w-full rounded-lg">
                     <a href={plan.href}>{t(plan.cta)}</a>
                   </Button>
                 </AccordionContent>
@@ -191,60 +263,75 @@ export function PricingSection() {
           </Accordion>
         </div>
 
-        <div className="mt-16 hidden gap-5 md:grid md:grid-cols-2 xl:grid-cols-4">
-          {plans.map((plan) => (
-            <Card
-              key={plan.name}
-              className={
-                plan.featured
-                  ? "relative flex h-full flex-col border-primary/50 shadow-lg shadow-primary/10"
-                  : "flex h-full flex-col border-border/60 shadow-none"
-              }
-            >
-              <CardHeader className="grid min-h-[18.5rem] grid-rows-[1.5rem_2.5rem_3.5rem_4rem_auto] pr-6">
-                <div className="flex justify-end">
-                  {plan.featured && (
-                    <span className="rounded-full bg-primary px-3 py-1 text-xs font-medium leading-none text-primary-foreground">
-                      {t("pricing.popular")}
-                    </span>
-                  )}
-                </div>
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 self-start">
-                  <plan.icon className="h-5 w-5 text-primary" />
-                </div>
-                <h3 className="self-start text-[2rem] leading-tight">
-                  {t(plan.name)}
-                </h3>
-                <CardDescription className="self-start">{t(plan.desc)}</CardDescription>
-                <div className="self-end">
-                  <span className="text-4xl font-semibold">{t(plan.price)}</span>
-                  {!plan.hidePeriod && (
-                    <span className="ml-1 text-base text-muted-foreground">{t("pricing.month")}</span>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                <ul className="space-y-3">
-                  {plan.features.map((feature) => (
-                    <li key={feature} className="flex gap-3 text-base text-muted-foreground">
-                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                      <span>{t(feature)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </CardContent>
-              <CardFooter className="mt-auto">
-                <Button
-                  asChild
-                  variant={plan.featured ? "default" : "outline"}
-                  className="h-11 w-full rounded-lg"
-                >
-                  <a href={plan.href}>{t(plan.cta)}</a>
-                </Button>
-              </CardFooter>
-            </Card>
-          ))}
+        {/* Community + managed plans on tablet and desktop */}
+        <div className="mx-auto mt-14 hidden max-w-6xl overflow-hidden rounded-3xl border border-border/70 bg-background shadow-xl shadow-black/[0.04] md:grid md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.35fr)]">
+          <article className="flex min-w-0 flex-col p-6 lg:p-8">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex size-11 items-center justify-center rounded-xl bg-primary/10">
+                <community.icon className="size-5 text-primary" />
+              </div>
+              <span className="text-3xl font-semibold">{t(community.price)}</span>
+            </div>
+            <h3 className="mt-6 text-3xl leading-tight">{t(community.name)}</h3>
+            <p className="mt-3 text-base leading-relaxed text-muted-foreground">
+              {t(community.desc)}
+            </p>
+            <PlanFeatures plan={community} t={t} className="mt-7" />
+            <Button asChild variant="outline" className="mt-auto h-12 w-full rounded-lg">
+              <a href={community.href}>
+                <Github className="size-4" />
+                {t(community.cta)}
+              </a>
+            </Button>
+          </article>
+
+          <div className="min-w-0 border-l border-primary/15 bg-gradient-to-br from-primary/[0.07] via-background to-background">
+            <Tabs defaultValue="cloud" className="h-full">
+              <div className="border-b border-primary/15 p-4 lg:px-6 lg:py-5">
+                <TabsList aria-label={`${t(cloud.name)} / ${t(business.name)}`}>
+                  <TabsTrigger value="cloud">
+                    <Cloud className="size-4" />
+                    {t(cloud.name)}
+                  </TabsTrigger>
+                  <TabsTrigger value="business">
+                    <ShieldCheck className="size-4" />
+                    {t(business.name)}
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+              <TabsContent value="cloud" className="mt-0">
+                <PaidPlanPanel plan={cloud} />
+              </TabsContent>
+              <TabsContent value="business" className="mt-0">
+                <PaidPlanPanel plan={business} />
+              </TabsContent>
+            </Tabs>
+          </div>
         </div>
+
+        <article className="mx-auto mt-4 hidden max-w-6xl rounded-2xl border border-primary/20 bg-gradient-to-r from-primary/[0.07] via-background to-background p-5 md:block lg:p-6">
+          <div className="grid items-center gap-5 md:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="flex min-w-0 items-start gap-4">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10">
+                <enterprise.icon className="size-5 text-primary" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-2xl leading-tight">{t(enterprise.name)}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground sm:text-base">
+                  {t(enterprise.desc)}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-4">
+              <span className="text-2xl font-semibold">{t(enterprise.price)}</span>
+              <Button asChild variant="outline" className="h-11 rounded-lg bg-background px-5">
+                <a href={enterprise.href}>{t(enterprise.cta)}</a>
+              </Button>
+            </div>
+          </div>
+          <PlanFeatures plan={enterprise} t={t} className="mt-5 md:grid-cols-2 xl:grid-cols-3" />
+        </article>
+
         <p className="mx-auto mt-6 max-w-3xl text-center text-xs leading-relaxed text-muted-foreground sm:mt-10 sm:text-sm">
           {t("pricing.runDefinition")}
         </p>

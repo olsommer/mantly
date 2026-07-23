@@ -9,7 +9,7 @@ export function CTASection() {
     <section id="get-started" className="bg-muted/40 py-14 sm:py-32">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-xl text-center">
-          <h2 className="text-[2rem] leading-tight sm:text-[3rem] lg:text-[3.5rem]">
+          <h2 className="text-[1.85rem] font-semibold leading-tight sm:text-[2.85rem] lg:text-[3.35rem]">
             {t("cta.title")}
           </h2>
           <p className="mt-3 text-base text-muted-foreground sm:mt-5 sm:text-lg">

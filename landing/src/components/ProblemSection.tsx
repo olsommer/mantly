@@ -31,7 +31,7 @@ export function ProblemSection() {
           <p className="text-xs font-semibold uppercase tracking-widest text-primary">
             {t("problem.tagline")}
           </p>
-          <h2 className="mt-3 text-[2rem] leading-tight sm:mt-4 sm:text-[3rem] lg:text-[3.5rem]">
+          <h2 className="mt-3 text-[1.85rem] font-semibold leading-tight sm:mt-4 sm:text-[2.85rem] lg:text-[3.35rem]">
             {t("problem.title")}
           </h2>
           {subtitle && (

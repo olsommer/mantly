@@ -26,7 +26,7 @@ export function HeroSection() {
           </div>
 
           {/* Headline */}
-          <h1 className="text-4xl leading-[1.02] text-foreground animate-fade-in-up delay-100 min-[380px]:text-[2.5rem] min-[380px]:leading-[0.98] sm:text-6xl sm:leading-none lg:text-7xl">
+          <h1 className="text-[2.1rem] font-semibold leading-[1.02] text-foreground animate-fade-in-up delay-100 min-[380px]:text-[2.35rem] min-[380px]:leading-[0.98] sm:text-[3.6rem] sm:leading-none lg:text-[4.35rem]">
             {t("hero.title")}
           </h1>
 

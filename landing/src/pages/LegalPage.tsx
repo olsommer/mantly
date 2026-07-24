@@ -110,7 +110,7 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           body: [
             "Mantly verwendet technisch notwendige Speicherung, insbesondere für Spracheinstellungen, Authentifizierung, aktive Projekte, UI-Zustände und Sitzungsverwaltung.",
             "Die öffentliche Landingpage nutzt PostHog im Cookieless-Modus ohne Cookies und ohne persistente Browser-Identifikation.",
-            "Sie können Browser-Speicher und Cookies in Ihrem Browser löschen oder blockieren. Dies kann die Funktionalität der Anwendung einschränken.",
+            "Du kannst Browser-Speicher und Cookies in deinem Browser löschen oder blockieren. Dies kann die Funktionalität der Anwendung einschränken.",
           ],
         },
         {
@@ -137,18 +137,18 @@ const content: Record<"de" | "en", Record<LegalPageKind, LegalPageContent>> = {
           ],
         },
         {
-          title: "Ihre Rechte in der EU",
+          title: "Deine Rechte in der EU",
           body: [
-            "Sie haben im gesetzlich vorgesehenen Umfang das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit, Widerspruch sowie das Recht, eine erteilte Einwilligung jederzeit zu widerrufen.",
-            "Sie haben außerdem das Recht, Beschwerde bei einer zuständigen Datenschutzaufsichtsbehörde einzulegen.",
-            "Anfragen richten Sie bitte an info@isarai.de oder support@mantly.io.",
+            "Du hast im gesetzlich vorgesehenen Umfang das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit, Widerspruch sowie das Recht, eine erteilte Einwilligung jederzeit zu widerrufen.",
+            "Du hast außerdem das Recht, Beschwerde bei einer zuständigen Datenschutzaufsichtsbehörde einzulegen.",
+            "Richte Anfragen bitte an info@isarai.de oder support@mantly.io.",
           ],
         },
         {
           title: "Weitere Informationen für Nutzer in der Schweiz",
           body: [
             "Nutzer in der Schweiz können im Rahmen des anwendbaren Schweizer Datenschutzrechts insbesondere Auskunft, Berichtigung, Löschung, Einschränkung, Widerspruch und Herausgabe oder Übertragung personenbezogener Daten verlangen.",
-            "Anfragen richten Sie bitte an info@isarai.de oder support@mantly.io.",
+            "Richte Anfragen bitte an info@isarai.de oder support@mantly.io.",
           ],
         },
         {

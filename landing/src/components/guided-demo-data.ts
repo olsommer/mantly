@@ -318,12 +318,12 @@ export const guidedDemoCopy = {
     simulationLabel: "Geführte Produktsimulation",
     title: "So bearbeitet Mantly ein Ticket",
     description:
-      "Spielen Sie ein vorbereitetes Beispiel ab. Es werden kein Live-Modell, keine Tools, keine Tickets und keine Kundendaten verwendet.",
+      "Spiele ein vorbereitetes Beispiel ab. Es werden kein Live-Modell, keine Tools, keine Tickets und keine Kundendaten verwendet.",
     customerTab: "Kunde",
     agentTab: "Agent-Run",
     chooseMessage: "Beispielnachricht auswählen",
     chooseMessageHint:
-      "Wählen Sie das Beispiel. Mantly – nicht der Besucher – erkennt die Anliegen.",
+      "Wähle das Beispiel. Mantly – nicht der Besucher – erkennt die Anliegen.",
     from: "Von",
     subject: "Betreff",
     runReplay: "Start",
@@ -331,7 +331,7 @@ export const guidedDemoCopy = {
     replayProgress: "Fortschritt der geführten Simulation",
     replayReady: "Bereit zur Wiedergabe",
     replayReadyDetail:
-      "Starten Sie den Ablauf und sehen Sie, wie aus einer Nachricht ein Ticket, mehrere Runbook-Ergebnisse und eine Antwort werden.",
+      "Starte den Ablauf und sieh, wie aus einer Nachricht ein Ticket, mehrere Runbook-Ergebnisse und eine Antwort werden.",
     simulationDisclosure: "Vorbereitetes Beispiel · keine Tools · keine Datenübertragung",
     detectedConcerns: "Erkannte Anliegen",
     runbook: "Runbook",

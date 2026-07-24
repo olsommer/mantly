@@ -212,9 +212,9 @@ const de: Record<TranslationKey, string> = {
   "a11y.switchToEnglish": "Sprache auf Englisch umstellen",
   "a11y.skipToContent": "Zum Hauptinhalt springen",
 
-  "hero.title": "Support, der nach Ihren Regeln arbeitet.",
+  "hero.title": "Support, der nach deinen Regeln arbeitet.",
   "hero.subtitle":
-    "Mantly macht Nachrichten aus verbundenen Kanälen zu Tickets und bearbeitet jedes Anliegen mit Ihren Runbooks, Wissen mit Quellen und Tools. Ein Ticket. Eine fundierte Antwort.",
+    "Mantly macht Nachrichten aus verbundenen Kanälen zu Tickets und bearbeitet jedes Anliegen mit deinen Runbooks, Wissen mit Quellen und Tools. Ein Ticket. Eine fundierte Antwort.",
   "hero.cta": "Cloud",
   "hero.ctaHref": "https://app.mantly.io?view=signup",
   "hero.secondaryCta": "GitHub",
@@ -222,7 +222,7 @@ const de: Record<TranslationKey, string> = {
   "hero.selfHostCta": "Docs",
   "hero.demoCta": "Demo",
   "hero.badge": "Open Source · Self-hosted · Cloud",
-  "hero.builtFor": "Verbundene Kanäle · Ihre Runbooks · Eine Antwort",
+  "hero.builtFor": "Verbundene Kanäle · Deine Runbooks · Eine Antwort",
 
   "problem.tagline": "Ergebnisse",
   "problem.title": "Der ganze Supportfall.",
@@ -231,7 +231,7 @@ const de: Record<TranslationKey, string> = {
   "problem.pain1.title": "Komplette Bearbeitung",
   "problem.pain1.desc":
     "Kontext, erlaubte Aktionen und Kommunikation bleiben in einem Ticket.",
-  "problem.pain2.title": "Ihre Regeln",
+  "problem.pain2.title": "Deine Regeln",
   "problem.pain2.desc":
     "Runbooks definieren Arbeit, erlaubte Tools und Freigaben.",
   "problem.pain3.title": "Eine Antwort",
@@ -242,21 +242,21 @@ const de: Record<TranslationKey, string> = {
   "how.title": "Eine Nachricht. Ein Ergebnis.",
   "how.subtitle":
     "Eine eingehende Nachricht wird zu einem Ticket – auch mit mehreren Anliegen.",
-  "how.step1.title": "Ticket erstellen",
+  "how.step1.title": "Ticket",
   "how.step1.desc":
     "Nachrichten aus verbundenen Kanälen landen als Ticket in der Inbox.",
-  "how.step2.title": "Runbooks zuordnen",
+  "how.step2.title": "Runbooks",
   "how.step2.desc":
     "Erkannte Anliegen aktivieren die passenden Runbooks des Unternehmens.",
-  "how.step3.title": "Recherchieren und handeln",
+  "how.step3.title": "Recherche",
   "how.step3.desc":
     "Wissen mit Quellen liefert Fakten; Tools führen erlaubte Aktionen aus.",
-  "how.step4.title": "Eine Antwort",
+  "how.step4.title": "Antwort",
   "how.step4.desc":
     "Die Inbox bündelt alle Ergebnisse für Freigabe oder automatischen Versand.",
 
   "features.tagline": "Produkt",
-  "features.title": "Support unter Ihrer Kontrolle.",
+  "features.title": "Support unter deiner Kontrolle.",
   "features.subtitle":
     "Offene Infrastruktur. Klare Workflows. Fundierte Antworten. Prüfbarer Verlauf.",
   "features.1.title": "Open Source",
@@ -265,7 +265,7 @@ const de: Record<TranslationKey, string> = {
   "features.2.title": "Eine Inbox",
   "features.2.desc":
     "Nachrichten verbundener Kanäle in einem Ticketsystem bündeln.",
-  "features.3.title": "Runbooks pro Anliegen",
+  "features.3.title": "Runbooks",
   "features.3.desc":
     "Jedes Anliegen separat bearbeiten, ohne die Kundenantwort aufzuteilen.",
   "features.4.title": "Eine Antwort",
@@ -302,7 +302,7 @@ const de: Record<TranslationKey, string> = {
   "pricing.tagline": "Preise",
   "pricing.title": "Open Source. Oder Cloud.",
   "pricing.subtitle":
-    "Betreiben Sie Mantly selbst oder nutzen Sie die verwaltete Cloud.",
+    "Betreibe Mantly selbst oder nutze die verwaltete Cloud.",
   "pricing.month": "/Monat",
   "pricing.popular": "Empfohlen",
   "pricing.community.name": "Community",
@@ -361,29 +361,29 @@ const de: Record<TranslationKey, string> = {
     "Mantly ist eine Open-Source-Plattform für agentischen Support mit einer Inbox, firmeneigenen Runbooks, ticketbezogenem Wissen, Tools, erlaubten Aktionen und einer gemeinsamen Antwort.",
   "faq.q2": "Was ist der Unterschied zwischen Community und Cloud?",
   "faq.a2":
-    "Community ist der Open-Source-Kern, den Sie auf Ihrer Infrastruktur betreiben. Cloud verwaltet die Anwendung und enthält ein monatliches Agent-Run-Kontingent.",
+    "Community ist der Open-Source-Kern, den du auf deiner Infrastruktur betreibst. Cloud verwaltet die Anwendung und enthält ein monatliches Agent-Run-Kontingent.",
   "faq.q3": "Was zählt als ein Agent-Run?",
   "faq.a3":
     "Eine eingehende Kundennachricht entspricht einem Agent-Run – auch mit mehreren Anliegen, Runbooks, Wissenssuchen oder Tools.",
   "faq.q4": "Kann Mantly Antworten automatisch versenden?",
   "faq.a4":
-    "Ja, wenn Ihre Richtlinie das erlaubt. Sensible Workflows können manuell bleiben oder eine menschliche Freigabe erfordern.",
+    "Ja, wenn deine Richtlinie das erlaubt. Sensible Workflows können manuell bleiben oder eine menschliche Freigabe erfordern.",
   "faq.q5": "Was passiert, wenn eine Nachricht mehrere Anliegen enthält?",
   "faq.a5":
     "Mantly führt pro Anliegen das passende Runbook aus, sammelt strukturierte Ergebnisse und erstellt eine schlüssige Antwort.",
   "faq.q6": "Wo laufen Anwendung, Daten und Modelle?",
   "faq.a6":
-    "Hosten Sie die Anwendung selbst mit eigenen Modellschlüsseln oder wählen Sie die verwaltete Mantly Cloud. Ihre Deployment-Wahl bestimmt, wo die Anwendung läuft.",
+    "Hoste die Anwendung selbst mit eigenen Modellschlüsseln oder wähle die verwaltete Mantly Cloud. Deine Deployment-Wahl bestimmt, wo die Anwendung läuft.",
 
-  "cta.title": "Mantly. Ihre Wahl.",
+  "cta.title": "Mantly. Deine Wahl.",
   "cta.subtitle":
-    "Nutzen Sie die verwaltete Cloud oder betreiben Sie den Open-Source-Kern selbst.",
+    "Nutze die verwaltete Cloud oder betreibe den Open-Source-Kern selbst.",
   "cta.button": "Cloud",
   "cta.github": "GitHub",
   "cta.selfHost": "Docs",
   "cta.sales": "Kontakt",
 
-  "footer.tagline": "Open-Source-Support. Ihre Regeln.",
+  "footer.tagline": "Open-Source-Support. Deine Regeln.",
   "footer.github": "GitHub",
   "footer.docs": "Docs",
   "footer.sales": "Kontakt",

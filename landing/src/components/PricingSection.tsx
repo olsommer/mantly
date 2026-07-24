@@ -285,7 +285,7 @@ export function PricingSection() {
             </Button>
           </article>
 
-          <div className="min-w-0 border-l border-primary/15 bg-gradient-to-br from-primary/[0.07] via-background to-background">
+          <div className="min-w-0 border-l border-primary/15 bg-primary/[0.035]">
             <Tabs defaultValue="cloud" className="h-full">
               <div className="border-b border-primary/15 p-4 lg:px-6 lg:py-5">
                 <TabsList aria-label={`${t(cloud.name)} / ${t(business.name)}`}>
@@ -309,7 +309,7 @@ export function PricingSection() {
           </div>
         </div>
 
-        <article className="mx-auto mt-4 hidden max-w-6xl rounded-2xl border border-primary/20 bg-gradient-to-r from-primary/[0.07] via-background to-background p-5 md:block lg:p-6">
+        <article className="mx-auto mt-4 hidden max-w-6xl rounded-2xl border border-primary/20 bg-background p-5 md:block lg:p-6">
           <div className="grid items-center gap-5 md:grid-cols-[minmax(0,1fr)_auto]">
             <div className="flex min-w-0 items-start gap-4">
               <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10">

@@ -38,7 +38,7 @@ export function Header() {
         <div className="flex h-16 items-center justify-between">
           {/* Logo */}
           <a href={homePath} className="group flex min-h-11 items-center gap-1.5">
-            <span className="font-display text-2xl font-normal leading-tight tracking-tight text-foreground">
+            <span className="font-display text-2xl font-semibold leading-tight tracking-tight text-foreground">
               {t("brand.name")}
             </span>
           </a>

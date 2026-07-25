@@ -58,7 +58,7 @@ function PaidPlanPanel({ plan }: { plan: Plan }) {
   const { t } = useTranslation();
 
   return (
-    <div className="flex h-full flex-col px-4 pb-5 pt-5 sm:px-5 md:px-7 md:pb-7 md:pt-6 lg:px-8">
+    <div className="flex h-full flex-col px-4 pb-5 pt-5 sm:px-5 md:px-7 md:pb-6 md:pt-6 lg:px-8 lg:pb-8">
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10">
@@ -92,7 +92,7 @@ function PaidPlanPanel({ plan }: { plan: Plan }) {
       <Button
         asChild
         variant={plan.featured ? "default" : "outline"}
-        className="mt-7 h-12 w-full rounded-lg sm:w-fit sm:min-w-44"
+        className="mt-7 h-12 w-full rounded-lg sm:w-fit sm:min-w-44 md:mt-auto"
       >
         <a href={plan.href}>{t(plan.cta)}</a>
       </Button>
@@ -286,7 +286,7 @@ export function PricingSection() {
           </article>
 
           <div className="min-w-0 border-l border-primary/15 bg-primary/[0.035]">
-            <Tabs defaultValue="cloud" className="h-full">
+            <Tabs defaultValue="cloud" className="h-full md:flex md:flex-col">
               <div className="border-b border-primary/15 p-4 lg:px-6 lg:py-5">
                 <TabsList aria-label={`${t(cloud.name)} / ${t(business.name)}`}>
                   <TabsTrigger value="cloud">
@@ -299,10 +299,10 @@ export function PricingSection() {
                   </TabsTrigger>
                 </TabsList>
               </div>
-              <TabsContent value="cloud" className="mt-0">
+              <TabsContent value="cloud" className="mt-0 md:flex-1">
                 <PaidPlanPanel plan={cloud} />
               </TabsContent>
-              <TabsContent value="business" className="mt-0">
+              <TabsContent value="business" className="mt-0 md:flex-1">
                 <PaidPlanPanel plan={business} />
               </TabsContent>
             </Tabs>

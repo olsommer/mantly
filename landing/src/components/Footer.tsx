@@ -26,7 +26,7 @@ export function Footer() {
           {/* Brand */}
           <div>
             <a href={homeHref} className="flex min-h-11 items-center gap-1.5">
-              <span className="font-display text-2xl font-normal leading-tight tracking-tight">{t("brand.name")}</span>
+              <span className="font-display text-2xl font-semibold leading-tight tracking-tight">{t("brand.name")}</span>
               
             </a>
             <p className="mt-2 text-base text-muted-foreground max-w-xs">

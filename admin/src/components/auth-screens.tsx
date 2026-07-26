@@ -121,6 +121,7 @@ export const AdminLogin = ({ onAuthenticated, onSwitchToSignup, allowSignups, in
                         <Input
                             id="email"
                             type="email"
+                            autoComplete="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
                             required
@@ -145,6 +146,7 @@ export const AdminLogin = ({ onAuthenticated, onSwitchToSignup, allowSignups, in
                             <Input
                                 id="password"
                                 type="password"
+                                autoComplete="current-password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 required
@@ -321,6 +323,7 @@ export const AdminSignup = ({ onSwitchToLogin, isSaas, initialEmail = '', intro 
                         <Input
                             id="signupEmail"
                             type="email"
+                            autoComplete="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
                             required
@@ -332,6 +335,7 @@ export const AdminSignup = ({ onSwitchToLogin, isSaas, initialEmail = '', intro 
                         <Input
                             id="signupPassword"
                             type="password"
+                            autoComplete="new-password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             required
@@ -344,6 +348,7 @@ export const AdminSignup = ({ onSwitchToLogin, isSaas, initialEmail = '', intro 
                         <Input
                             id="signupConfirmPassword"
                             type="password"
+                            autoComplete="new-password"
                             value={confirmPassword}
                             onChange={(e) => setConfirmPassword(e.target.value)}
                             required
@@ -484,9 +489,11 @@ export const GmailConnectStatus = ({
 export const ChangePasswordGate = ({
     onComplete,
     onSignOut,
+    userEmail,
 }: {
     onComplete: () => void;
     onSignOut: () => void;
+    userEmail: string;
 }) => {
     const [oldPassword, setOldPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
@@ -535,11 +542,22 @@ export const ChangePasswordGate = ({
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
+                    <input
+                        type="email"
+                        name="username"
+                        autoComplete="username"
+                        value={userEmail}
+                        readOnly
+                        tabIndex={-1}
+                        aria-hidden="true"
+                        className="sr-only"
+                    />
                     <div className="space-y-1">
                         <Label htmlFor="currentPassword">{t('Current password')}</Label>
                         <Input
                             id="currentPassword"
                             type="password"
+                            autoComplete="current-password"
                             value={oldPassword}
                             onChange={(e) => setOldPassword(e.target.value)}
                             required
@@ -550,6 +568,7 @@ export const ChangePasswordGate = ({
                         <Input
                             id="newPassword"
                             type="password"
+                            autoComplete="new-password"
                             value={newPassword}
                             onChange={(e) => setNewPassword(e.target.value)}
                             required
@@ -561,6 +580,7 @@ export const ChangePasswordGate = ({
                         <Input
                             id="confirmPassword"
                             type="password"
+                            autoComplete="new-password"
                             value={confirmPassword}
                             onChange={(e) => setConfirmPassword(e.target.value)}
                             required

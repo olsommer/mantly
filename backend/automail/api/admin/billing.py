@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from automail.billing.addons import sync_stripe_addons_best_effort
 from automail.billing.checkout import create_checkout_session, create_portal_session
 from automail.billing.config import IS_SAAS
-from automail.billing.plans import get_tenant_features, get_tenant_limits
+from automail.billing.plans import entitlement_context, get_tenant_features, get_tenant_limits
 from automail.billing.retention import enforce_retention_best_effort
 from automail.billing.subscriptions import get_subscription_details
 from automail.billing.tenant import get_effective_tenant_plan
@@ -82,15 +82,20 @@ async def billing_status(request: Request) -> dict:
     llm_usage = get_llm_billing_usage(tenant_id)
     limits = get_tenant_limits(tenant_id)
     features = get_tenant_features(tenant_id)
+    entitlements = entitlement_context(tenant_id)
 
     return {
         "plan": plan,
+        "deploymentMode": entitlements["deployment"],
+        "edition": entitlements["edition"],
         "subscriptionStatus": subscription["status"],
         "cancelAtPeriodEnd": subscription["cancel_at_period_end"],
         "currentPeriodStart": subscription["current_period_start"],
         "currentPeriodEnd": subscription["current_period_end"],
         "usage": {
-            "emailsThisPeriod": usage["emails_this_period"],
+            "agentRunsThisPeriod": usage["agent_runs_this_period"],
+            # Transitional alias for older admin clients.
+            "emailsThisPeriod": usage["agent_runs_this_period"],
             "projects": usage["projects"],
             "users": usage["users"],
             "evalRunsThisPeriod": usage["eval_runs_this_period"],
@@ -108,6 +113,8 @@ async def billing_status(request: Request) -> dict:
         "syncedAddons": synced_addons,
         "retention": retention,
         "limits": {
+            "agentRunsPerMonth": limits["emails_per_month"],
+            # Transitional alias for older admin clients.
             "emailsPerMonth": limits["emails_per_month"],
             "projects": limits["projects"],
             "users": limits["users"],
@@ -115,6 +122,13 @@ async def billing_status(request: Request) -> dict:
             "evalSets": limits["eval_sets"],
             "evalCasesPerSet": limits["eval_cases_per_set"],
             "retentionDays": limits["retention_days"],
+        },
+        "metering": {
+            "unit": "agent_run",
+            "definition": (
+                "One inbound customer message processed, regardless of concerns, "
+                "runbooks, knowledge searches, tool calls, or response steps."
+            ),
         },
         "features": features,
     }

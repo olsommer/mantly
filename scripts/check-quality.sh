@@ -196,7 +196,7 @@ security_python_audit() {
   trap 'rm -f "$requirements_file"' EXIT
   run "Export locked Python production dependencies" bash -lc \
     "cd '$ROOT/backend' && uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file '$requirements_file'"
-  run "Audit Python production dependencies" uvx --from pip-audit==2.9.0 \
+  run "Audit Python production dependencies" uvx --python 3.12 --from pip-audit==2.9.0 \
     pip-audit --requirement "$requirements_file" --progress-spinner off --strict
   rm -f "$requirements_file"
   trap - EXIT

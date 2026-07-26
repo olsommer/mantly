@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "1.0",
+  "collectionMinimums": {
+    "tenants": 1,
+    "users": 1,
+    "projects": 1,
+    "project_intents": 1,
+    "knowledge_articles": 1,
+    "support_issues": 1,
+    "support_messages": 1,
+    "support_internal_notes": 1,
+    "support_outbound_messages": 1,
+    "support_action_executions": 1,
+    "support_ai_runs": 1
+  },
+  "recordChecks": [
+    {
+      "name": "tenant_project",
+      "collection": "projects",
+      "id": "project-001",
+      "requiredFields": ["tenant"]
+    },
+    {
+      "name": "ticket_timeline",
+      "collection": "support_issues",
+      "id": "ticket-001",
+      "requiredFields": ["timeline_ref"]
+    },
+    {
+      "name": "outbound_reply",
+      "collection": "support_outbound_messages",
+      "id": "outbound-001",
+      "requiredFields": ["delivery_state"]
+    },
+    {
+      "name": "runbook_knowledge",
+      "collection": "project_intents",
+      "id": "runbook-001",
+      "requiredFields": ["knowledge_ref"]
+    },
+    {
+      "name": "attachment",
+      "collection": "support_messages",
+      "id": "message-001",
+      "requiredFields": ["attachment_name", "attachment_sha256"]
+    },
+    {
+      "name": "audit_history",
+      "collection": "support_action_executions",
+      "id": "action-001",
+      "requiredFields": ["audit_ref"]
+    }
+  ]
+}

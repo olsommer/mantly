@@ -1,5 +1,8 @@
 # Restore drill evidence
 
+Template status: **Not evidence of a completed drill.** Copy, complete, approve,
+and retain a dated record. Until then issue #5 and the real-pilot gate remain open.
+
 Copy this template for every restore drill. Store customer-sensitive evidence in
 the approved restricted location and keep only redacted identifiers in the
 repository.

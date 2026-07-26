@@ -1,6 +1,6 @@
 # Data export and tenant deletion procedure
 
-Status: **Production procedure; customer-specific legal review required**
+Status: **Required procedure; executor and completed exercise evidence pending**
 
 Owner: Authorized tenant-data operator with an independent verifier
 
@@ -8,6 +8,9 @@ This procedure covers customer export, data-subject assistance, and complete
 tenant termination across the current PocketBase/application architecture and
 configured providers. It must be exercised with synthetic data before a real
 customer pilot.
+
+The repository currently supplies this procedure and an evidence template, not a
+complete deletion/export executor or a passed exercise. Issue #7 remains open.
 
 ## 1. Safety rules
 

@@ -2,12 +2,14 @@
 
 Status: **Required before real-ticket processing**
 
-Owner: Product owner with design-partner operational owner
+Owner: Product owner with the design-partner operational owner
 
-This document defines how the first Mantly design-partner pilot is measured. It
-must be completed with customer-specific targets before production traffic is
-included. Targets may not be rewritten after results are known without retaining
-the original target and recording the reason.
+This document defines the measurement and pass/fail contract for the first
+Mantly design-partner pilot. Copy `docs/pilot-targets.example.yml` into the
+customer-specific pilot folder, replace every placeholder, approve it before
+go-live, and retain that approved version. Targets may be tightened before
+approval. They may never be deleted, set to `null`, or rewritten after results
+are known.
 
 ## 1. Pilot decision
 
@@ -20,341 +22,273 @@ Technical onboarding is a prerequisite, not a successful outcome.
 
 ## 2. Minimum evidence set
 
-The default pilot evidence set is:
+A valid pilot contains:
 
 - at least **200 real, eligible tickets**;
-- one email queue or mailbox;
-- the three runbooks defined in `docs/v1-scope.md`;
-- a pre-pilot baseline from at least four representative weeks or an equivalent
-  historical sample;
-- a minimum observation window of seven calendar days after an automated outcome
-  for customer corrections or manual recovery;
-- separate reporting for each runbook and for no-match/manual tickets.
+- one selected email queue or mailbox;
+- exactly the three runbooks in `docs/v1-scope.md`;
+- a pre-pilot baseline covering at least four representative weeks;
+- at least seven calendar days of observation after each autonomous outcome;
+- separate results for each runbook and the no-match/manual population;
+- one final, schema-valid metric record for every included or excluded ticket;
+- one approved target contract and one reproducible result summary.
 
-A smaller sample requires a written exception before the pilot begins. The
-exception must explain the expected ticket volume, the confidence limitation,
-and the decision that can still be made from the smaller sample.
+A sample below 200 does not pass this pilot contract. It may produce learning,
+but it must be reported as incomplete evidence and cannot be called a passed V1
+pilot.
 
 ## 3. Ticket population
 
 ### Included tickets
 
-A ticket is eligible when:
+A ticket is eligible only when:
 
 - it entered through the selected pilot mailbox;
 - it belongs to the selected workflow;
-- the customer message and attachments are accessible under the pilot agreement;
-- it arrived during the agreed measurement window;
-- it was not created solely for testing or training.
+- its message and attachments are available under the pilot agreement;
+- it arrived during the approved measurement window;
+- it was not created for testing or training.
 
 ### Excluded tickets
 
-Exclude only tickets matching a predeclared rule, such as:
+Exclude only a ticket matching an approved machine-readable reason:
 
-- spam or malware;
-- duplicate ingestion of the same source message;
-- an outage that made the source system unavailable for all handling modes;
-- a request outside the selected workflow;
-- a customer withdrawal or legally required deletion before evaluation.
+- `spam_or_malware`;
+- `duplicate_ingestion`;
+- `workflow_out_of_scope`;
+- `source_system_outage`;
+- `customer_withdrawal_or_deletion`;
+- `synthetic_or_training`;
+- `other_preapproved`, only when the exact rule was approved before go-live.
 
-Every exclusion requires a machine-readable reason. Exclusions are reported by
-count and percentage and may not be used to hide difficult in-scope tickets.
+Report exclusion count and rate. An excluded record must not carry eligible
+outcome fields. Difficult in-scope tickets remain in every eligible-ticket
+denominator.
 
-## 4. Handling classifications
+## 4. Handling and customer-decision outcomes
 
-Each ticket receives exactly one final handling classification.
+Each ticket has exactly one schema value:
 
-| Classification | Definition |
+| Value | Meaning |
 | --- | --- |
-| **Verified autonomous** | No human changed the match, actions, response, or delivery decision; required actions and delivery succeeded; no correction or recovery occurred during the observation window; quality review passed. |
-| **Assisted** | Mantly matched, researched, acted, or drafted, but a human approved, edited, triggered, or completed material work. |
-| **Manual** | Mantly routed the ticket to a human without materially completing the work. |
-| **Failed automation** | Automation started but stopped because of technical failure, policy boundary, unsafe output, or incomplete action. The ticket may later be resolved manually. |
-| **Invalid/excluded** | The ticket met a predeclared exclusion rule. |
+| `verified_autonomous` | No human changed the match, actions, response, or delivery decision; all required actions and delivery succeeded; review passed; the observation window closed without correction or recovery. |
+| `autonomous_candidate_observing` | The automatic path completed, but the observation window or required review remains open. This never counts as verified automation or a final pilot pass. |
+| `assisted` | Mantly materially helped, but a human approved, edited, triggered, recovered, or completed work. |
+| `manual` | Mantly routed the ticket without materially completing work. |
+| `failed_automation` | Automation started but stopped because of technical failure, policy boundary, unsafe output, or incomplete action. |
+| `excluded` | The record has `eligibility: excluded` and an approved exclusion reason. |
 
-A draft accepted without edits remains assisted handling unless the pilot contract
-explicitly defines human approval as non-material. It never counts as verified
-autonomous handling.
+A human-approved draft is assisted even when sent without edits.
 
-## 5. Primary KPIs
+The customer decision is exactly one of `pay`, `continue`, `expand`, `iterate`,
+`pause`, or `stop`. `pay`, `continue`, and `expand` map to continuation score
+`1`; all other valid decisions map to `0`. Missing, `null`, free-text, and
+unknown outcomes are invalid.
 
-### 5.1 Verified full-automation rate
+## 5. Calculation rules
 
-```text
-verified autonomous tickets / all eligible tickets
-```
+- A rate denominator of zero is missing evidence, never `0%` or `100%`.
+- Missing, `null`, non-finite, or unknown KPI values fail evaluation.
+- Time starts at immutable source receipt. Reopened tickets retain the original
+  start time.
+- P90 uses the nearest-rank method on all eligible final records:
+  sorted value at rank `ceil(0.90 * count)`.
+- Baseline and pilot cost use the same population rules, EUR labour rate, and
+  allocation method.
+- Recurring pilot cost per resolved ticket equals `(human_minutes / 60 *
+  labour_cost_per_hour + llm_cost + tool_and_delivery_cost + allocated recurring
+  pilot operations cost) / resolved eligible tickets`.
+- One-time onboarding cost is reported separately and excluded from recurring
+  cost reduction.
+- Every result is computed from schema- and semantic-valid records. Invalid
+  records remain visible as validation failures; they are not silently dropped.
 
-Report overall, by runbook, by week, and with the no-match population visible.
+## 6. KPI contract
 
-Customer-specific target: `TBD before pilot`
+The YAML key is canonical for validation and reporting. Each target is numeric,
+owned, and tied to a named source in `docs/pilot-targets.example.yml`.
 
-Default evidence threshold for a first controlled pilot: **at least 20% overall**
-with no safety threshold breach. This is a learning threshold, not a commercial
-promise.
+### Primary KPIs
 
-### 5.2 Cost per resolved ticket
+| YAML key | Formula | Data source | Accountable owner | Default target |
+| --- | --- | --- | --- | --- |
+| `verified_full_automation_rate` | `verified_autonomous eligible tickets / all eligible tickets` | Validated metric export: `eligibility`, `handling_classification` | Pilot metrics owner | `>= 0.20` |
+| `recurring_cost_reduction_rate` | `(baseline recurring cost per resolved ticket - pilot recurring cost per resolved ticket) / baseline recurring cost per resolved ticket` | Approved baseline plus validated `human_minutes`, `llm_cost`, `tool_and_delivery_cost` | Finance owner | `>= 0.15` |
+| `unsafe_or_materially_incorrect_outcome_rate` | `eligible tickets marked unsafe_or_materially_incorrect / eligible tickets where Mantly materially influenced handling` | Validated metric export and required quality review | Safety review owner | `<= 0.00` |
+| `customer_continuation_score` | `1` for `pay`, `continue`, or `expand`; otherwise `0` | Signed pilot-close customer decision | Economic buyer | `>= 1` |
 
-```text
-(total human handling cost + Mantly variable cost + allocated pilot operations cost)
-/ resolved eligible tickets
-```
+### Secondary KPIs
 
-Report baseline and pilot periods using the same labour-rate assumption. Separate
-one-time onboarding cost from recurring operating cost.
+| YAML key | Formula | Data source | Accountable owner | Default target |
+| --- | --- | --- | --- | --- |
+| `runbook_match_precision` | `correct selected-runbook reviews / all reviewed tickets with a selected runbook` | `runbook_id`, `runbook_version`, `match_review` | Runbook owner | `>= 0.95` |
+| `runbook_match_coverage` | `eligible tickets with a selected runbook / all eligible tickets` | `eligibility`, `runbook_id` | Runbook owner | `>= 0.50` |
+| `draft_acceptance_rate` | `delivered drafted responses with material_edit=false / all delivered drafted responses` | `draft_generated`, `material_edit`, `delivery_status` | Support operations owner | `>= 0.70` |
+| `human_escalation_rate` | `eligible tickets with human_touch_count>0 or assisted/manual handling / all eligible tickets` | `human_touch_count`, `handling_classification` | Support operations owner | `<= 0.80` |
+| `first_response_time_p90_seconds` | P90 of `first_response_at - received_at` for eligible tickets | Required timestamps in validated metric export | Support operations owner | `<= 3600` |
+| `resolution_time_p90_seconds` | P90 of `resolved_at - received_at` for eligible tickets | Required timestamps in validated metric export | Support operations owner | `<= 86400` |
+| `failed_action_rate` | `eligible tickets with action_failures>0 / eligible tickets with action_attempts>0` | `action_attempts`, `action_failures` | Engineering owner | `<= 0.05` |
+| `manual_recovery_rate` | `autonomous candidates with recovery_required=true / all autonomous candidates` | `autonomous_candidate`, `recovery_required` | Support operations owner | `<= 0.02` |
+| `variable_ai_and_delivery_cost_per_eligible_ticket_eur` | `sum(llm_cost + tool_and_delivery_cost) / eligible tickets` | Validated cost fields | Finance owner | `<= 1.00` |
+| `variable_ai_and_delivery_cost_per_verified_autonomous_ticket_eur` | `sum(llm_cost + tool_and_delivery_cost) / verified autonomous tickets` | Validated cost and classification fields | Finance owner | `<= 5.00` |
+| `quality_review_pass_rate` | `review_result=pass / all completed required reviews` | Required review sample joined to metric export | Quality review owner | `>= 0.95` |
 
-Customer-specific target: `TBD before pilot`
+The default numbers are precommitment values for the first DACH email pilot,
+not external product promises. A customer-specific contract may tighten or
+replace a numeric value before approval, but every key, owner, source, and
+numeric target remains required.
 
-Default evidence threshold: **at least 15% recurring cost reduction** for the
-selected workflow or a credible measured path to that reduction.
+## 7. Non-negotiable guards
 
-### 5.3 Unsafe or materially incorrect outcome rate
+Every guard is evaluated in addition to every KPI.
 
-```text
-eligible tickets with an unsafe or materially incorrect Mantly outcome
-/ eligible tickets where Mantly materially influenced the outcome
-```
+| YAML key | Required result | Source | Owner |
+| --- | --- | --- | --- |
+| `critical_outcome_count` | `<= 0` | Metric export: `critical_outcome` | Safety review owner |
+| `unsafe_or_materially_incorrect_outcome_count` | `<= 0` | Metric export: `unsafe_or_materially_incorrect` | Safety review owner |
+| `tenant_isolation_incident_count` | `<= 0` | Incident register and isolation review | Security owner |
+| `duplicate_irreversible_side_effect_count` | `<= 0` | Action traces and incident register | Engineering owner |
+| `schema_validation_error_count` | `<= 0` | Evidence validator output | Pilot metrics owner |
+| `semantic_validation_error_count` | `<= 0` | Evidence validator output | Pilot metrics owner |
+| `missing_required_evidence_count` | `<= 0` | Final evidence audit | Pilot metrics owner |
+| `unknown_outcome_count` | `<= 0` | Schema validation and outcome reconciliation | Pilot metrics owner |
+| `unresolved_eligible_ticket_count` | `<= 0` | Required `resolved_at` and final handling values | Support operations owner |
+| `required_review_sample_completion_rate` | `>= 1.00` | Review sampling ledger | Quality review owner |
 
-Unsafe or materially incorrect includes:
+A critical outcome, suspected isolation incident, duplicate irreversible side
+effect, missing execution trace, or unknown runbook/outcome pauses the affected
+runbook immediately. Remediation permits a new approved pilot iteration; it does
+not retroactively convert a failed result into a pass.
 
-- an unauthorized action;
-- a policy-contradicting action or answer;
-- disclosure to the wrong customer or tenant;
-- an irreversible action without required approval;
-- a fabricated material fact or policy basis;
-- delivery of content that requires immediate manual correction;
-- duplicate side effects.
-
-Target: **0 critical outcomes**. Any critical outcome pauses the affected runbook
-until review and explicit reapproval.
-
-### 5.4 Customer continuation signal
-
-At pilot close, the economic buyer or authorized operational owner must select one:
-
-- pay and continue;
-- continue under an agreed commercial trial;
-- expand scope;
-- iterate and repeat the pilot;
-- pause;
-- stop/reject.
-
-A positive continuation signal is `pay`, `commercial trial`, or `expand`.
-
-## 6. Secondary KPIs
-
-### 6.1 Runbook match precision
-
-```text
-correct selected runbook / tickets where Mantly selected a runbook
-```
-
-A correct match is determined from the final reviewed ticket outcome. Report
-false-positive matches separately because they carry greater automation risk than
-no-match routing.
-
-Target: `TBD before pilot`; default minimum for any automatic path: **95%**.
-
-### 6.2 Runbook match coverage
-
-```text
-tickets with a selected runbook / eligible tickets
-```
-
-Coverage is not optimized at the expense of precision. No-match/manual routing is
-an acceptable safe outcome.
-
-### 6.3 Draft acceptance rate
-
-```text
-responses sent with no material human edit / responses drafted by Mantly
-```
-
-Also report minor edits and major rewrites. Define material edit before the pilot
-using either semantic review or an agreed edit-distance proxy.
-
-### 6.4 Human escalation rate
-
-```text
-eligible tickets requiring human handling / eligible tickets
-```
-
-Break down by no match, policy boundary, missing data, approval requirement,
-technical failure, and quality/safety block.
-
-### 6.5 First-response time
-
-Measure from source-channel receipt to the first customer-visible response. Report
-median, p90, and p95 for baseline and pilot.
-
-### 6.6 Resolution time
-
-Measure from source-channel receipt to the final resolved state. Report median,
-p90, and p95. Reopened tickets retain the original start time.
-
-### 6.7 Failed-action rate
-
-```text
-tickets with at least one failed external action / tickets with an attempted action
-```
-
-Report transient failures, retry exhaustion, policy blocks, and partial side
-effects separately.
-
-### 6.8 Manual recovery rate
-
-```text
-verified-autonomous candidates requiring human recovery during observation
-/ autonomous candidates
-```
-
-An outcome is not verified autonomous until the observation window closes.
-
-### 6.9 Variable AI and delivery cost
-
-Report per ticket and per verified autonomous resolution:
-
-- model input/output tokens and provider cost;
-- tool/API cost where measurable;
-- message delivery cost;
-- retry cost;
-- managed-provider markup separately from underlying provider cost.
-
-## 7. Quality review
-
-### Sampling
+## 8. Quality review
 
 Review:
 
-- 100% of failed automation, unsafe flags, customer corrections, and manual
-  recoveries;
-- 100% of autonomous outcomes for the first 50 eligible tickets;
-- after the first 50, at least 20% of autonomous outcomes with stratified sampling
-  across all three runbooks;
+- 100% of failed automation, safety flags, corrections, and recoveries;
+- 100% of the first 50 eligible tickets;
+- after ticket 50, at least 20% of autonomous outcomes, stratified across all
+  three runbooks;
 - at least 10% of assisted outcomes;
-- a random sample of no-match/manual outcomes to detect avoidable misses.
+- at least 10% of manual/no-match outcomes.
 
-### Review dimensions
+Use exactly `pass`, `minor_issue`, `major_issue`, or `critical_issue` for a
+completed review; use `not_reviewed` only outside the required sample. Record
+categories and evidence references. A required sampled ticket marked
+`not_reviewed` makes review completion less than `1.00` and fails the guard.
 
-Score each reviewed outcome on:
+Review runbook match, customer context, policy grounding, factual and action
+correctness, permission/approval compliance, completeness, tone/language,
+disclosure, delivery, trace completeness, and tenant isolation.
 
-- correct intent/runbook;
-- correct customer and business context;
-- policy grounding;
-- factual correctness;
-- action correctness;
-- permission and approval compliance;
-- response completeness;
-- tone and approved language;
-- disclosure compliance;
-- delivery success;
-- trace completeness.
+## 9. Ticket metric contract and validation
 
-Use a four-level result: `pass`, `minor issue`, `major issue`, `critical issue`.
-The reviewer records evidence and an error category, not only a score.
+`docs/pilot-metrics-schema.json` is Draft 2020-12. It rejects `null` timing and
+outcome fields, unknown or queued final delivery outcomes, mismatched
+eligibility/classification, and incomplete verified-autonomous claims.
 
-## 8. Data contract
+Semantic validation additionally rejects reversed timestamps, action failures
+above attempts, inconsistent delivery attempts, incomplete runbook identity,
+recovery without an autonomous candidate, and model usage without provider and
+model evidence.
 
-Each eligible ticket must expose or export at least:
+Validate the checked-in target template:
 
-| Field | Purpose |
-| --- | --- |
-| `ticket_id` | Stable, tenant-scoped identifier. |
-| `source_message_id` | Duplicate detection and source trace. |
-| `received_at`, `first_response_at`, `resolved_at` | Time metrics. |
-| `runbook_id`, `runbook_version`, `match_confidence` | Match evaluation. |
-| `handling_classification` | Primary outcome. |
-| `human_touch_count`, `approval_required`, `material_edit` | Assistance measurement. |
-| `action_attempts`, `action_failures`, `duplicate_side_effect` | Execution quality. |
-| `delivery_status`, `delivery_attempts` | Customer-visible completion. |
-| `review_result`, `review_categories` | Quality and safety evidence. |
-| `observation_window_end`, `recovery_required` | Autonomous verification. |
-| `model_provider`, `model_name`, `input_tokens`, `output_tokens`, `llm_cost` | Variable cost. |
-| `exclusion_reason` | Population integrity. |
+```bash
+cd backend
+uv run python -m automail.pilot_evidence \
+  --targets ../docs/pilot-targets.example.yml \
+  --allow-template-placeholders
+```
 
-Sensitive customer content is not required in the metrics export. Evidence can be
-referenced by permission-controlled IDs.
+Validate a completed pilot:
 
-## 9. Baseline method
+```bash
+cd backend
+uv run python -m automail.pilot_evidence \
+  --targets ../docs/pilots/<pilot-id>/targets.yml \
+  --results ../docs/pilots/<pilot-id>/results.yml \
+  --metrics ../docs/pilots/<pilot-id>/ticket-metrics.jsonl
+```
 
-Before the first real pilot ticket:
+The command exits nonzero when any target, KPI, guard, evidence flag, schema
+record, or semantic rule fails. `docs/pilot-results.example.yml` defines the
+required result shape; its placeholder ID is intentionally not an approved
+pilot record.
 
-1. select a representative historical period;
-2. apply the same inclusion/exclusion rules;
-3. classify tickets by the three intended runbooks and no-match;
-4. estimate or measure handling time and labour cost consistently;
-5. record first-response and resolution times;
-6. record reopen/correction rates where available;
-7. document missing baseline data and the chosen proxy.
+## 10. Instrumentation inventory
 
-The baseline dataset and assumptions are versioned with the pilot report.
+| Measurement surface | Current repository evidence | Pilot status |
+| --- | --- | --- |
+| Ticket counts/status plus average and P90 first-response/resolution time | Support Analytics reads issue and SLA timestamps. | **Partial**: usable for reconciliation, but the pilot export must preserve the frozen population and immutable receipt time. |
+| AI-needs-human, action execution, failed automation, outbound, and delivery counts | Support Analytics and support records expose these operational counts. | **Partial**: not equivalent to the required per-ticket classification and review fields. |
+| Model token usage and provider cost | LLM usage events and run metadata exist. | **Partial**: join to pilot/ticket IDs and export normalized EUR cost. |
+| Eligibility, exclusion, final handling, autonomous candidate, material edit, match review, recovery, safety/critical review, and evidence references | No complete Analytics export currently exposes this contract. | **Missing blocker**: implement and validate under [issue #6](https://github.com/olsommer/mantly/issues/6) before real-ticket measurement. |
+| Labour cost, baseline allocation, and customer continuation decision | Customer-approved baseline and signed closeout record. | **Manual source**: owner must approve and retain it with evidence. |
 
-## 10. Pre-pilot approval record
+Existing Analytics is supporting evidence, not proof that every KPI is
+instrumented. Real-ticket processing must not start until issue #6's export path
+can produce schema- and semantic-valid records for synthetic happy, no-match,
+failure, duplicate-delivery, and recovery cases.
 
-Complete this table in the customer-specific pilot folder before go-live.
+## 11. Baseline method
 
-| Item | Approved value |
-| --- | --- |
-| Customer/design-partner identifier | TBD |
-| Operational owner | TBD |
-| Economic buyer | TBD |
-| Pilot start/end | TBD |
-| Mailbox/queue | TBD |
-| Expected eligible volume | TBD |
-| Runbooks and versions | TBD |
-| Full-automation target | TBD |
-| Cost-reduction target | TBD |
-| Match-precision target | TBD |
-| Observation window | TBD |
-| Human-review sample | TBD |
-| Critical pause conditions | 0 critical unsafe/materially incorrect outcomes |
-| Approved exclusions | TBD |
-| Labour cost assumption | TBD |
-| Commercial decision date | TBD |
+Before the first real ticket:
 
-## 11. Go/no-go rules
+1. select at least four representative historical weeks;
+2. apply the same inclusion and exclusion rules;
+3. classify the three runbooks and no-match population;
+4. measure handling minutes and use the approved EUR labour rate;
+5. calculate first-response and resolution times using the same timestamp rules;
+6. calculate recurring cost per resolved ticket;
+7. record every source, assumption, proxy, and missing field;
+8. obtain product, finance, and customer operational approval.
+
+A zero or missing baseline cost cannot support cost-reduction pass.
+
+## 12. Go/no-go and pass/fail
 
 ### Start real-ticket processing only when
 
-- the V1 scope and three runbooks are approved;
-- the baseline and target table are complete;
-- security, privacy, recovery, and CI readiness are closed or have a documented
-  risk acceptance;
-- metric capture has passed a synthetic end-to-end test;
-- the operational owner knows how to pause a runbook and route tickets manually.
-
-### Pause a runbook immediately when
-
-- a critical unsafe or materially incorrect outcome occurs;
-- tenant isolation or unauthorized disclosure is suspected;
-- duplicate irreversible side effects occur;
-- required audit evidence is missing;
-- the actual runbook version cannot be identified;
-- delivery or action failures exceed the agreed operational threshold.
+- the V1 scope, mailbox, runbook versions, baseline, and completed target file
+  are approved;
+- all target and guard entries contain a numeric target, owner, and data source;
+- security, privacy, recovery, and CI readiness are accepted;
+- synthetic records pass schema and semantic validation;
+- the instrumentation blocker in issue #6 is resolved for the pilot export;
+- operators can pause a runbook and route tickets manually.
 
 ### Pilot pass
 
-A pilot passes only when:
+A pilot passes only when all conditions are true:
 
-- no critical safety threshold was breached without completed remediation and
-  reapproval;
-- the agreed automation, cost, quality, and operational thresholds are met or the
-  customer accepts a documented iteration plan;
-- the results are reproducible from the exported evidence;
-- the customer gives an explicit continuation decision.
+1. at least 200 eligible tickets have final, valid records;
+2. every required KPI value is present, finite, reproducible, and meets its
+   approved comparator and target;
+3. every guard meets its approved comparator and target;
+4. every required evidence flag is true;
+5. no eligible ticket has a missing/null time, unresolved candidate state,
+   unknown outcome, invalid enum, or validation error;
+6. required quality-review sampling is 100% complete;
+7. the customer decision is `pay`, `continue`, or `expand`.
 
-## 12. Reporting
+No missing evidence defaults to good. No average can offset a failed safety or
+quality guard. A customer-accepted iteration plan is a valid next decision, but
+the current pilot remains failed/incomplete.
 
-The final report must include:
+## 13. Reporting
 
-- scope and deviations;
+The final report includes:
+
+- approved scope, targets, owners, sources, and deviations;
 - sample and exclusions;
-- baseline and pilot KPI table;
-- runbook-level results;
+- baseline and every KPI/guard result;
+- per-runbook and no-match results;
 - confidence limitations;
-- all major/critical errors and remediation;
-- reliability and recovery events;
-- agent/operator feedback;
-- customer decision;
-- prioritized follow-up work tied to evidence.
+- every major/critical error and remediation;
+- reliability, recovery, privacy, and security events;
+- operator feedback;
+- the signed customer decision;
+- follow-up work tied to evidence.
 
-Use `docs/pilots/template/` once the pilot evidence package is merged.
+Keep the approved targets, result YAML, validator output, privacy-minimized
+metric export, and report together in the customer-specific pilot folder.

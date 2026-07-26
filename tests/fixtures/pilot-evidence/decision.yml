@@ -11,9 +11,8 @@ conditions:
 commercial_terms_reference: "fixture:commercial-terms"
 next_decision_date: "2026-08-15"
 evidence_refs:
-  - "summary.json"
-  - "summary.md"
   - "report.md"
+  - "risk-register.md"
   - "fixture:customer-decision"
 approvals:
   customer_economic_buyer: "synthetic-economic-buyer"

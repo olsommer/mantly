@@ -2,6 +2,10 @@
 
 Status: **Pre-pilot evidence template**
 
+Completion status: **Not completed.** This template is not proof of execution.
+Record a passed result in `lifecycle-exercise-status.json` only after independent
+verification. Until then issue #7 and real-customer processing remain open.
+
 This exercise proves the configured release can isolate, export, delete, and keep
 deleted data inaccessible after an older backup is restored. Use synthetic data
 only. Store detailed logs in the approved evidence location.

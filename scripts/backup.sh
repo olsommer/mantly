@@ -44,11 +44,11 @@ compose() {
 container_for() {
   local service="$1"
   local id
-  id="$(compose ps -q "$service")"
+  id="$(compose ps --all -q "$service")"
   if [[ -z "$id" ]]; then
     log "Creating $service container so its durable mount can be discovered"
     compose create "$service" >/dev/null
-    id="$(compose ps -q "$service")"
+    id="$(compose ps --all -q "$service")"
   fi
   [[ -n "$id" ]] || fail "Unable to resolve container for service: $service"
   printf '%s\n' "$id"
@@ -139,8 +139,8 @@ if is_running "$APP_CONTAINER"; then APP_WAS_RUNNING=true; fi
 if is_running "$PB_CONTAINER"; then PB_WAS_RUNNING=true; fi
 
 log "Stopping application writers for a consistent snapshot"
-compose stop app pocketbase >/dev/null
 SERVICES_STOPPED=true
+compose stop app pocketbase >/dev/null
 
 archive_mount "$PB_VOLUME" pocketbase-data.tar.gz
 archive_mount "$APP_VOLUME" application-data.tar.gz
@@ -208,7 +208,10 @@ else
   log "WARNING: producing an unencrypted local-drill backup" >&2
 fi
 
-sha256sum "$FINAL_BUNDLE" > "$FINAL_BUNDLE.sha256"
+(
+  cd "$OUTPUT_DIR"
+  sha256sum "$(basename "$FINAL_BUNDLE")" > "$(basename "$FINAL_BUNDLE").sha256"
+)
 chmod 600 "$FINAL_BUNDLE" "$FINAL_BUNDLE.sha256"
 
 restart_services

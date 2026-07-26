@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "advisory": "GHSA-QWWW-VCR4-C8H2",
+      "packages": [
+        "react-router"
+      ],
+      "applications": [
+        "admin",
+        "addin"
+      ],
+      "expiresOn": "2026-08-26",
+      "justification": "Admin and add-in are client-only Vite SPAs. They do not enable React Server Components mode, server actions, or React Router framework request handlers, so the affected pre-validation RSC action path is absent. React Router 7.18.1 is retained because the registry offers no release that fixes this advisory without restoring multiple older high-severity vulnerabilities."
+    }
+  ]
+}

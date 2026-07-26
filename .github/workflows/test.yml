@@ -40,12 +40,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Ruff
-        working-directory: backend
-        run: uv run ruff check automail tests ../e2e
-
-      - name: Strict Pyright
-        working-directory: backend
-        run: uv run pyright
+        run: ./scripts/check-quality.sh backend-lint
 
   backend-tests:
     name: Backend test suite and coverage
@@ -65,31 +60,17 @@ jobs:
         working-directory: backend
         run: uv sync --frozen
 
-      - name: Collect all tests
-        working-directory: backend
-        run: uv run pytest tests --collect-only -q
-
-      - name: Run full backend suite with coverage
-        working-directory: backend
-        run: >
-          uv run pytest tests
-          --cov=automail
-          --cov-branch
-          --cov-report=term-missing:skip-covered
-          --cov-report=xml:coverage.xml
-          --cov-fail-under=60
-          -ra
-
-      - name: Check support package readiness
-        working-directory: backend
-        run: uv run python -m automail.support.package_gate --root ..
+      - name: Run canonical backend tests and coverage contract
+        run: ./scripts/check-quality.sh backend-tests
 
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: backend-coverage
-          path: backend/coverage.xml
+          path: |
+            backend/coverage.xml
+            backend/coverage.json
           if-no-files-found: error
           retention-days: 14
 
@@ -98,31 +79,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build PocketBase image
-        run: docker build -f pocketbase/Dockerfile -t mantly-pocketbase-integration .
-
-      - name: Start PocketBase
-        run: >
-          docker run -d --name mantly-pocketbase-integration
-          -p 18090:8090
-          -e PB_ADMIN_EMAIL=integration@example.com
-          -e PB_ADMIN_PASSWORD=integration-password-123456
-          mantly-pocketbase-integration
-
-      - name: Wait for PocketBase superuser
-        run: |
-          set -euo pipefail
-          for attempt in {1..60}; do
-            if curl -fsS -X POST http://127.0.0.1:18090/api/collections/_superusers/auth-with-password \
-              -H 'Content-Type: application/json' \
-              --data '{"identity":"integration@example.com","password":"integration-password-123456"}' >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs mantly-pocketbase-integration
-          exit 1
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -136,43 +92,8 @@ jobs:
         working-directory: backend
         run: uv sync --frozen
 
-      - name: Bootstrap schema twice to prove idempotency
-        working-directory: backend
-        env:
-          PB_URL: http://127.0.0.1:18090
-          PB_ADMIN_EMAIL: integration@example.com
-          PB_ADMIN_PASSWORD: integration-password-123456
-        run: |
-          uv run python -c 'from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema; ensure_app_collections_schema()'
-          uv run python -c 'from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema; ensure_app_collections_schema()'
-
-      - name: Run PocketBase/bootstrap tests
-        working-directory: backend
-        env:
-          PB_URL: http://127.0.0.1:18090
-          PB_ADMIN_EMAIL: integration@example.com
-          PB_ADMIN_PASSWORD: integration-password-123456
-        run: >
-          uv run pytest
-          tests/test_pb_bootstrap.py
-          tests/test_tenant_isolation.py
-          -v
-
-      - name: Prove atomic delivery claim and fenced completion
-        working-directory: backend
-        env:
-          PB_DELIVERY_HOOK_TEST_URL: http://127.0.0.1:18090
-          PB_DELIVERY_HOOK_TEST_EMAIL: integration@example.com
-          PB_DELIVERY_HOOK_TEST_PASSWORD: integration-password-123456
-        run: uv run pytest tests/test_support_delivery_hook_integration.py -v
-
-      - name: PocketBase logs
-        if: failure()
-        run: docker logs mantly-pocketbase-integration
-
-      - name: Stop PocketBase
-        if: always()
-        run: docker rm -f mantly-pocketbase-integration
+      - name: Run canonical clean, existing-snapshot, isolation, and fencing contract
+        run: ./scripts/check-quality.sh pocketbase
 
   frontend-quality:
     name: Frontend quality (${{ matrix.app }})
@@ -196,13 +117,8 @@ jobs:
         working-directory: ${{ matrix.app }}
         run: npm ci
 
-      - name: Lint
-        working-directory: ${{ matrix.app }}
-        run: npm run lint
-
-      - name: Build
-        working-directory: ${{ matrix.app }}
-        run: npm run build
+      - name: Run canonical frontend contract
+        run: ./scripts/check-quality.sh frontend ${{ matrix.app }}
 
   auth-e2e:
     name: Auth and tenant lifecycle E2E
@@ -244,11 +160,10 @@ jobs:
         working-directory: addin
         run: npx playwright install --with-deps chromium
 
-      - name: Run real auth lifecycle against PocketBase, API, add-in, and admin
-        working-directory: addin
+      - name: Run real auth and Admin Inbox lifecycles
         env:
           CI: "true"
-        run: npm run test:e2e:auth
+        run: ./scripts/check-quality.sh e2e
 
       - name: Upload Playwright report
         if: always()
@@ -268,6 +183,7 @@ jobs:
             /tmp/mantly-auth-e2e-backend.log
             /tmp/mantly-auth-e2e-addin.log
             /tmp/mantly-auth-e2e-admin.log
+            /tmp/mantly-auth-e2e-delivery-stub.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -277,14 +193,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build combined production image
-        run: docker build -t mantly-test .
-
-      - name: Build SaaS API image
-        run: docker build -f Dockerfile.api -t mantly-api-test .
-
-      - name: Build PocketBase image
-        run: docker build -f pocketbase/Dockerfile -t mantly-pocketbase-test .
+      - name: Run canonical production image contract
+        run: ./scripts/check-quality.sh images
 
   repository-contract:
     name: Repository contract
@@ -292,23 +202,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify required production-readiness assets
-        run: |
-          set -euo pipefail
-          test -x scripts/check-quality.sh
-          test -s README.md
-          test -s PILOT_RUNBOOK.md
-          test -s docs/v1-scope.md
-          test -s docs/pilot-success-criteria.md
-          test -s docs/pilot-metrics-schema.json
-          test -s docs/merge-order.md
-          test -s SECURITY.md
-          python -m json.tool docs/pilot-metrics-schema.json >/dev/null
-
-      - name: Reject newly introduced legacy image name
-        run: |
-          set -euo pipefail
-          if grep -R --line-number --exclude-dir=.git --exclude='merge-order.md' 'isarai-test' .; then
-            echo 'Legacy isarai-test image name is forbidden.' >&2
-            exit 1
-          fi
+      - name: Run canonical repository contract
+        run: ./scripts/check-quality.sh repository

@@ -25,10 +25,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Scan repository history and pull-request changes
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run canonical secret scan
+        run: ./scripts/check-quality.sh security-secret
 
   python-dependency-audit:
     name: Python production dependency audit
@@ -41,25 +39,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install audit tooling
-        run: python -m pip install --disable-pip-version-check uv pip-audit
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv
 
-      - name: Export locked production requirements
-        working-directory: backend
-        run: >
-          uv export
-          --frozen
-          --no-dev
-          --no-emit-project
-          --format requirements-txt
-          --output-file /tmp/mantly-production-requirements.txt
-
-      - name: Audit locked production requirements
-        run: >
-          pip-audit
-          --requirement /tmp/mantly-production-requirements.txt
-          --progress-spinner off
-          --strict
+      - name: Run canonical Python production dependency audit
+        run: ./scripts/check-quality.sh security-python
 
   node-dependency-audit:
     name: Node production audit (${{ matrix.app }})
@@ -83,9 +67,8 @@ jobs:
         working-directory: ${{ matrix.app }}
         run: npm ci --ignore-scripts
 
-      - name: Audit production dependencies
-        working-directory: ${{ matrix.app }}
-        run: npm audit --omit=dev --audit-level=high
+      - name: Run canonical Node production dependency audit
+        run: ./scripts/check-quality.sh security-node ${{ matrix.app }}
 
   dockerfile-and-compose-scan:
     name: Container configuration scan
@@ -93,14 +76,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Scan repository configuration
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: "config"
-          scan-ref: "."
-          severity: "HIGH,CRITICAL"
-          exit-code: "1"
-          hide-progress: true
+      - name: Run canonical container and repository configuration scan
+        run: ./scripts/check-quality.sh security-config
 
   security-policy-check:
     name: Security policy contract
@@ -108,18 +85,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify required security documentation
-        run: |
-          set -euo pipefail
-          test -s SECURITY.md
-          test -s docs/security/threat-model.md
-          test -s docs/security/incident-response.md
-          test -s docs/security/data-retention.md
-          test -s docs/security/credential-rotation-and-break-glass.md
-          grep -q "tenant isolation" docs/security/threat-model.md
-          grep -q "Required permission" docs/security/threat-model.md
-          grep -q "5.12 Backup/recovery" docs/security/threat-model.md
-          grep -q "duplicate side effects" docs/security/incident-response.md
-          grep -q "Maximum planned overlap: 24 hours" docs/security/credential-rotation-and-break-glass.md
-          grep -q "Access lifetime: maximum 60 minutes" docs/security/credential-rotation-and-break-glass.md
-          grep -q "Backups" docs/security/data-retention.md
+      - name: Run canonical security policy contract
+        run: ./scripts/check-quality.sh security-policy

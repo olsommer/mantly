@@ -2757,6 +2757,8 @@ def _advance_processing_run(
     label: str,
     detail: str = "",
 ) -> dict[str, Any] | None:
+    if run is None:
+        return None
     run_id = _string_from((run or {}).get("id"))
     if not run_id:
         return run
@@ -2835,6 +2837,8 @@ def _finish_processing_run(
     failed: bool = False,
     detail: str = "",
 ) -> dict[str, Any] | None:
+    if run is None:
+        return None
     run_id = _string_from((run or {}).get("id"))
     if not run_id:
         return run
@@ -4722,7 +4726,7 @@ def _default_issue_assignee(
     channel: dict[str, Any] | None = None,
     queue_key: str = "",
 ) -> str:
-    channel_config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    channel_config = _record_from(channel.get("config")) if isinstance(channel, dict) else {}
     for key in ("defaultAssigneeEmail", "default_assignee_email", "assigneeEmail", "assignee_email"):
         value = _string_from(channel_config.get(key))
         if value:
@@ -4755,7 +4759,7 @@ def _default_issue_assignee(
         policy = get_sla_policy(tenant_id=tenant_id, project_id=project_id)
     except Exception:
         return ""
-    metadata = policy.get("metadata") if isinstance(policy.get("metadata"), dict) else {}
+    metadata = _record_from(policy.get("metadata"))
     for key in ("defaultAssigneeEmail", "default_assignee_email", "assigneeEmail", "assignee_email"):
         value = _string_from(metadata.get(key))
         if value:
@@ -5133,7 +5137,7 @@ def _default_issue_queue(
     project_id: str,
     channel: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    channel_config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    channel_config = _record_from(channel.get("config")) if isinstance(channel, dict) else {}
     queue_key, queue_name = _queue_from_config(channel_config)
     if queue_key:
         return queue_key, queue_name
@@ -5141,7 +5145,7 @@ def _default_issue_queue(
         policy = get_sla_policy(tenant_id=tenant_id, project_id=project_id)
     except Exception:
         return DEFAULT_QUEUE_KEY, DEFAULT_QUEUE_NAME
-    metadata = policy.get("metadata") if isinstance(policy.get("metadata"), dict) else {}
+    metadata = _record_from(policy.get("metadata"))
     queue_key, queue_name = _queue_from_config(metadata)
     if queue_key:
         return queue_key, queue_name
@@ -5708,7 +5712,7 @@ def _notify_reply_approval_required(
         if admin_only_output
         else _clip(_string_from(reply.get("body")), 180) or subject
     )
-    metadata = {
+    metadata: dict[str, Any] = {
         "replyId": reply_id,
         "replyStatus": _string_from(reply.get("status")),
         "source": _string_from(reply_metadata.get("source")),
@@ -9003,7 +9007,7 @@ def _reply_readiness(
     channel_record: dict[str, Any] | None = None
     if channel_key and channel != "web_chat":
         channel_record = get_channel_by_key(channel_key, tenant_id=tenant_id, project_id=project_id) or None
-    channel_config = channel_record.get("config") if isinstance(channel_record, dict) and isinstance(channel_record.get("config"), dict) else {}
+    channel_config = _record_from(channel_record.get("config")) if isinstance(channel_record, dict) else {}
     if channel == "email" and channel_key:
         channel_config = {**channel_config}
         channel_config.setdefault("outboundWebhookUrlEnv", "SUPPORT_EMAIL_OUTBOUND_WEBHOOK_URL")
@@ -11007,7 +11011,7 @@ def _agent_citation_preview(
         and _string_from(item.get("articleId")) == article_id
         and _string_from(item.get("path"))
     ]
-    preview = {
+    preview: dict[str, Any] = {
         "id": article_id,
         "title": _string_from(normalized.get("title")),
         "body": (
@@ -11981,38 +11985,48 @@ def create_issue_agent_answer(
             label="Loading ticket context",
             metadata={"question": _clip(_string_from(question), 4_000), "createdBy": author_email},
         )
-    kwargs = {
-        "tenant_id": tenant_id,
-        "project_id": project_id,
-        "author_email": author_email,
-        "question": question,
-        "create_draft": create_draft,
-        "include_feedback_link": include_feedback_link,
-        "automation_context": automation_context,
-        "approval_required": approval_required,
-        "revision_context": revision_context,
-        "auto_send": auto_send,
-        "use_knowledge_agent": use_knowledge_agent,
-        "knowledge_actor_role": knowledge_actor_role,
-        "processing_run": processing_run,
-        "reuse_processing_run": bool(own_processing_run and processing_run),
-    }
     try:
         existing_collector = current_collector()
         if existing_collector is not None:
             result = _create_issue_agent_answer(
                 issue_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                author_email=author_email,
+                question=question,
+                create_draft=create_draft,
+                include_feedback_link=include_feedback_link,
+                automation_context=automation_context,
+                approval_required=approval_required,
+                revision_context=revision_context,
+                auto_send=auto_send,
+                use_knowledge_agent=use_knowledge_agent,
+                knowledge_actor_role=knowledge_actor_role,
                 usage_collector=existing_collector,
                 usage_event_start=len(existing_collector.events),
-                **kwargs,
+                processing_run=processing_run,
+                reuse_processing_run=bool(own_processing_run and processing_run),
             )
         else:
             with collect_llm_usage() as collector:
                 result = _create_issue_agent_answer(
                     issue_id,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    author_email=author_email,
+                    question=question,
+                    create_draft=create_draft,
+                    include_feedback_link=include_feedback_link,
+                    automation_context=automation_context,
+                    approval_required=approval_required,
+                    revision_context=revision_context,
+                    auto_send=auto_send,
+                    use_knowledge_agent=use_knowledge_agent,
+                    knowledge_actor_role=knowledge_actor_role,
                     usage_collector=collector,
                     usage_event_start=0,
-                    **kwargs,
+                    processing_run=processing_run,
+                    reuse_processing_run=bool(own_processing_run and processing_run),
                 )
     except Exception as exc:
         if own_processing_run:
@@ -12069,7 +12083,7 @@ def _create_issue_agent_answer(
     requested_auto_send = bool(auto_send)
     clean_automation_context = _compact_metadata_context(automation_context)
     clean_revision_context = _compact_metadata_context(revision_context, default_source="reply_revision")
-    messages = issue.get("messages") if isinstance(issue.get("messages"), list) else []
+    messages = _list_records_from(issue.get("messages"))
     prior_agent_runs = _agent_answer_runs_for_context(issue)
     prior_agent_run_ids = [_string_from(run.get("id")) for run in prior_agent_runs if _string_from(run.get("id"))]
     account_context = _agent_account_context(issue, tenant_id=tenant_id, project_id=project_id)
@@ -12114,19 +12128,6 @@ def _create_issue_agent_answer(
         conversation_context=conversation_context,
     )
     fallback_confidence = "high" if fallback_articles else "medium" if messages else "low"
-    draft_kwargs = {
-        "issue": issue,
-        "messages": messages,
-        "question": question,
-        "prior_agent_runs": prior_agent_runs,
-        "account_context": account_context,
-        "conversation_context": conversation_context,
-        "tenant_id": tenant_id,
-        "project_id": project_id,
-        "fallback_answer": fallback_answer,
-        "fallback_confidence": fallback_confidence,
-        "on_late_usage": usage_sink.report_late,
-    }
     _require_processing_claim(processing_run)
     _advance_processing_run(
         processing_run,
@@ -12136,13 +12137,33 @@ def _create_issue_agent_answer(
     _require_processing_claim(processing_run)
     if use_knowledge_agent:
         draft = draft_issue_agent_answer(
+            issue=issue,
+            messages=messages,
+            question=question,
             articles=knowledge_corpus,
-            **draft_kwargs,
+            prior_agent_runs=prior_agent_runs,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            fallback_answer=fallback_answer,
+            fallback_confidence=fallback_confidence,
+            account_context=account_context,
+            conversation_context=conversation_context,
+            on_late_usage=usage_sink.report_late,
         )
     else:
         draft = draft_issue_automation_answer(
+            issue=issue,
+            messages=messages,
+            question=question,
             articles=fallback_articles,
-            **draft_kwargs,
+            prior_agent_runs=prior_agent_runs,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            fallback_answer=fallback_answer,
+            fallback_confidence=fallback_confidence,
+            account_context=account_context,
+            conversation_context=conversation_context,
+            on_late_usage=usage_sink.report_late,
         )
     _require_processing_claim(processing_run)
     if draft.requires_human:
@@ -12326,11 +12347,7 @@ def _create_issue_agent_answer(
         _require_processing_claim(processing_run)
         if refreshed_issue:
             issue = refreshed_issue
-            messages = (
-                issue.get("messages")
-                if isinstance(issue.get("messages"), list)
-                else []
-            )
+            messages = _list_records_from(issue.get("messages"))
             conversation_context = _agent_conversation_context(issue)
             clean_approval_required = bool(
                 clean_approval_required
@@ -12413,12 +12430,22 @@ def _create_issue_agent_answer(
                 ),
             )
             repair_draft = draft_issue_automation_answer(
+                issue=issue,
+                messages=messages,
+                question=question,
                 articles=fallback_articles,
+                prior_agent_runs=prior_agent_runs,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                fallback_answer=fallback_answer,
+                fallback_confidence=fallback_confidence,
+                account_context=account_context,
+                conversation_context=conversation_context,
                 coverage_repair_answer=original_answer,
                 coverage_repair_obligations=grounding_assessment.uncovered_obligations,
                 grounding_repair_unsupported_claims=grounding_assessment.unsupported_claims,
                 grounding_repair_contradictions=grounding_assessment.contradictions,
-                **draft_kwargs,
+                on_late_usage=usage_sink.report_late,
             )
             _require_processing_claim(processing_run)
             coverage_repair.update(
@@ -12532,9 +12559,10 @@ def _create_issue_agent_answer(
                     )
                     _require_processing_claim(processing_run)
                     grounding_gate = grounding_assessment.as_metadata()
-                if not grounding_assessment.verified:
+                if not bool(grounding_gate.get("verified")):
                     auto_send_blocked_reason = (
-                        grounding_assessment.reason_code or "grounding_check_failed"
+                        _string_from(grounding_gate.get("reasonCode"))
+                        or "grounding_check_failed"
                     )
                 else:
                     apply_grounded_citations()
@@ -13123,7 +13151,7 @@ def prepare_issue_custom_fields(
     _require_processing_claim(processing_run)
     extraction = draft_issue_field_values(
         issue=issue,
-        messages=issue.get("messages") if isinstance(issue.get("messages"), list) else [],
+        messages=_list_records_from(issue.get("messages")),
         field_definitions=field_definitions,
         current_fields=current_fields,
         tenant_id=tenant_id,
@@ -13465,7 +13493,7 @@ def prepare_issue_triage(
     _require_processing_claim(processing_run)
     suggestion = draft_issue_triage(
         issue=issue,
-        messages=issue.get("messages") if isinstance(issue.get("messages"), list) else [],
+        messages=_list_records_from(issue.get("messages")),
         queues=queues,
         assignee_candidates=assignee_candidates,
         tenant_id=tenant_id,
@@ -13832,7 +13860,7 @@ def _channel_auto_prepare_agent_reply(
     if _automation_created_customer_reply(automation_result):
         _finish_processing_run(processing_run, detail="Automation prepared the customer reply")
         return None
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     enabled = _config_bool(
         config,
         "autoPrepareAgentReplyOnUpdate" if on_update else "autoPrepareAgentReply",
@@ -15547,6 +15575,13 @@ def create_manual_issue(
         "tags": [],
         "latest_message_at": now,
     }
+    channel_key = _string_from(
+        channel.get("channelKey") or channel.get("channel_key")
+        if isinstance(channel, dict)
+        else ""
+    )
+    if channel_key:
+        issue_data["metadata"] = {"channelKey": channel_key}
     if explicit_queue_key:
         issue_data["queue_key"] = explicit_queue_key
         issue_data["queue_name"] = _queue_name_from(explicit_queue_key, queue_name)
@@ -17627,7 +17662,7 @@ def _reply_channel_context(issue: dict[str, Any]) -> dict[str, Any]:
         value = _string_from(issue_metadata.get(key))
         if value and not context.get(key):
             context[key] = value
-    messages = issue.get("messages") if isinstance(issue.get("messages"), list) else []
+    messages = _list_records_from(issue.get("messages"))
     for message in reversed(messages):
         if _string_from(message.get("direction")) not in {"customer", "agent", "visitor"}:
             continue
@@ -18476,15 +18511,15 @@ def deliver_issue_reply(
     claimed_outbound = _record_from(claim.get("outbound"))
     if claimed_outbound:
         rec = {**rec, **claimed_outbound}
-    metadata = {
-        **_parse(rec.get("metadata"), dict),
+    metadata: dict[str, Any] = {
+        **_record_from(_parse(rec.get("metadata"), dict)),
         "deliveryAttemptKey": attempt_key,
     }
 
     attempt_started_at = _string_from(claim.get("claimed_at")) or _now_iso()
     result_metadata: dict[str, Any] | None = None
     if channel_name == "email":
-        channel_config = delivery_channel.get("config") if isinstance(delivery_channel, dict) and isinstance(delivery_channel.get("config"), dict) else {}
+        channel_config = _record_from(delivery_channel.get("config")) if isinstance(delivery_channel, dict) else {}
         if delivery_channel_key:
             channel_config = {**channel_config}
             if not _string_from(channel_config.get("outboundWebhookUrlEnv") or channel_config.get("outbound_webhook_url_env")):
@@ -18498,7 +18533,7 @@ def deliver_issue_reply(
             from_address=_string_from(rec.get("from_address")),
             subject=_string_from(rec.get("subject")),
             body=_string_from(rec.get("body")),
-            attachments=metadata.get("attachments") if isinstance(metadata.get("attachments"), list) else [],
+            attachments=_list_records_from(metadata.get("attachments")),
             channel_config=channel_config,
             metadata=metadata,
             secrets=runtime_secrets,
@@ -18524,7 +18559,7 @@ def deliver_issue_reply(
     else:
         channel_key = delivery_channel_key or channel_name
         channel = delivery_channel if delivery_channel is not None else get_channel_by_key(channel_key, tenant_id=tenant_id, project_id=project_id) or {}
-        channel_config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+        channel_config = _record_from(channel.get("config"))
         runtime_secrets = load_runtime_secrets(tenant_id, project_id)
         result = send_support_channel_reply(
             message_id=_string_from(rec.get("id")),
@@ -20946,7 +20981,7 @@ def _slack_event_from_payload(payload: Any) -> tuple[dict[str, Any], dict[str, A
 
 
 def _slack_team_id(payload: dict[str, Any], event: dict[str, Any], channel: dict[str, Any]) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     authorizations = payload.get("authorizations")
     auth_team_id = ""
     if isinstance(authorizations, list) and authorizations and isinstance(authorizations[0], dict):
@@ -20969,7 +21004,7 @@ def _slack_event_ignored(event: dict[str, Any], channel: dict[str, Any], *, has_
         return f"Ignored Slack message subtype: {subtype}"
     if event.get("bot_id"):
         return "Ignored Slack bot message"
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     bot_user_id = _string_from(config.get("botUserId") or config.get("bot_user_id"))
     if bot_user_id and _string_from(event.get("user")) == bot_user_id:
         return "Ignored Slack self message"
@@ -20985,7 +21020,7 @@ def _slack_identity(
     user_id: str,
     channel: dict[str, Any],
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     user_names = config.get("userNames")
     contact_name = _string_from(user_names.get(user_id)) if isinstance(user_names, dict) else ""
     contact_name = contact_name or user_id or "Slack user"
@@ -21017,7 +21052,7 @@ def _channel_subject(text: str, *, provider: str, channel_id: str, thread_id: st
 
 
 def _ticket_creation_mode(channel: dict[str, Any]) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     raw = _event_token(
         _string_from(
             config.get("ticketCreationMode")
@@ -21277,11 +21312,12 @@ def ingest_slack_event(
         project_id=channel_project_id,
     )
     now = _now_iso()
+    issue_data: dict[str, Any] = {}
     if existing_issue:
         issue_id = _string_from(existing_issue.get("id"))
     else:
         issue_id = generate_id()
-        issue_data: dict[str, Any] = {
+        issue_data = {
             "id": issue_id,
             "source_email_id": source_issue_id,
             "channel": "slack",
@@ -21527,7 +21563,7 @@ def _teams_channel_data(activity: dict[str, Any]) -> dict[str, Any]:
 
 
 def _teams_team_id(activity: dict[str, Any], channel: dict[str, Any]) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     channel_data = _teams_channel_data(activity)
     team = _record_from(channel_data.get("team"))
     return (
@@ -21593,7 +21629,7 @@ def _teams_event_ignored(activity: dict[str, Any], channel: dict[str, Any], *, h
     text = _teams_text(activity)
     if not text and not has_attachments:
         return "Ignored Teams message without text"
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     bot_user_id = _string_from(config.get("botUserId") or config.get("bot_user_id"))
     user_id, _user_name = _teams_sender(activity)
     if bot_user_id and user_id == bot_user_id:
@@ -21609,7 +21645,7 @@ def _teams_identity(
     user_name: str,
     channel: dict[str, Any],
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     contact_key = f"teams:{team_id}:{user_id or channel_id}"
     identity = {
         "account_name": _string_from(config.get("teamName") or config.get("team_name")) or f"Teams workspace {team_id}",
@@ -21733,11 +21769,12 @@ def ingest_teams_event(
         project_id=channel_project_id,
     )
     now = _now_iso()
+    issue_data: dict[str, Any] = {}
     if existing_issue:
         issue_id = _string_from(existing_issue.get("id"))
     else:
         issue_id = generate_id()
-        issue_data: dict[str, Any] = {
+        issue_data = {
             "id": issue_id,
             "source_email_id": source_issue_id,
             "channel": "teams",
@@ -22196,7 +22233,7 @@ def _run_message_update_automations(
     message_id: str = "",
     context: dict[str, Any] | None = None,
     processing_run: dict[str, Any] | None = None,
-) -> None:
+) -> dict[str, Any]:
     run_context = {
         "event": "message_received",
         "source": source,
@@ -22415,7 +22452,7 @@ def _execute_automation_actions(
                 default=False,
             )
             automation_context = action_context
-            reply_metadata = {
+            reply_metadata: dict[str, Any] = {
                 "approvalRequired": approval_required,
                 "automationContext": automation_context,
             }
@@ -22645,7 +22682,7 @@ def _execute_automation_actions(
             proposed_action = action.get("proposedAction") or action.get("proposed_action")
             if not isinstance(proposed_action, dict):
                 proposed_action = {}
-            action_result = action.get("result") if isinstance(action.get("result"), dict) else {}
+            action_result = _record_from(action.get("result"))
             if approval_required:
                 action_result = {
                     **action_result,
@@ -22897,7 +22934,7 @@ def _automation_preview_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def _combine_automation_preview_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    combined = {
+    combined: dict[str, Any] = {
         "matchedActions": 0,
         "approvalActions": 0,
         "directTicketMutations": 0,
@@ -22919,9 +22956,7 @@ def _combine_automation_preview_summaries(summaries: list[dict[str, Any]]) -> di
             "ungatedActions",
         ):
             combined[key] += int(summary.get(key) or 0)
-        for warning in summary.get("warnings") if isinstance(summary.get("warnings"), list) else []:
-            if not isinstance(warning, dict):
-                continue
+        for warning in _list_records_from(summary.get("warnings")):
             warning_key = _string_from(warning.get("key")) or _string_from(warning.get("label"))
             if not warning_key:
                 continue
@@ -23254,7 +23289,7 @@ def run_sla_breach_escalations_for_scope(
         issue_id = _string_from(event.get("issue"))
         event_type = _string_from(event.get("event_type"))
         target_at = _string_from(event.get("target_at"))
-        item = {
+        item: dict[str, Any] = {
             "slaEventId": event_id,
             "issueId": issue_id,
             "eventType": event_type,
@@ -24856,7 +24891,7 @@ def _channel_event_type(event: dict[str, Any]) -> str:
 
 
 def _channel_provider(event: dict[str, Any], channel: dict[str, Any]) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     return (
         _first_string(event, ("provider", "source", "adapter"))
         or _string_from(channel.get("type"))
@@ -25429,7 +25464,7 @@ def _generic_sender_identity(
         or _first_string(record, ("senderEmail", "sender_email", "fromAddress", "from_address", "email"))
     )
     contact_email = sender_email or f"{_event_token(provider) or 'channel'}:{workspace_id}:{sender_id}"
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     _unused_channel_id, _unused_workspace_id, channel_title = _generic_channel_identity(event, record, channel)
     account_name = (
         _first_string(config, ("workspaceName", "workspace_name", "guildName", "guild_name", "teamName", "team_name", "accountName", "account_name"))
@@ -25539,11 +25574,12 @@ def _ingest_generic_channel_message_event(
         project_id=project_id,
     )
     now = _now_iso()
+    issue_data: dict[str, Any] = {}
     if existing_issue:
         issue_id = _string_from(existing_issue.get("id"))
     else:
         issue_id = generate_id()
-        issue_data: dict[str, Any] = {
+        issue_data = {
             "id": issue_id,
             "source_email_id": source_issue_id,
             "channel": provider_key,
@@ -25762,7 +25798,7 @@ def _ingest_generic_channel_message_event(
     )
     if issue_was_existing:
         _notify_customer_message_subscribers(
-            issue={**existing_issue, **issue_updates},
+            issue={**(existing_issue or {}), **issue_updates},
             issue_id=issue_id,
             source=provider_key,
             message_id=source_message_id,
@@ -26720,7 +26756,11 @@ def list_public_knowledge_articles(
     query_tokens = _text_tokens(clean_query)
     scored: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for article in visible:
-        match = _score_knowledge_article_match(article, clean_query, query_tokens)
+        match: dict[str, Any] = _score_knowledge_article_match(
+            article,
+            clean_query,
+            query_tokens,
+        )
         title = _string_from(article.get("title")).lower()
         body = _string_from(article.get("body")).lower()
         tags = " ".join(_string_from(tag).lower() for tag in _parse(article.get("tags"), list))

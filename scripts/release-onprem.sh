@@ -17,6 +17,26 @@ PLATFORMS="linux/amd64,linux/arm64"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 
+resolve_python() {
+    local candidate
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        "$PYTHON_BIN" --version >/dev/null 2>&1 || {
+            echo "Configured PYTHON_BIN is not executable: $PYTHON_BIN" >&2
+            exit 69
+        }
+        printf '%s\n' "$PYTHON_BIN"
+        return
+    fi
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    echo "Python 3 is required; set PYTHON_BIN to an executable interpreter." >&2
+    exit 69
+}
+
 validate_version() {
     if [ -n "$VERSION" ] && [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
         echo "Invalid VERSION '$VERSION'. Use a Docker tag: letters, numbers, underscore, dot, or dash; max 128 chars." >&2
@@ -33,6 +53,7 @@ validate_registry() {
 
 validate_version
 validate_registry
+PYTHON_COMMAND="$(resolve_python)"
 
 # Determine tags
 APP_IMAGE="$REGISTRY/isarai-email-agent"
@@ -60,7 +81,7 @@ echo "=== Checking support package readiness ==="
 if command -v uv >/dev/null 2>&1; then
     (cd "$ROOT/backend" && uv run python -m automail.support.package_gate --root "$ROOT")
 else
-    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -m automail.support.package_gate --root "$ROOT"
+    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" -m automail.support.package_gate --root "$ROOT"
 fi
 
 # Ensure buildx builder exists

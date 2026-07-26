@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import copy
 import hmac
+import math
 import os
 import re
 import threading
@@ -13,7 +14,7 @@ import uuid
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, TypeVar, cast
+from typing import Any, Callable, Mapping, TypeVar
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from starlette.middleware.base import RequestResponseEndpoint
@@ -32,6 +33,84 @@ _KEY_VALUE = re.compile(
     r"(?i)\b(password|passwd|secret|token|api[_-]?key|client[_-]?secret|jwt)\b\s*[:=]\s*([^\s,;]+)"
 )
 _EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]{1,64})@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/*-]{0,127}")
+_SAFE_ROUTE_TEMPLATE = re.compile(r"/[A-Za-z0-9_./{}:*-]{0,255}")
+_SAFE_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
+_MAX_REQUEST_ROUTE_KEYS = 256
+_ROUTE_OVERFLOW_KEY = "OTHER /__overflow__"
+_MAX_OPERATION_KEYS = 32
+_OPERATION_OVERFLOW_KEY = "__overflow__"
+
+_SAFE_OPERATION_NUMERIC_FIELDS = frozenset(
+    {
+        "blocked",
+        "cachedInputTokens",
+        "channels",
+        "claimed",
+        "connectors",
+        "costUsdMicros",
+        "created",
+        "deferred",
+        "durationMs",
+        "escalated",
+        "expired",
+        "failed",
+        "inputTokens",
+        "inspected",
+        "intervalSeconds",
+        "outputTokens",
+        "processed",
+        "recorded",
+        "retried",
+        "sent",
+        "skipped",
+        "started",
+        "statusCode",
+        "totalTokens",
+        "uncertain",
+        "unmatched",
+        "updated",
+    }
+)
+_SAFE_OPERATION_BOOLEAN_FIELDS = frozenset(
+    {
+        "configEnvLoaded",
+        "demoRoutes",
+        "enabled",
+        "live",
+        "ready",
+        "recorded",
+        "requireAuth",
+    }
+)
+_SAFE_OPERATION_IDENTIFIER_FIELDS = frozenset(
+    {
+        "actionId",
+        "channelId",
+        "correlationId",
+        "issueId",
+        "projectId",
+        "providerRequestId",
+        "requestId",
+        "runId",
+        "tenantId",
+        "ticketId",
+    }
+)
+_SAFE_OPERATION_ENUM_FIELDS = frozenset(
+    {
+        "component",
+        "errorType",
+        "method",
+        "model",
+        "provider",
+        "reason",
+        "route",
+        "source",
+        "stage",
+        "status",
+    }
+)
 
 
 def utc_now() -> datetime:
@@ -101,10 +180,56 @@ def redact(value: Any, *, depth: int = 0) -> Any:
     return redact_text(str(value))
 
 
-def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
+def _safe_token(value: Any) -> str:
+    clean = str(value or "").strip()
+    return clean if _SAFE_TOKEN.fullmatch(clean) else ""
+
+
+def _safe_operational_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Allow only typed, content-free operational fields."""
+
     if value is None:
         return {}
-    return cast(dict[str, Any], redact(value))
+    result: dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = str(raw_key)
+        if key == "schedulers" and isinstance(item, Mapping):
+            schedulers = {
+                safe_key: nested
+                for nested_key, nested in item.items()
+                if (safe_key := _safe_token(nested_key)) and isinstance(nested, bool)
+            }
+            if schedulers:
+                result[key] = schedulers
+            continue
+        if key in _SAFE_OPERATION_BOOLEAN_FIELDS and isinstance(item, bool):
+            result[key] = item
+            continue
+        if (
+            key in _SAFE_OPERATION_NUMERIC_FIELDS
+            and isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and (not isinstance(item, float) or math.isfinite(item))
+        ):
+            result[key] = item
+            continue
+        if key in _SAFE_OPERATION_IDENTIFIER_FIELDS:
+            clean_identifier = "*" if item == "*" else sanitize_identifier(str(item or ""), max_length=128)
+            if clean_identifier:
+                result[key] = clean_identifier
+            continue
+        if key in _SAFE_OPERATION_ENUM_FIELDS:
+            clean_token = _safe_token(item)
+            if clean_token:
+                result[key] = clean_token
+    return result
+
+
+def _safe_error_code(error: BaseException | str | None) -> str:
+    if isinstance(error, BaseException):
+        return type(error).__name__
+    clean = _safe_token(error)
+    return clean or "reported_failure"
 
 
 @dataclass
@@ -124,12 +249,27 @@ class ComponentState:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class OperationState:
+    name: str
+    status: str = "unknown"
+    total: int = 0
+    total_failures: int = 0
+    last_observed_at: str | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    last_duration_ms: int | None = None
+    last_error: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 class RuntimeObservability:
     """Thread-safe in-process state for health, request metrics and heartbeats."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._components: dict[str, ComponentState] = {}
+        self._operations: dict[str, OperationState] = {}
         self._process_started_at = iso_now()
         self._request_total = 0
         self._request_errors = 0
@@ -141,6 +281,7 @@ class RuntimeObservability:
     def reset_for_tests(self) -> None:
         with self._lock:
             self._components.clear()
+            self._operations.clear()
             self._process_started_at = iso_now()
             self._request_total = 0
             self._request_errors = 0
@@ -165,7 +306,7 @@ class RuntimeObservability:
             if stale_after_seconds is not None:
                 state.stale_after_seconds = stale_after_seconds
             if details is not None:
-                state.details.update(_redacted_mapping(details))
+                state.details.update(_safe_operational_mapping(details))
             if not enabled:
                 state.last_error = None
                 state.consecutive_failures = 0
@@ -196,7 +337,7 @@ class RuntimeObservability:
             state.total_runs += 1
             state.last_error = None
             if details is not None:
-                state.details.update(_redacted_mapping(details))
+                state.details.update(_safe_operational_mapping(details))
 
     def mark_failure(
         self,
@@ -217,27 +358,73 @@ class RuntimeObservability:
             state.consecutive_failures += 1
             state.total_runs += 1
             state.total_failures += 1
-            state.last_error = redact_text(str(error))[:500]
+            state.last_error = _safe_error_code(error)
             if details is not None:
-                state.details.update(_redacted_mapping(details))
+                state.details.update(_safe_operational_mapping(details))
 
-    def record_request(self, method: str, path: str, status_code: int, duration_ms: int, request_value: str) -> None:
-        normalized_path = normalize_path(path)
+    def record_operation(
+        self,
+        name: str,
+        *,
+        succeeded: bool,
+        status: str | None = None,
+        started_monotonic: float | None = None,
+        error: BaseException | str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record bounded customer-impact evidence without changing readiness."""
+
+        clean_name = _safe_token(name) or "invalid"
+        with self._lock:
+            if clean_name not in self._operations and len(self._operations) >= _MAX_OPERATION_KEYS - 1:
+                clean_name = _OPERATION_OVERFLOW_KEY
+            state = self._operations.setdefault(clean_name, OperationState(name=clean_name))
+            now = iso_now()
+            state.total += 1
+            state.last_observed_at = now
+            state.last_duration_ms = (
+                int((time.monotonic() - started_monotonic) * 1000) if started_monotonic is not None else None
+            )
+            state.status = _safe_token(status) or ("ok" if succeeded else "failed")
+            if succeeded:
+                state.last_success_at = now
+                state.last_error = None
+            else:
+                state.total_failures += 1
+                state.last_failure_at = now
+                state.last_error = _safe_error_code(error)
+            if details is not None:
+                state.details.update(_safe_operational_mapping(details))
+
+    def record_request(
+        self,
+        method: str,
+        route_template: str,
+        status_code: int,
+        duration_ms: int,
+        request_value: str,
+        *,
+        slow_threshold_ms: int,
+    ) -> None:
+        normalized_method = method.upper() if method.upper() in _SAFE_METHODS else "OTHER"
+        normalized_route = route_template if _SAFE_ROUTE_TEMPLATE.fullmatch(route_template) else "/__unmatched__"
+        route_key = f"{normalized_method} {normalized_route}"
         with self._lock:
             self._request_total += 1
             self._request_duration_ms_total += max(0, duration_ms)
             if status_code >= 500:
                 self._request_errors += 1
             self._status_counts[str(status_code)] += 1
-            self._path_counts[f"{method.upper()} {normalized_path}"] += 1
-            slow_threshold = max(1, int(os.getenv("OBSERVABILITY_SLOW_REQUEST_MS", "2000") or "2000"))
-            if duration_ms >= slow_threshold:
+            if route_key not in self._path_counts and len(self._path_counts) >= _MAX_REQUEST_ROUTE_KEYS - 1:
+                route_key = _ROUTE_OVERFLOW_KEY
+            self._path_counts[route_key] += 1
+            if duration_ms >= slow_threshold_ms:
                 self._recent_slow_requests.append(
                     {
                         "at": iso_now(),
-                        "requestId": request_value,
-                        "method": method.upper(),
-                        "path": normalized_path,
+                        "requestId": sanitize_identifier(request_value, max_length=128),
+                        "method": normalized_method,
+                        "route": normalized_route,
                         "status": status_code,
                         "durationMs": duration_ms,
                     }
@@ -246,12 +433,14 @@ class RuntimeObservability:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             components = {name: asdict(copy.deepcopy(state)) for name, state in sorted(self._components.items())}
+            operations = {name: asdict(copy.deepcopy(state)) for name, state in sorted(self._operations.items())}
             request_total = self._request_total
             return {
                 "schemaVersion": "1.0",
                 "processStartedAt": self._process_started_at,
                 "generatedAt": iso_now(),
                 "components": components,
+                "operations": operations,
                 "requests": {
                     "total": request_total,
                     "serverErrors": self._request_errors,
@@ -275,8 +464,10 @@ class RuntimeObservability:
                 failures.append(name)
             stale_after = state.get("stale_after_seconds")
             last_success = state.get("last_success_at")
-            if isinstance(stale_after, int) and stale_after > 0 and isinstance(last_success, str):
-                parsed = datetime.fromisoformat(last_success)
+            started_at = state.get("started_at")
+            freshness_reference = last_success if isinstance(last_success, str) else started_at
+            if isinstance(stale_after, int) and stale_after > 0 and isinstance(freshness_reference, str):
+                parsed = datetime.fromisoformat(freshness_reference)
                 if (now - parsed).total_seconds() > stale_after:
                     stale.append(name)
         startup = snapshot["components"].get("application.startup", {})
@@ -295,18 +486,25 @@ class RuntimeObservability:
 runtime_observability = RuntimeObservability()
 
 
-def normalize_path(path: str) -> str:
-    """Reduce high-cardinality identifiers while preserving route usefulness."""
+def request_route_template(request: Request) -> str:
+    """Return the matched static route template, never caller-controlled path text."""
 
-    segments: list[str] = []
-    for segment in path.split("/"):
-        if not segment:
-            continue
-        if re.fullmatch(r"[0-9a-fA-F-]{16,}", segment) or re.fullmatch(r"\d{4,}", segment):
-            segments.append(":id")
-        else:
-            segments.append(segment[:80])
-    return "/" + "/".join(segments)
+    route = request.scope.get("route")
+    candidate = getattr(route, "path_format", None) or getattr(route, "path", None)
+    if isinstance(candidate, str) and _SAFE_ROUTE_TEMPLATE.fullmatch(candidate):
+        return candidate
+    return "/__unmatched__"
+
+
+def _positive_int_env(name: str, default: int, *, maximum: int) -> int:
+    raw = os.getenv(name, str(default)) or str(default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer from 1 to {maximum}") from exc
+    if value < 1 or value > maximum:
+        raise RuntimeError(f"{name} must be an integer from 1 to {maximum}")
+    return value
 
 
 def observe_call(
@@ -330,6 +528,8 @@ def observe_call(
 def install_observability(app: FastAPI) -> None:
     """Install request correlation, privacy-safe metrics, and health endpoints."""
 
+    slow_request_ms = _positive_int_env("OBSERVABILITY_SLOW_REQUEST_MS", 2_000, maximum=3_600_000)
+
     @app.middleware("http")
     async def observability_middleware(request: Request, call_next: RequestResponseEndpoint) -> Response:
         incoming_request_id = sanitize_identifier(request.headers.get("X-Request-ID"))
@@ -349,10 +549,11 @@ def install_observability(app: FastAPI) -> None:
             duration_ms = int((time.monotonic() - started) * 1000)
             runtime_observability.record_request(
                 request.method,
-                request.url.path,
+                request_route_template(request),
                 status_code,
                 duration_ms,
                 request_value,
+                slow_threshold_ms=slow_request_ms,
             )
             reset_request_context(tokens)
 

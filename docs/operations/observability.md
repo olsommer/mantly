@@ -29,7 +29,7 @@ The observability system must answer:
 | --- | --- | --- |
 | `GET /api/health` | Public/load balancer | Liveness plus a compact readiness flag; returns HTTP 200 while the process can answer. |
 | `GET /api/ready` | Deployment platform/operator | HTTP 200 when startup and enabled component heartbeats are healthy; HTTP 503 when degraded. |
-| `GET /api/internal/observability` | Protected by `X-Observability-Token` | Redacted component states, request counts, error rate, normalized route counts, durations, and recent slow requests. Disabled with HTTP 404 when `OBSERVABILITY_TOKEN` is unset. |
+| `GET /api/internal/observability` | Protected by `X-Observability-Token` | Content-free component and operation states, request counts, error rate, matched route-template counts, durations, and recent slow requests. Disabled with HTTP 404 when `OBSERVABILITY_TOKEN` is unset. |
 
 The detailed endpoint must never be exposed through an unprotected public
 dashboard. The observability token is a production secret and must be rotated
@@ -73,10 +73,14 @@ OBSERVABILITY_TOKEN=<unique-secret>
 
 Use `LOG_FORMAT=text` only for local interactive operation.
 
-The formatter recursively redacts fields whose names resemble passwords, tokens,
-credentials, API keys, cookies, authorization headers, private keys, JWTs, SMTP
-passwords, or webhook secrets. It also removes bearer tokens and common inline
-key/value secrets and redacts email local parts by default.
+The production formatter is deny-by-default. It emits a fixed event name,
+request/correlation identifiers, exception class, and registered typed
+operational fields such as route templates, status codes, counts, durations,
+provider/model categories, and sanitized record identifiers. It discards the
+original message formatting arguments, stack text, exception text, and
+unregistered extras. The generic recursive redaction helpers remain
+defense-in-depth for explicitly approved non-log outputs; they are not the
+logging content boundary.
 
 Never log by default:
 
@@ -114,6 +118,8 @@ Current in-process components include:
 - `support.delivery.record`;
 - `support.crm_sync`;
 - `support.sla`.
+- `support.processing_expiry`;
+- `support.channel_test_jobs`.
 
 An enabled scheduler is stale after roughly three configured intervals (with a
 minimum grace window). A failed or stale enabled component makes `/api/ready`
@@ -123,7 +129,25 @@ When an external cron/worker replaces an in-process scheduler, it must publish a
 equivalent durable heartbeat. Do not report a job healthy only because the API
 process is running.
 
+The detailed endpoint also exposes bounded, non-readiness operation evidence for:
+
+- `support.processing_expiry_impact`: stale processing leases expired or the
+  expiry sweep failed;
+- `support.channel_test_job_execution`: actual asynchronous channel-test
+  executions and terminal failures.
+
+Operation evidence does not change `/api/ready`. Scheduler heartbeats answer
+whether scanning runs; operation evidence answers whether selected customer-
+impacting work succeeded.
+
 ## 6. Required signals
+
+This section defines the production target, not the current endpoint contract.
+The in-process endpoint currently emits API request aggregates, the component
+heartbeats listed above, and the two bounded operation signals listed above.
+Every remaining signal needs durable application instrumentation and an external
+metrics/log/alert backend before its acceptance item can be checked. Absence from
+the endpoint is an open production-readiness gap, not an implicit healthy value.
 
 ### API and storage
 
@@ -188,6 +212,9 @@ process is running.
 Start with these pilot thresholds and tune only from measured load. A customer
 contract can require stricter values.
 
+These are configuration targets for an external alerting system. The in-process
+endpoint does not evaluate windows, percentiles, or notifications.
+
 | Signal | Warning | Critical |
 | --- | --- | --- |
 | API readiness | degraded for 2 minutes | degraded for 5 minutes or all requests unavailable |
@@ -209,6 +236,10 @@ isolation, unauthorized action, secret exposure, duplicate irreversible side
 effect, data loss, or another critical boundary.
 
 ## 8. Dashboards
+
+These views require an external metrics/dashboard system. The detailed endpoint
+is bounded diagnostic evidence only; it is not a dashboard or long-term time
+series.
 
 Minimum production views:
 
@@ -253,13 +284,16 @@ logs are designed to operate without message bodies or secrets.
 
 ## 11. Pre-pilot acceptance
 
-- [ ] JSON logging and email/secret redaction tests pass.
+- [ ] JSON logging deny-by-default content-boundary tests pass.
 - [ ] Request/correlation headers are visible through a complete synthetic ticket flow.
 - [ ] `/api/health` and `/api/ready` are wired to the deployment platform.
 - [ ] Detailed observability endpoint is disabled publicly and works with the secret token from the operator network.
-- [ ] Every enabled scheduler exposes heartbeat and last success/failure.
+- [ ] Every enabled scheduler exposes heartbeat and last success/failure;
+  never-successful schedulers become stale.
 - [ ] Inbound lag, outbound queue age, provider failure, backup age, and critical safety outcomes have alerts.
 - [ ] Highest-severity alerts link to tested runbooks.
 - [ ] Dashboard permissions and tenant filters are reviewed.
-- [ ] Logs and traces contain no synthetic secrets/message bodies in the test exercise.
+- [ ] Logs and traces contain no synthetic secrets, exception text, formatted
+  message arguments, message bodies, prompts, or attachment filenames in the
+  test exercise.
 - [ ] On-call contact, escalation, and customer communication paths are current.

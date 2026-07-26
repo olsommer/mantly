@@ -452,7 +452,8 @@ def _issue_action_context(event: GmailAddonEvent) -> tuple[Any, str, str, str, d
 
 
 def _reply_requires_approval(reply: dict[str, Any]) -> bool:
-    metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+    raw_metadata = reply.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     review_status = str(metadata.get("reviewStatus") or "pending").strip().lower()
     return (
         str(reply.get("status") or "").strip().lower() != "sent"

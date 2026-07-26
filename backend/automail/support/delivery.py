@@ -410,7 +410,7 @@ def _generic_channel_payload(
     body: str,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "messageId": message_id,
         "channel": channel,
         "toAddress": to_address,

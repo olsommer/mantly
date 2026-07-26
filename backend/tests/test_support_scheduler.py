@@ -4705,6 +4705,12 @@ def test_channel_activation_requires_follow_up_and_approval_gate():
 
 
 def test_admin_channels_marks_default_slack_signature_required_when_secret_present(client, monkeypatch):
+    monkeypatch.setattr("automail.api.admin.channels.list_channel_sync_runs", lambda **_kwargs: [])
+    monkeypatch.setattr("automail.api.admin.channels.list_channel_webhook_events", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        "automail.api.admin.channels.support_launch_proof",
+        lambda **_kwargs: {"channels": {"items": []}},
+    )
     monkeypatch.setattr(
         "automail.api.admin.channels.load_runtime_secrets",
         lambda tenant_id, project_id: {

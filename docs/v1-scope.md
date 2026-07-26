@@ -63,8 +63,11 @@ email received
 
 ### Frozen for V1 validation
 
-The following channels may remain in the repository, but are not part of the V1 acceptance contract and must not drive roadmap priority before the first pilot report:
+The following implemented surfaces may remain usable, but are not part of the
+V1 acceptance contract and must not drive roadmap priority before the first
+pilot report:
 
+- Gmail add-on;
 - embedded web chat;
 - WhatsApp;
 - Slack;
@@ -72,14 +75,21 @@ The following channels may remain in the repository, but are not part of the V1 
 - Discord;
 - Telegram;
 - Messenger;
-- SMS;
-- voice or telephone.
+- LINE;
+- Viber;
+- Instagram DM;
+- X DM;
+- generic channel webhooks;
+- SMS.
 
 A frozen channel may receive correctness or security fixes. New capability work requires one of:
 
 1. evidence from the active pilot;
 2. a signed design-partner requirement that cannot be met through email;
 3. an approved update to this scope document.
+
+Voice and telephone remain deferred and must not be added without an approved
+scope change.
 
 ## 5. Initial runbooks
 
@@ -188,7 +198,37 @@ Every existing or proposed feature should be placed in one of four classes.
 | **Deferred** | Planned capability with no current implementation dependency. | Documentation and research only. |
 | **Removal candidate** | Complexity that conflicts with V1 or has no validated owner or use case. | Preserve only when removal risk exceeds maintenance cost. |
 
-New feature issues must state their class and evidence.
+The current repository surface and named V1 requirements are classified as
+follows. A feature listed as retained but frozen may stay enabled for existing
+users or demonstrations, but its presence does not make it part of pilot
+acceptance.
+
+| Existing feature or surface | Class | V1 treatment |
+| --- | --- | --- |
+| Email ingestion, source-message deduplication, and email reply delivery | **Pilot required** | Harden against duplicate ingestion, replay, lost delivery state, and wrong-recipient delivery. |
+| Outlook add-in onboarding, review, and draft assistance | **Pilot required** | Support the selected mailbox and founder-led pilot only. |
+| Admin Inbox tickets, messages, attachments, assignment, status, notes, response review, and audit history | **Pilot required** | Provide the system-of-record path to claim, review, respond, recover, and close a pilot ticket. |
+| Delivery-status, delivery-address-change, and cancellation/refund-eligibility runbooks | **Pilot required** | Configure, publish, evaluate, and maintain exactly these three runbooks for the pilot. |
+| Approved order, shipment, carrier, and policy lookups used by the three runbooks | **Pilot required** | Permit only tenant-scoped tools and data required by the selected workflow. |
+| Tenant authentication, authorization, approval, action idempotency, outbound fencing, security, backup, and incident controls | **Pilot required** | Build and verify the production trust boundary before real-ticket processing. |
+| Pilot metric export and the minimum Analytics views needed to validate success criteria | **Pilot required** | Capture the precommitted KPI evidence; broader reporting remains frozen. |
+| Ticket-scoped Knowledge Agent and permitted knowledge retrieval | **Pilot required** | Use only approved pilot sources; standalone company-assistant behavior remains outside V1. |
+| Gmail add-on; embedded web chat; WhatsApp; Slack; Teams; Discord; Telegram; Messenger; LINE; Viber; Instagram DM; X DM; SMS; generic channel webhooks; and their bridge or smoke tooling | **Retained but frozen** | Preserve existing operation; allow security, correctness, and maintenance fixes only. |
+| Multi-concern detection, multiple runbooks for one ticket, and cross-concern response composition | **Retained but frozen** | Existing capability may remain usable, but eligible V1 tickets use one runbook or manual routing. |
+| General CRM synchronization, external-object mirrors, customer portal, CSAT, SLA dashboards, macros, custom views, and broad automations | **Retained but frozen** | Maintain existing behavior; use only the subset explicitly required by the pilot workflow. |
+| General billing optimization, broad self-service onboarding, and non-pilot packaging or edition work | **Retained but frozen** | Permit release, security, licensing, and correctness maintenance without expanding pilot acceptance. |
+| Feedback records, intent-learning stages, and controlled learning proposals | **Retained but frozen** | Preserve the existing reviewed proposal workflow; do not expand it into automatic production learning during V1. |
+| Automatic production learning, broader knowledge connectors, specialist routing beyond the pilot queue, and mature helpdesk migrations | **Deferred** | Research and document only until pilot evidence creates a scoped requirement. |
+| Visual DAGs, arbitrary nested orchestration, marketplace capabilities, voice support, and a standalone internal assistant | **Deferred** | Do not implement for V1. |
+
+No repository surface is a confirmed removal candidate at this review. A
+removal proposal must name the exact artifact, prove that no supported user or
+workflow depends on it, and include migration and rollback evidence.
+
+Every contribution that adds a channel or broad platform capability must state
+its class and link either validated pilot evidence or an approved scope change.
+Without that link, only security, correctness, and maintenance work is allowed
+on retained surfaces.
 
 ## 9. Definition of a verified autonomous resolution
 

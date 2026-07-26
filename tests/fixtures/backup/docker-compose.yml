@@ -1,15 +1,24 @@
 services:
   pocketbase:
     image: python:3.12-alpine
-    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 60; done"]
+    command: ["python", "/fixture/fake-service.py", "pocketbase"]
+    environment:
+      PB_ADMIN_EMAIL: restore@example.test
+      PB_ADMIN_PASSWORD: restore-fixture-password
+    ports:
+      - "18090:8090"
     volumes:
       - pocketbase_data:/pb/pb_data
+      - ./fake-service.py:/fixture/fake-service.py:ro
 
   app:
-    image: alpine:3.21
-    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 60; done"]
+    image: python:3.12-alpine
+    command: ["python", "/fixture/fake-service.py", "app"]
+    ports:
+      - "18080:8080"
     volumes:
       - application_data:/app/data
+      - ./fake-service.py:/fixture/fake-service.py:ro
 
 volumes:
   pocketbase_data:

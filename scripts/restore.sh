@@ -11,6 +11,7 @@ HELPER_IMAGE="${BACKUP_HELPER_IMAGE:-alpine:3.21}"
 PYTHON_HELPER_IMAGE="${BACKUP_PYTHON_HELPER_IMAGE:-python:3.12-alpine}"
 SKIP_SERVICE_HEALTHCHECK="${SKIP_RESTORE_SERVICE_HEALTHCHECK:-false}"
 KEEP_WORK_DIR="${KEEP_RESTORE_WORK_DIR:-false}"
+EXPECTATIONS_FILE="${RESTORE_EXPECTATIONS_FILE:-}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -32,11 +33,11 @@ compose() {
 container_for() {
   local service="$1"
   local id
-  id="$(compose ps -q "$service")"
+  id="$(compose ps --all -q "$service")"
   if [[ -z "$id" ]]; then
     log "Creating $service container so its durable mount can be discovered"
     compose create "$service" >/dev/null
-    id="$(compose ps -q "$service")"
+    id="$(compose ps --all -q "$service")"
   fi
   [[ -n "$id" ]] || fail "Unable to resolve container for service: $service"
   printf '%s\n' "$id"
@@ -152,13 +153,13 @@ docker compose version >/dev/null
 
 BUNDLE="$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$BUNDLE_INPUT")"
 [[ -f "$BUNDLE" ]] || fail "Backup bundle does not exist: $BUNDLE"
-
-if [[ -f "$BUNDLE.sha256" ]]; then
-  log "Verifying outer bundle checksum"
-  (cd "$(dirname "$BUNDLE")" && sha256sum -c "$(basename "$BUNDLE.sha256")")
-else
-  log "WARNING: outer bundle checksum file not found: $BUNDLE.sha256" >&2
+if [[ -n "$EXPECTATIONS_FILE" ]]; then
+  EXPECTATIONS_FILE="$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$EXPECTATIONS_FILE")"
 fi
+
+[[ -f "$BUNDLE.sha256" ]] || fail "Outer bundle checksum file not found: $BUNDLE.sha256"
+log "Verifying outer bundle checksum"
+(cd "$(dirname "$BUNDLE")" && sha256sum -c "$(basename "$BUNDLE.sha256")")
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mantly-restore.XXXXXX")"
 chmod 700 "$WORK_DIR"
@@ -211,7 +212,11 @@ manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 if manifest.get("formatVersion") != "1":
     raise SystemExit(f"Unsupported backup formatVersion: {manifest.get('formatVersion')}")
 
-for key in ("pocketbase", "application"):
+expected_archives = {
+    "pocketbase": "pocketbase-data.tar.gz",
+    "application": "application-data.tar.gz",
+}
+for key, required_archive in expected_archives.items():
     component = manifest.get("components", {}).get(key)
     if not isinstance(component, dict):
         raise SystemExit(f"Missing manifest component: {key}")
@@ -220,6 +225,10 @@ for key in ("pocketbase", "application"):
     expected_size = component.get("sizeBytes")
     if not isinstance(archive_name, str) or not isinstance(expected_hash, str):
         raise SystemExit(f"Invalid manifest component metadata: {key}")
+    if archive_name != required_archive:
+        raise SystemExit(
+            f"Manifest component {key} must reference {required_archive}, got {archive_name!r}"
+        )
     archive = root / archive_name
     digest = hashlib.sha256()
     with archive.open("rb") as handle:
@@ -258,10 +267,19 @@ wait_for_internal_services
 
 VERIFY_OUTPUT="$WORK_DIR/restore-verification.json"
 VERIFY_ARGS=(--output "$VERIFY_OUTPUT")
-if [[ -n "${RESTORE_API_URL:-}" ]]; then VERIFY_ARGS+=(--api-url "$RESTORE_API_URL"); fi
-if [[ -n "${RESTORE_PB_URL:-}" ]]; then VERIFY_ARGS+=(--pb-url "$RESTORE_PB_URL"); fi
-if [[ -n "${PB_ADMIN_EMAIL:-}" ]]; then VERIFY_ARGS+=(--pb-admin-email "$PB_ADMIN_EMAIL"); fi
-if [[ -n "${PB_ADMIN_PASSWORD:-}" ]]; then VERIFY_ARGS+=(--pb-admin-password "$PB_ADMIN_PASSWORD"); fi
+[[ -n "${RESTORE_API_URL:-}" ]] || fail "RESTORE_API_URL is required for verified restore"
+[[ -n "${RESTORE_PB_URL:-}" ]] || fail "RESTORE_PB_URL is required for verified restore"
+[[ -n "${PB_ADMIN_EMAIL:-}" ]] || fail "PB_ADMIN_EMAIL is required for verified restore"
+[[ -n "${PB_ADMIN_PASSWORD:-}" ]] || fail "PB_ADMIN_PASSWORD is required for verified restore"
+[[ -n "$EXPECTATIONS_FILE" ]] || fail "RESTORE_EXPECTATIONS_FILE is required for verified restore"
+[[ -r "$EXPECTATIONS_FILE" ]] || fail "Restore expectations file is not readable: $EXPECTATIONS_FILE"
+VERIFY_ARGS+=(
+  --api-url "$RESTORE_API_URL"
+  --pb-url "$RESTORE_PB_URL"
+  --pb-admin-email "$PB_ADMIN_EMAIL"
+  --pb-admin-password "$PB_ADMIN_PASSWORD"
+  --expectations "$EXPECTATIONS_FILE"
+)
 
 python3 "$ROOT/scripts/verify-restore.py" "${VERIFY_ARGS[@]}"
 

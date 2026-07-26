@@ -4,6 +4,10 @@ Status: **Required for a production-like pilot**
 
 Owner: Deployment operator with an independent restore verifier
 
+Evidence status: **No completed operator restore drill is recorded in this
+repository.** The CI fixture tests the recovery mechanism only. It does not
+satisfy the pre-pilot operator-drill gate or close issue #5.
+
 This runbook covers the current single-node Docker Compose deployment. It backs
 up both persistent Mantly state volumes, verifies archive integrity, and restores
 into a clean or replacement environment. It does not claim point-in-time
@@ -161,8 +165,14 @@ export RESTORE_CONFIRM='ERASE_AND_RESTORE_MANTLY'
 2. Configure required secrets and domains from the protected infrastructure
    record; do not extract secrets from the backup.
 3. Create the target service containers/volumes with `docker compose create`.
-4. Run `scripts/restore.sh` with the explicit destructive confirmation.
-5. The script:
+4. Create a deployment-specific expectations file from
+   `tests/fixtures/backup/restore-expectations.json`. Use privacy-minimized IDs
+   for representative tenant/project, ticket/timeline, outbound, runbook/
+   knowledge, attachment, and audit records.
+5. Export `RESTORE_API_URL`, `RESTORE_PB_URL`, `PB_ADMIN_EMAIL`,
+   `PB_ADMIN_PASSWORD`, and the absolute `RESTORE_EXPECTATIONS_FILE` path.
+6. Run `scripts/restore.sh` with the explicit destructive confirmation.
+7. The script:
    - decrypts and extracts the bundle in a temporary restricted directory;
    - validates format, component presence, size, and SHA-256 digests;
    - stops target services;
@@ -173,14 +183,12 @@ export RESTORE_CONFIRM='ERASE_AND_RESTORE_MANTLY'
    - waits for health endpoints;
    - runs `scripts/verify-restore.py` for application/PocketBase checks;
    - leaves temporary data only when requested for investigation.
-6. Supply `PB_ADMIN_EMAIL` and `PB_ADMIN_PASSWORD` to deeper verification when
-   available.
-7. Validate customer/tenant-specific evidence manually or through the pilot
-   fixture.
-8. Reconcile messages, actions, delivery attempts, and deletion requests created
+8. Validate customer/tenant-specific evidence manually in addition to the
+   fail-closed automated expectations.
+9. Reconcile messages, actions, delivery attempts, and deletion requests created
    after the backup timestamp before customer traffic resumes.
-9. Rotate credentials when the recovery is caused by compromise.
-10. Record elapsed time, data loss window, verification evidence, and any manual
+10. Rotate credentials when the recovery is caused by compromise.
+11. Record elapsed time, data loss window, verification evidence, and any manual
     repair.
 
 ## 8. Restore verification
@@ -193,10 +201,11 @@ A restore is successful only when all applicable checks pass.
 - every restored SQLite database returns `PRAGMA integrity_check = ok`;
 - PocketBase health endpoint succeeds;
 - FastAPI `/api/health` succeeds;
-- PocketBase superuser authentication succeeds when credentials are provided;
-- required collections are reachable;
-- backend support package/schema gate succeeds where configured;
-- no required durable volume is empty unexpectedly.
+- PocketBase superuser authentication succeeds;
+- every required collection meets its recorded minimum count;
+- representative tenant/project, ticket/timeline, outbound, runbook/knowledge,
+  attachment, and audit records exist with required fields;
+- missing credentials, expectations, records, fields, or checks fail the restore.
 
 ### Application verification
 

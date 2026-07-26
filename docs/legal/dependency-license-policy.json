@@ -16,6 +16,7 @@
     "MIT AND ISC",
     "MIT OR Apache-2.0",
     "MPL-2.0",
+    "MPL-2.0 AND (Apache-2.0 OR MIT)",
     "MPL-2.0 AND MIT",
     "MPL-2.0 OR Apache-2.0",
     "OFL-1.1",

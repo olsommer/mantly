@@ -1,159 +1,95 @@
-# Third-party license and provenance process
+# Third-party license inventory and release gate
 
-Status: **Required release control; legal review required for review-category items**
+## Purpose
 
-Owner: Release owner with engineering and legal/procurement reviewers
+Mantly Community is `AGPL-3.0-only`, but dependencies and bundled artifacts keep
+their upstream terms. This process makes the default locked application
+inventory reproducible and makes dependency changes fail closed until their
+metadata is accounted for.
 
-## 1. Scope
+Automation is evidence, not legal approval. Package metadata can be incomplete
+or wrong. Release owners must still review obligations, ship required texts and
+source, and obtain qualified legal advice where needed.
 
-Review everything included in, linked into, downloaded by, or required to operate
-a distributed Mantly release:
+## Canonical inputs
 
-- Python runtime and transitive dependencies;
-- admin, add-in, and landing production dependencies bundled into JavaScript/CSS;
-- PocketBase, Caddy, base/container images, OS packages, and build tools whose
-  notices must accompany the image or package;
-- fonts, icons, images, screenshots, audio/video, sample data, templates, and
-  documentation excerpts;
-- model weights, tokenizers, embeddings, prompts, datasets, evaluation cases, and
-  generated assets;
-- Microsoft/store manifests, SDKs, provider clients, and integration examples;
-- code copied or adapted from issues, snippets, examples, previous products, or
-  generated-code systems;
-- customer-specific plugins/configurations delivered with the product.
+- `backend/uv.lock` plus the default (no extras, no dev group) Python
+  environment installed with `uv sync --frozen --no-dev`;
+- `admin/package-lock.json`, `addin/package-lock.json`, and
+  `landing/package-lock.json`, excluding entries marked development-only;
+- `docs/legal/dependency-license-policy.json`, containing the narrow accepted
+  SPDX-expression set and version-pinned metadata overrides;
+- `third_party/pocketbase/LICENSE` and the pinned PocketBase version in
+  `pocketbase/Dockerfile`.
 
-SaaS-only server use can create different obligations from customer distribution,
-but it is not exempt from license, service-term, model/data, attribution, or
-network-copyleft review.
+The generator never edits source, lock, policy, or workflow files. It sorts all
+records and omits timestamps, producing byte-stable JSON/Markdown for identical
+inputs and installed locked artifacts.
 
-## 2. Release inventory
+## Commands
 
-Run from the locked release environment:
+Install the exact default backend environment:
 
-```bash
-cd backend
-uv sync --frozen
-uv run python ../scripts/generate_third_party_notice.py \
-  --root .. \
-  --json-out ../dist/third-party-inventory.json \
-  --markdown-out ../dist/THIRD_PARTY_NOTICES.md
+```sh
+uv sync --directory backend --frozen --no-dev
 ```
 
-The tool inventories:
+Validate npm policy:
 
-- the production Python dependency graph exported by `uv` and resolved against
-  installed distribution metadata;
-- non-dev package-lock entries for admin, add-in, and landing applications;
-- package name, version, ecosystem, source/reference, declared license, and
-  review category.
+```sh
+node scripts/check-dependency-licenses.mjs
+```
 
-The generated inventory is evidence input, not automatic legal approval. Package
-metadata can be incomplete or inaccurate; custom licenses and bundled assets
-require source inspection.
+Generate exact evidence:
 
-## 3. Classification
+```sh
+mkdir -p artifacts/licenses
+(
+  cd backend
+  uv run --frozen --no-dev python ../scripts/generate_third_party_notice.py \
+    --root .. \
+    --check \
+    --json-out ../artifacts/licenses/third-party-inventory.json \
+    --markdown-out ../artifacts/licenses/THIRD_PARTY_INVENTORY.md
+)
+```
 
-### Usually notice/attribution review
+Without output arguments the generator prints JSON to stdout and does not write
+files.
 
-Examples include commonly used permissive licenses such as MIT, ISC, BSD,
-Apache-2.0, 0BSD, and similar terms. Review still verifies:
+## Policy behavior
 
-- correct component/version;
-- required license/copyright/NOTICE text;
-- Apache modification/patent/NOTICE obligations;
-- attribution presentation;
-- asset/font/model terms separate from code;
-- no additional repository-specific restrictions.
+- SPDX expressions are matched exactly. Substring matches such as treating an
+  unknown expression containing `MIT` as approved are forbidden.
+- A missing expression fails unless a package/version-specific override records
+  reviewed evidence.
+- Overrides are pinned to package and version. Updating that package makes the
+  gate fail until its metadata is inspected again.
+- The accepted-expression set is an engineering review boundary, not a claim
+  that every use is legally compatible.
+- Optional Python extras are excluded from the default Community inventory and
+  require their own inventory before distribution.
+- New lockfiles, package ecosystems, bundled binaries, fonts, images, models, or
+  datasets must be added to this process before release.
 
-### Mandatory legal review
+## Release evidence not covered by lockfiles
 
-- unknown, missing, custom, or ambiguous license;
-- GPL, AGPL, LGPL, SSPL, EUPL, EPL, CDDL, MPL, OSL, or another reciprocal/
-  network/source-disclosure term;
-- source-available or field-of-use restriction;
-- non-commercial, research-only, evaluation-only, responsible-AI/use-policy, or
-  no-redistribution term;
-- font, icon, media, data, model, tokenizer, prompt, or dataset license;
-- dual/multi-license choice;
-- dependency with required source offer, relinking, modification disclosure, or
-  installation-information obligations;
-- package metadata conflicting with upstream repository terms;
-- component copied or vendored without package metadata;
-- provider SDK/service terms restricting benchmarking, caching, reverse
-  engineering, output use, or resale.
+The dependency workflow produces Python and npm CycloneDX SBOMs. Container
+builds produce image SBOM/provenance attestations covering base images,
+operating-system packages, Node, CPython, Caddy, and other layer contents.
+Release review must retain those artifacts and reconcile their license findings.
 
-No review-category item is shipped merely because a CI scan found no known CVE.
+The checked-in `THIRD_PARTY_NOTICES.md` is the reviewed human summary. Generated
+inventory is exact machine evidence; neither file replaces full upstream
+license texts or corresponding-source duties.
 
-## 4. Required evidence per component
+## Handling a failure
 
-- canonical component/project and package name;
-- exact version, commit, image digest, or asset hash;
-- source URL/reference and supplier;
-- where/how used: server-only, bundled frontend, image, customer package,
-  dynamically linked, separate service, build-only, optional plugin;
-- license expression and full text source;
-- copyright/NOTICE/attribution;
-- modifications or vendored patches;
-- required source offer/relinking/build material;
-- reviewer and decision;
-- release(s) covered and expiry/re-review trigger.
-
-Do not put private registry credentials or customer data in the inventory.
-
-## 5. Container and customer package
-
-Before packaging:
-
-- identify base images and their OS/package notices;
-- pin immutable image digest for the approved release;
-- copy Mantly `LICENSE.md`, `NOTICE.md`, and approved generated third-party
-  notices into the package;
-- include upstream license texts/NOTICE/source offers required for redistributed
-  components;
-- record package checksum and generated-at release commit;
-- verify that customer scripts do not download an unreviewed `latest` dependency;
-- verify Microsoft/store/browser/client-side bundles separately from backend
-  server dependencies.
-
-## 6. Models, data, fonts, and generated material
-
-Code-package scanners do not answer whether Mantly may commercially use or
-redistribute:
-
-- model weights/tokenizers or local inference runtime;
-- provider-generated output used as product content;
-- public benchmark/evaluation datasets;
-- screenshots, email samples, company logos, icons, fonts, photos, and demo data;
-- generated code whose prompt/source included restricted code or customer data.
-
-Maintain a provenance record with source, author/tool, date, inputs classification,
-license/terms, commercial-use/distribution decision, and reviewer.
-
-## 7. Change triggers
-
-Re-run inventory and review when:
-
-- a dependency or lockfile changes;
-- build/container base or OS packages change;
-- a new provider, model, dataset, font, icon, or asset is added;
-- a component moves from server-only to customer distribution or bundled client;
-- an upstream project changes license or ownership;
-- Mantly changes public/proprietary/source-distribution model;
-- a customer agreement requires a software bill of materials, source offer, or
-  additional attribution.
-
-## 8. Release gate
-
-A distributed release is blocked when:
-
-- generated inventory is missing or does not match lockfiles/images;
-- a mandatory-review component lacks a written decision;
-- required notice/license/source offer is absent;
-- component provenance is unknown;
-- a license is incompatible with the intended proprietary/SaaS/on-prem use;
-- a copied/customer/generated asset lacks commercial rights;
-- the customer package omits Mantly and third-party notices;
-- marketing describes third-party compatibility as endorsement.
-
-Exceptions require a time-bounded written legal/release decision. A security risk
-acceptance cannot waive copyright/license obligations.
+1. Identify the exact package, version, artifact, and usage.
+2. Inspect the upstream source distribution and complete license text.
+3. Confirm provenance and required notices/source obligations.
+4. Replace the component or update the narrow policy with a version-pinned,
+   evidence-based decision.
+5. Regenerate inventory/SBOMs and attach the review decision to the release.
+6. Escalate custom, unknown, reciprocal, source-available, non-commercial,
+   font, media, model, dataset, or conflicting terms to qualified counsel.

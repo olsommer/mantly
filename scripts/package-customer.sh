@@ -58,6 +58,7 @@ fi
 
 OUT_DIR="$ROOT/dist"
 STAGING="$OUT_DIR/$PACKAGE_NAME"
+LICENSE_EVIDENCE_DIR="$OUT_DIR/license-evidence/$PACKAGE_NAME"
 
 echo "=== Packaging customer delivery: $PACKAGE_NAME ==="
 echo "=== Checking support package readiness ==="
@@ -79,9 +80,29 @@ print(json.dumps({"ready": result.ok, "checked": result.checked}, separators=(",
 PY
 )"
 
+echo "=== Generating locked license evidence ==="
+rm -rf "$LICENSE_EVIDENCE_DIR"
+mkdir -p "$LICENSE_EVIDENCE_DIR"
+if command -v uv >/dev/null 2>&1; then
+    (
+        cd "$ROOT/backend"
+        uv run --frozen --no-dev python ../scripts/generate_third_party_notice.py \
+            --root "$ROOT" \
+            --check \
+            --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \
+            --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
+    )
+else
+    python3 "$ROOT/scripts/generate_third_party_notice.py" \
+        --root "$ROOT" \
+        --check \
+        --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \
+        --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
+fi
+
 # Clean and create staging directory.
 rm -rf "$STAGING"
-mkdir -p "$STAGING/scripts" "$STAGING/docs/operations"
+mkdir -p "$STAGING/scripts" "$STAGING/docs/operations" "$STAGING/legal"
 
 # Copy deployment and support files.
 cp "$ROOT/deploy/docker-compose.yml"  "$STAGING/docker-compose.yml"
@@ -100,6 +121,25 @@ install -m 755 "$ROOT/scripts/verify-restore.py" "$STAGING/scripts/verify-restor
 cp "$ROOT/docs/deploy-onprem-recovery.md" "$STAGING/BACKUP-AND-RECOVERY.md"
 cp "$ROOT/docs/operations/backup-and-recovery.md" "$STAGING/docs/operations/backup-and-recovery.md"
 cp "$ROOT/docs/operations/restore-drill-template.md" "$STAGING/docs/operations/restore-drill-template.md"
+
+cp "$ROOT/LICENSE" "$STAGING/LICENSE"
+cp "$ROOT/NOTICE.md" "$STAGING/NOTICE.md"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGING/THIRD_PARTY_NOTICES.md"
+cp "$ROOT/TRADEMARKS.md" "$STAGING/TRADEMARKS.md"
+cp "$ROOT/docs/decisions/0002-licensing-and-distribution.md" "$STAGING/legal/licensing-decision.md"
+cp "$ROOT/docs/legal/commercial-distribution-checklist.md" "$STAGING/legal/release-checklist.md"
+cp "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" "$STAGING/legal/third-party-inventory.json"
+cp "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md" "$STAGING/legal/THIRD_PARTY_INVENTORY.md"
+
+if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]; then
+    echo "Refusing to package a dirty worktree: source archive would not match the built release." >&2
+    exit 65
+fi
+SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+git -C "$ROOT" archive \
+    --format=tar.gz \
+    --output="$STAGING/mantly-community-source.tar.gz" \
+    "$SOURCE_REVISION"
 
 IMAGE_TAG="${VERSION:-latest}"
 GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -142,6 +182,15 @@ cat > "$STAGING/release-manifest.json" <<EOF
     "downloadFile": "support-channel-activation-plan-<project-id>.json",
     "planFile": "support-channel-activation-plan.json",
     "secretTemplateFile": "support-channel-activation-secrets.env"
+  },
+  "licensing": {
+    "repositoryLicense": "AGPL-3.0-only",
+    "licenseFile": "LICENSE",
+    "noticeFile": "NOTICE.md",
+    "thirdPartyNoticeFile": "THIRD_PARTY_NOTICES.md",
+    "thirdPartyInventory": "legal/third-party-inventory.json",
+    "correspondingSourceArchive": "mantly-community-source.tar.gz",
+    "sourceRevision": "$SOURCE_REVISION"
   },
   "supportPackageGate": $SUPPORT_PACKAGE_GATE_JSON
 }

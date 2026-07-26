@@ -16,6 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify repository license contract
+        run: |
+          set -euo pipefail
+          test -s LICENSE
+          test -s NOTICE.md
+          test -s THIRD_PARTY_NOTICES.md
+          test -s TRADEMARKS.md
+          test -s CONTRIBUTING.md
+          test -s docs/decisions/0002-licensing-and-distribution.md
+          test -s docs/legal/dependency-license-policy.json
+          grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" LICENSE
+          grep -q "AGPL-3.0-only" README.md
+          grep -q "AGPL-3.0-only" CONTRIBUTING.md
+          grep -q "Existing grants stay in force" docs/decisions/0002-licensing-and-distribution.md
+          test ! -e LICENSE.md
+          test ! -e .github/workflows/apply-branding-cleanup.yml
+          test ! -e .github/workflows/finalize-branding-cleanup.yml
+          test ! -e .github/workflows/apply-distribution-boundary.yml
+          test ! -e .github/workflows/finalize-distribution-branch.yml
+          test ! -e .github/workflows/fix-capacity-branch.yml
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,7 +62,19 @@ jobs:
           npm ci --prefix landing
 
       - name: Enforce reviewed license policy
-        run: node scripts/check-dependency-licenses.mjs
+        run: |
+          set -euo pipefail
+          node scripts/check-dependency-licenses.mjs
+          mkdir -p artifacts/licenses
+          (
+            cd backend
+            uv run --frozen --no-dev python ../scripts/generate_third_party_notice.py \
+              --root .. \
+              --check \
+              --json-out ../artifacts/licenses/third-party-inventory.json \
+              --markdown-out ../artifacts/licenses/THIRD_PARTY_INVENTORY.md
+          )
+          python -m json.tool artifacts/licenses/third-party-inventory.json >/dev/null
 
       - name: Generate ecosystem SBOMs
         run: |
@@ -67,5 +100,6 @@ jobs:
           name: community-dependency-sboms
           path: |
             artifacts/sbom/*.cdx.json
+            artifacts/licenses/*
             THIRD_PARTY_NOTICES.md
           if-no-files-found: error

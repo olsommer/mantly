@@ -1,203 +1,126 @@
 # ADR 0002: Licensing and distribution model
 
-- Status: **Accepted product direction; legal terms require qualified counsel approval**
-- Date: 2026-07-16
-- Owners: Product, commercial, engineering, and legal owners
-- Supersedes: unresolved licensing language in the product vision
+- Status: **Accepted for this repository; release-specific legal review remains required**
+- Date: 2026-07-26
+- Owners: Product and engineering
+- Reviewers required for external distribution: qualified legal counsel and the
+  release owner
 
 ## Context
 
-Mantly is a hosted and customer-managed agentic support product. Customers can
-reasonably require deployment control, security review, continuity, backup,
-auditability, and sometimes source escrow or limited inspection. At the same
-time, publishing the complete platform under an open-source license before the
-business model, contribution process, trademark policy, and commercial support
-boundary are established would create irreversible rights and operational
-obligations.
+Mantly supports a hosted service and customer-operated Community deployments.
+Customers need clear rights to inspect, run, modify, back up, restore, and
+continue operating the software. Contributors and redistributors need one
+unambiguous repository license.
 
-The repository was private and had no license file. Access to a private
-repository does not create a clear customer, contractor, employee, contributor,
-or evaluator rights model. The product vision also used phrases such as
-self-hostable/source-available without a precise grant.
+The Community release already grants rights under GNU Affero General Public
+License version 3. Those grants cannot be replaced retroactively by a
+proprietary notice. A second, contradictory repository license would make the
+boundary less clear and could not withdraw rights recipients already received.
+
+This ADR records the current model. It is not customer-facing legal advice and
+does not approve any particular release, hosted-service agreement, trademark
+use, or third-party component.
 
 ## Decision
 
-For the current product stage:
+1. **This repository is AGPL-3.0-only.** Unless a file carries a valid,
+   compatible third-party notice, Mantly Community source and documentation are
+   offered under the `AGPL-3.0-only` terms in the root `LICENSE`.
+2. **Existing grants stay in force.** A future edition, financing event, or
+   business-model change does not revoke or narrow AGPL rights already granted.
+   A future repository-wide license change would require authority from every
+   relevant copyright holder and would not cancel earlier grants.
+3. **Commercial use is allowed.** Mantly may charge for Cloud hosting,
+   dedicated operation, onboarding, support, warranties, integrations, or other
+   services. Those service terms do not replace the AGPL terms for Community
+   code.
+4. **Future closed components must be separate.** Independently developed
+   commercial components may use separate terms when their architecture,
+   copyright provenance, distribution, and interaction with AGPL code have been
+   reviewed. They must not be described as changing the license of this
+   repository.
+5. **No alternative commercial source license exists today.** Dual licensing
+   can be considered only when Mantly has the necessary copyright permissions,
+   contributor provenance, product boundary, and counsel-approved terms.
+6. **Customer-operated rights come from the AGPL.** Operators may run, inspect,
+   modify, copy, back up, and continue using covered Community code subject to
+   the license. Conveying object code requires the corresponding-source duties
+   in section 6. Operators that modify the program and let users interact with
+   it over a network must satisfy section 13. Support and uptime are separate
+   contractual services; the AGPL itself promises neither.
+7. **Community contributions use the same license.** Contributions are
+   submitted under `AGPL-3.0-only` unless a file clearly states compatible
+   third-party terms. No Contributor License Agreement or blanket relicensing
+   grant is currently required. A contributor's separate, explicit permission
+   would be needed for different licensing.
+8. **Trademark rights remain separate.** The software license permits covered
+   code uses, not misleading use of project names or marks. `TRADEMARKS.md`
+   states the current trademark policy.
+9. **Third-party terms remain controlling for third-party material.** Locked
+   dependency inventories, reviewed notices, source obligations, and release
+   SBOMs are part of the distribution gate.
+10. **Legal review remains an external gate.** Qualified counsel must review
+    customer-facing terms and release-specific third-party decisions before
+    public distribution or commercial reliance. Repository automation cannot
+    provide that approval.
 
-1. **Mantly source code remains proprietary and private.**
-2. **No copyright license is granted by repository access alone.** Rights arise
-   only from an employment, contractor, contribution, evaluation, SaaS,
-   on-premises, reseller, escrow, or other written agreement signed by the
-   relevant legal entities.
-3. **Hosted SaaS use is governed by written commercial terms**, including the
-   service, data processing, security, support, acceptable-use, payment,
-   suspension/termination, export/deletion, and liability boundaries.
-4. **Customer-managed/on-premises distribution is governed by a written
-   commercial license and support agreement.** It can grant the customer the
-   rights needed to install, run, back up, restore, update, and operate the
-   delivered release for the agreed entities, environments, users, and term.
-5. **On-premises source access is not included by default.** Source review,
-   escrow, modification, build rights, affiliate use, disaster-continuity rights,
-   and post-termination operation are negotiated explicitly.
-6. **The repository is not described as open source or source available.**
-   “Self-hosted,” “on premises,” or “customer managed” describes the deployment
-   model, not a public source-code license.
-7. **External contributions are not accepted without written contribution terms.**
-   Employment/contractor invention-assignment and confidentiality terms remain
-   the primary contribution path at this stage.
-8. **Third-party software obligations are inventoried and satisfied separately.**
-   Mantly's proprietary notice does not replace upstream licenses, notices,
-   source-offer obligations, or attribution.
-9. **Mantly names, logos, domains, and product presentation remain separately
-   protected.** A software license does not imply a trademark license.
-10. **Qualified legal counsel must approve customer-facing license/terms before
-    public distribution or commercial reliance.** The repository notice and this
-    ADR prevent ambiguity; they are not a complete customer contract.
+## Options evaluated
 
-## Why this model now
+| Model | SaaS defensibility | Enterprise/on-prem | Auditability and continuity | Contributions | Fork/competition risk | Dependency/trademark burden | Operational burden | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Proprietary source | Strong contractual control | Negotiated per customer | Only as contractually granted | Requires bespoke terms | Low public-fork risk | Full dependency review still required; trademarks separate | High contracting, access, escrow, and enforcement burden | Rejected for this repository; conflicts with existing AGPL grants |
+| Source-available commercial license | Can restrict competing use | Can grant inspection and operation rights | Depends on bespoke terms | License-specific and often confusing | Medium | Not open source; compatibility review required | High license design and enforcement burden | Rejected now |
+| Open core | Protects separate commercial modules | Flexible if boundary is real | Core remains inspectable | Good for core | Medium | Boundary and combined-work analysis required | High packaging and architecture burden | Possible future model only for independently developed components |
+| AGPL plus alternative commercial license | Reciprocal network-source duty plus paid alternative | Can support negotiated alternatives | Strong Community continuity | Requires contributor relicensing permission | Medium | Dual-license provenance and compliance required | High rights-tracking burden | Not offered today; revisit only with complete permissions |
+| Binaries/images without general source rights | Strong distribution control | Familiar procurement artifact | Weak without escrow/source rights | Minimal | Low | Cannot be used to avoid AGPL corresponding-source duties | Medium release/support burden | Rejected for covered Community code |
+| Permissive open source | Weak reciprocal protection | Easy adoption | Strong source access | Low-friction | High | Simpler compatibility, trademarks still separate | Low license-administration burden | Rejected for current Community strategy |
+| **AGPL-3.0-only Community repository** | Network modifications remain reciprocal | Self-hosting rights are explicit; services can still be sold | Source, modification, backup, and continuity rights are durable | Same-license contribution path | Forks allowed under reciprocal terms | Dependency, source, notice, and trademark controls still required | Moderate compliance burden | **Selected** |
 
-- It preserves the ability to learn from the first design-partner pilot before
-  creating irreversible public licensing expectations.
-- It supports hosted SaaS and controlled on-premises delivery immediately through
-  commercial agreements.
-- It allows customer-specific audit, escrow, continuity, or source-review rights
-  without granting them to every recipient.
-- It avoids calling a non-open license “open source.”
-- It keeps future options open: proprietary, source-available, open core, or dual
-  licensing can still be evaluated after product-market, ecosystem, and legal
-  evidence exists.
+## Repository and product boundaries
 
-## Alternatives considered
+| Area | Current boundary |
+| --- | --- |
+| Community source, build scripts, and repository documentation | `AGPL-3.0-only`, unless a compatible third-party notice states otherwise |
+| Mantly Cloud operation | Commercial service; Community code used by the service remains AGPL-covered |
+| Support, onboarding, warranties, SLAs, and professional services | Separate commercial contracts |
+| Future independently developed commercial components | Possible separate terms after architectural, provenance, and legal review |
+| Customer data and configuration | Customer/contract rights, not relicensed by this repository |
+| Names, logos, and domains | Trademark policy; no implied endorsement |
+| Third-party packages and images | Their respective upstream terms |
 
-### Public proprietary binaries/images only
+## Distribution controls
 
-**Advantages:** simple rights boundary and limited source exposure.
+Every external release must:
 
-**Rejected as the entire strategy:** some enterprise/on-premises customers can
-require source escrow, security review, continuity, or customer-specific
-modification. Those can be negotiated without a public source grant.
-
-### Source-available commercial license
-
-**Advantages:** inspectability and community feedback while restricting hosted
-competition or commercial use.
-
-**Not selected now:** “source available” covers many incompatible grants. A
-poorly chosen public license creates customer confusion, contribution
-obligations, enforcement burden, and potentially conflicts with enterprise
-terms. Revisit only with counsel and a precise commercial goal.
-
-### Open core
-
-**Advantages:** adoption/community around a useful core with proprietary
-enterprise services.
-
-**Not selected now:** the durable product boundary between core and commercial
-features is not validated. Splitting prematurely risks an incoherent codebase and
-misaligned incentives.
-
-### AGPL plus commercial license
-
-**Advantages:** recognized open-source license, reciprocal hosted-service
-obligations, and a commercial alternative.
-
-**Not selected now:** dual licensing requires clean copyright ownership,
-contribution agreements, compliance operations, and a product/business decision
-that the reciprocal model supports distribution. It would also grant broad
-open-source rights immediately.
-
-### Permissive open-source license
-
-**Advantages:** low-friction adoption and contribution.
-
-**Rejected for the current platform:** it would allow broad reuse, modification,
-and competitive hosting with few reciprocal obligations before Mantly has a
-validated ecosystem or monetization boundary.
-
-## Customer-managed rights checklist
-
-Every on-premises agreement must answer explicitly:
-
-- licensed customer entities, affiliates, contractors, and environments;
-- production, staging, development, disaster-recovery, and cold-standby copies;
-- user/tenant/project/capacity limits and measurement;
-- installation, backup, restore, monitoring, update, rollback, and migration rights;
-- license-validation behavior and offline/grace operation;
-- support, maintenance, security patch, and end-of-support windows;
-- customer modification, integration, and configuration rights;
-- source review or escrow trigger, scope, release, buildability, and confidentiality;
-- continuity rights if Mantly ceases service, becomes insolvent, or materially
-  breaches support obligations;
-- data ownership, export, deletion, retention, and post-termination access;
-- third-party components and separate upstream terms;
-- audit and usage-verification methods that do not expose customer content;
-- assignment, change of control, divestiture, and successor rights;
-- termination, cure, suspension, and decommissioning procedure;
-- warranty, indemnity, liability, insurance, and governing law;
-- trademark and public-reference rights.
-
-No license check may make customer data unrecoverable. Backup, export, and a safe
-termination/continuity path remain part of the commercial design.
-
-## Contribution model
-
-Until a reviewed contributor agreement exists:
-
-- only contributions covered by an applicable employment or contractor agreement
-  and authorized repository access are accepted;
-- no public pull-request invitation is made;
-- contributors confirm they have the right to submit the work and disclose
-  relevant third-party code/data/model assets;
-- maintainers reject copied code, generated assets, or dependencies with unclear
-  provenance;
-- copyright ownership and any moral-rights/retained-rights treatment follow the
-  applicable written agreement;
-- a future open-source/dual-license decision requires a complete copyright and
-  contribution provenance review.
-
-## Third-party compliance
-
-Before every distributed release:
-
-1. generate the production dependency inventory;
-2. identify license expression, copyright/notice, source, version, and whether the
-   component is bundled, dynamically used, build-only, service-side, or separately
-   installed;
-3. review unknown, custom, copyleft, network-copyleft, source-available, font,
-   model, media, and dataset terms;
-4. include required notices/license texts and source offers;
-5. verify commercial rights for logos, icons, screenshots, fonts, sample data,
-   model weights, prompts, and documentation;
-6. store the approved inventory and review evidence with the release artifact.
+1. identify the exact source revision and object/container artifacts;
+2. preserve `LICENSE`, `NOTICE.md`, `THIRD_PARTY_NOTICES.md`, copyright
+   notices, and modification notices;
+3. provide corresponding source in an AGPL-compliant manner for conveyed object
+   code, including installation information when section 6 requires it;
+4. expose the section 13 source offer to network users when applicable;
+5. run the locked dependency license gate and create release/container SBOMs;
+6. resolve new, missing, or unreviewed license metadata before release;
+7. verify provenance and rights for icons, fonts, media, model weights, data,
+   examples, and generated material;
+8. keep trademark and service-contract wording separate from source rights; and
+9. record release-owner and qualified-counsel approval outside repository
+   automation.
 
 ## Consequences
 
-### Positive
+The repository has a single clear license and Community users retain durable
+self-hosting rights. Mantly can sell operation and support without pretending
+that a service contract revokes source rights.
 
-- Current rights and terminology are unambiguous.
-- SaaS and on-premises sales remain possible.
-- Customer continuity/source-review needs can be negotiated proportionately.
-- Future public licensing remains possible after evidence and counsel review.
-
-### Costs and constraints
-
-- Public community contributions and redistribution are not currently enabled.
-- Customer procurement requires commercial terms and potentially escrow review.
-- Mantly must maintain a third-party compliance process and release notices.
-- Product/marketing must not imply rights that the agreement does not grant.
+Costs remain: source-offer operations, section 13 behavior, contribution
+provenance, third-party notices, release SBOMs, and reciprocal-license review.
+Future closed or dual-licensed work requires a genuine separable boundary and
+rights tracking.
 
 ## Revisit triggers
 
-Re-evaluate this ADR when one or more applies:
-
-- repeated enterprise demand for source inspection/escrow follows a common pattern;
-- an external contributor ecosystem becomes strategically valuable;
-- a stable open-core boundary emerges from real customer use;
-- partners require redistribution or embedded rights;
-- a public marketplace/distribution channel imposes licensing requirements;
-- acquisition/funding/strategic commitments change the business model;
-- counsel recommends a source-available or dual-license model with clear benefits.
-
-Any change requires a new ADR, copyright/provenance audit, third-party review,
-trademark decision, contribution terms, migration/notice plan, and approved public
-wording.
+Create a new ADR if Mantly proposes a dual-license offer, independently
+developed commercial component, acquisition of all necessary copyrights, a new
+distribution channel, or a material change in Community contribution strategy.
+Any new ADR must state that existing AGPL grants remain unaffected.

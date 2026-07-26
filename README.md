@@ -160,6 +160,8 @@ The production trust boundaries and response procedures are documented in:
 - [Editions and deployment modes](docs/editions.md)
 - [SaaS deployment](docs/deploy-saas.md)
 - [Commercial on-premises deployment](docs/deploy-onprem.md)
+- [Licensing and distribution decision](docs/decisions/0002-licensing-and-distribution.md)
+- [Third-party license process](docs/legal/third-party-licenses.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Trademark policy](TRADEMARKS.md)

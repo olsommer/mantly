@@ -1,0 +1,105 @@
+{
+  "schemaVersion": "1.0",
+  "acceptedSpdxExpressions": [
+    "(Apache-2.0 AND MIT)",
+    "(MPL-2.0 OR Apache-2.0)",
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 AND CNRI-Python",
+    "Apache-2.0 AND MIT",
+    "Apache-2.0 OR BSD-2-Clause",
+    "Apache-2.0 OR MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MIT AND ISC",
+    "MIT OR Apache-2.0",
+    "MPL-2.0",
+    "MPL-2.0 AND MIT",
+    "MPL-2.0 OR Apache-2.0",
+    "OFL-1.1",
+    "PSF-2.0",
+    "Python-2.0"
+  ],
+  "metadataAliases": {
+    "Apache 2.0": "Apache-2.0",
+    "Apache License 2.0": "Apache-2.0",
+    "Apache License, Version 2.0": "Apache-2.0",
+    "MIT License": "MIT"
+  },
+  "pythonOverrides": {
+    "annotated-types@0.7.0": {
+      "spdx": "MIT",
+      "evidence": "Wheel LICENSE contains the MIT license."
+    },
+    "colorama@0.4.6": {
+      "spdx": "BSD-3-Clause",
+      "evidence": "Wheel LICENSE.txt contains the three-clause BSD text."
+    },
+    "jsonpatch@1.33": {
+      "spdx": "BSD-3-Clause",
+      "evidence": "Wheel LICENSE contains the three-clause BSD text."
+    },
+    "jsonpointer@3.0.0": {
+      "spdx": "BSD-3-Clause",
+      "evidence": "Wheel LICENSE.txt contains the three-clause BSD text."
+    },
+    "markdownify@1.2.3": {
+      "spdx": "MIT",
+      "evidence": "Wheel LICENSE contains the MIT license."
+    },
+    "nest-asyncio@1.6.0": {
+      "spdx": "BSD-2-Clause",
+      "evidence": "Wheel LICENSE identifies the BSD 2-Clause license."
+    },
+    "packaging@25.0": {
+      "spdx": "Apache-2.0 OR BSD-2-Clause",
+      "evidence": "Wheel LICENSE permits use under either LICENSE.APACHE or LICENSE.BSD."
+    },
+    "pyasn1-modules@0.4.2": {
+      "spdx": "BSD-2-Clause",
+      "evidence": "Wheel LICENSE.txt contains the two-clause BSD text."
+    },
+    "stripe@15.0.1": {
+      "spdx": "MIT",
+      "evidence": "Wheel LICENSE contains the MIT license."
+    },
+    "tiktoken@0.12.0": {
+      "spdx": "MIT",
+      "evidence": "Wheel metadata embeds the complete MIT license."
+    },
+    "uuid-utils@0.13.0": {
+      "spdx": "BSD-3-Clause",
+      "evidence": "Wheel LICENSE.md contains the three-clause BSD text."
+    },
+    "xxhash@3.6.0": {
+      "spdx": "BSD-2-Clause",
+      "evidence": "Wheel LICENSE contains the two-clause BSD text."
+    }
+  },
+  "nodeOverrides": {
+    "format@0.2.2": {
+      "spdx": "MIT",
+      "evidence": "Installed package.json declares MIT in its legacy licenses array."
+    }
+  },
+  "prohibitedNodePackages": [
+    "@codesandbox/nodebox",
+    "@codesandbox/sandpack-client",
+    "@codesandbox/sandpack-react"
+  ],
+  "bundledComponents": [
+    {
+      "ecosystem": "runtime",
+      "package": "pocketbase",
+      "version": "0.36.5",
+      "spdx": "MIT",
+      "usage": "Bundled PocketBase runtime image",
+      "evidencePath": "third_party/pocketbase/LICENSE",
+      "evidenceSha256": "f2920a9626a17fad4b522bba2c125b5720c3d389812a8693f0bba2a7e84078d7",
+      "versionEvidencePath": "pocketbase/Dockerfile",
+      "versionVariable": "POCKETBASE_VERSION"
+    }
+  ]
+}

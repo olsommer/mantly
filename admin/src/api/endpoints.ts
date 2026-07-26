@@ -453,11 +453,15 @@ export interface LicenseStatus {
 
 export interface BillingStatus {
     plan: 'free' | 'pro' | 'business' | 'enterprise';
+    deploymentMode: 'cloud' | 'self_hosted' | 'dedicated';
+    edition: 'community' | 'business' | 'enterprise';
     subscriptionStatus: 'none' | 'active' | 'past_due' | 'canceled';
     cancelAtPeriodEnd: boolean;
     currentPeriodStart: string;
     currentPeriodEnd: string;
     usage: {
+        agentRunsThisPeriod: number;
+        /** @deprecated Transitional alias for older clients. */
         emailsThisPeriod: number;
         projects: number;
         users: number;
@@ -476,6 +480,8 @@ export interface BillingStatus {
     syncedAddons: Record<string, number>;
     retention?: Record<string, number>;
     limits: {
+        agentRunsPerMonth: number;
+        /** @deprecated Transitional alias for older clients. */
         emailsPerMonth: number;
         projects: number;
         users: number;
@@ -483,6 +489,10 @@ export interface BillingStatus {
         evalSets: number;
         evalCasesPerSet: number;
         retentionDays: number;
+    };
+    metering: {
+        unit: 'agent_run';
+        definition: string;
     };
     features: {
         feedback_learnings: boolean;
@@ -832,6 +842,27 @@ export interface SupportTriagePreparation {
     issue?: SupportIssue | null;
 }
 
+export interface SupportRunbookConcern extends Record<string, unknown> {
+    concernId?: string;
+    concernSummary?: string;
+    sourceText?: string;
+    confidence?: number;
+    matched?: boolean;
+    intentName?: string;
+    status?: string;
+    summary?: string;
+    requiresHuman?: boolean;
+    requiresHumanReason?: string | null;
+    error?: string | null;
+}
+
+export interface SupportIntentResult extends Record<string, unknown> {
+    matched?: boolean;
+    intentName?: string;
+    concerns?: SupportRunbookConcern[];
+    error?: string | null;
+}
+
 export interface SupportAiRun {
     id: string;
     issueId: string;
@@ -842,7 +873,7 @@ export interface SupportAiRun {
     requiresHuman: boolean;
     summary: string;
     identityResult: Record<string, unknown>;
-    intentResult: Record<string, unknown>;
+    intentResult: SupportIntentResult;
     securityResult: Record<string, unknown>;
     tokenUsage: Record<string, unknown>;
     toolCalls: Array<Record<string, unknown>>;
@@ -1942,11 +1973,13 @@ export interface SupportChannelSyncResult {
 }
 
 export interface SupportChannelTestMessageResult {
+    accepted?: boolean;
     status: string;
     processed: number;
     failed: number;
     skipped: number;
     unmatched?: number;
+    error?: string;
     payload: Record<string, unknown>;
     items: Array<{
         eventId?: string;
@@ -1956,6 +1989,13 @@ export interface SupportChannelTestMessageResult {
         messageId?: string;
         error?: string;
     }>;
+    runId?: string;
+    jobEventId?: string;
+    eventId?: string;
+    messageId?: string;
+    issueId?: string;
+    sourceIssueId?: string;
+    sourceMessageId?: string;
 }
 
 export interface SupportChannelSmokeResult extends SupportChannelTestMessageResult {
@@ -3423,7 +3463,11 @@ export const api = {
     updateIssue: async (
         projectId: string,
         issueId: string,
-        data: Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & { workflowSource?: string },
+        data: Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & {
+            workflowSource?: string;
+            resolveWithoutReply?: boolean;
+            resolutionNote?: string;
+        },
     ): Promise<ApiResponse<SupportIssue>> => {
         return apiClient.patch(`${p(projectId)}/issues/${encodeURIComponent(issueId)}`, data);
     },
@@ -3844,6 +3888,12 @@ export const api = {
         },
     ): Promise<ApiResponse<SupportChannelTestMessageResult>> => {
         return apiClient.post(`${p(projectId)}/channels/${encodeURIComponent(channelId)}/test-message`, data);
+    },
+    getChannelTestMessageJob: async (
+        projectId: string,
+        runId: string,
+    ): Promise<ApiResponse<SupportChannelTestMessageResult>> => {
+        return apiClient.get(`${p(projectId)}/channels/test-message-jobs/${encodeURIComponent(runId)}`);
     },
     smokeChannel: async (
         projectId: string,

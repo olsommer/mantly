@@ -110,7 +110,7 @@ VITE_IS_SAAS=true
 ENABLE_DEMO_MODE=false
 SAAS_SIGNUP_ENABLED=true
 
-# Optional LangSmith tracing for response-agent / LangChain runs
+# Optional LangSmith tracing for Inbox reply-composer / LangChain runs
 LANGSMITH_TRACING=false
 LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
 LANGSMITH_API_KEY=

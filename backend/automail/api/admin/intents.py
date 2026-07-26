@@ -84,7 +84,10 @@ async def upsert_intent(name: str, body: dict, ctx: ProjectEditorDep) -> dict:
 
     draft = get_draft_source(ctx.project_id, tenant_id=ctx.tenant_id)
     ensure_draft_exists(ctx.project_id, tenant_id=ctx.tenant_id)
-    upsert_project_intent(draft, name, content)
+    try:
+        upsert_project_intent(draft, name, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info("Upserted intent (draft): %s [project=%s]", name, ctx.project_id)
     return {"status": "ok", "name": name}
 
@@ -131,7 +134,10 @@ async def rename_intent(name: str, body: dict, ctx: ProjectEditorDep) -> dict:
     if rec is None:
         raise HTTPException(404, f"Intent '{name}' not found")
     content = compose_intent_content({**rec, "name": new_slug})
-    upsert_project_intent(draft, old_slug, content)
+    try:
+        upsert_project_intent(draft, old_slug, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     for rec in _list_all("intent_attachments", _intent_attachment_filter(ctx.project_id, old_slug)):
         _patch(f"/api/collections/intent_attachments/records/{rec['id']}", {"intent": new_slug})
     logger.info(

@@ -240,6 +240,9 @@ def store_llm_usage_events(
             "id": generate_id(),
             "run_id": run_id,
             "stage": call.get("stage") or "unknown",
+            "stage_execution_id": call.get("stageExecutionId") or "",
+            "usage_record_id": call.get("usageRecordId") or "",
+            "duration_scope": call.get("durationScope") or "",
             "provider": call.get("provider") or "",
             "model": call.get("model") or "",
             "billing_mode": call.get("billingMode") or "",
@@ -247,6 +250,9 @@ def store_llm_usage_events(
             "raw_usage": call.get("rawUsage") or {},
         }
         numeric_fields = {
+            "duration_ms": call.get("durationMs"),
+            "usage_payload_index": call.get("usagePayloadIndex"),
+            "usage_payload_count": call.get("usagePayloadCount"),
             "input_tokens": call.get("inputTokens"),
             "output_tokens": call.get("outputTokens"),
             "cached_input_tokens": call.get("cachedInputTokens"),

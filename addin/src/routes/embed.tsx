@@ -337,6 +337,7 @@ export const Embed = () => {
     const promptInjectionResult = latestContent?.promptInjectionResult;
     const requiresHuman = latestContent?.requiresHuman ?? false;
     const responseEnabled = intentResult?.response?.enabled ?? false;
+    const hasComposedResponse = Boolean(latestContent?.emailBody?.trim());
     const showActionsPanel = !requiresHuman && (!!identityResult || !!intentResult);
 
     // Derived: auto-reveal unless response config has auto=false and user hasn't clicked reveal
@@ -396,6 +397,7 @@ export const Embed = () => {
                     chatId="embed-preview"
                     projectId={activeProjectId}
                     responseRevealed={responseRevealed}
+                    hasComposedResponse={hasComposedResponse}
                     onRevealResponse={() => setRevealOverride(true)}
                 />
             )}
@@ -405,7 +407,12 @@ export const Embed = () => {
                     if (message.user !== 'response') return null;
 
                     const isLatest = message === latestResponse;
-                    if (isLatest && showActionsPanel && (!responseEnabled || !responseRevealed)) {
+                    if (
+                        isLatest
+                        && !hasComposedResponse
+                        && showActionsPanel
+                        && (!responseEnabled || !responseRevealed)
+                    ) {
                         return null;
                     }
 

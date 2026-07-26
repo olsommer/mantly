@@ -51,6 +51,13 @@ services:
       IS_SAAS: "${VITE_IS_SAAS:-true}"
       MANTLY_DEPLOYMENT_MODE: "${MANTLY_DEPLOYMENT_MODE:-cloud}"
       MANTLY_EDITION: "${MANTLY_EDITION:-community}"
+      # Local declaration only. Operational acceptance separately observes the
+      # actual container count with scripts/runtime_topology_inventory.py.
+      MANTLY_API_REPLICAS: "1"
+      MANTLY_STORAGE_MODE: "pocketbase-sqlite"
+      MANTLY_WORKER_MODE: "in-process"
+      MANTLY_LOCAL_APPLICATION_DATA: "true"
+      MANTLY_INSTANCE_ID: "${MANTLY_INSTANCE_ID:-mantly-api-primary}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       CORS_ORIGINS: "${CORS_ORIGINS:-${PUBLIC_URL}}"
       MANIFEST_BASE_URL: "${PUBLIC_URL}"

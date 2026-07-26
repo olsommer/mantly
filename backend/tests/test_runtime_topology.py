@@ -13,12 +13,15 @@ from automail.core.runtime_topology import inspect_runtime_topology, validate_ru
 def test_default_topology_is_supported() -> None:
     topology = validate_runtime_topology({})
 
-    assert topology.api_replicas == 1
+    assert topology.declared_api_replicas == 1
     assert topology.storage_mode == "pocketbase-sqlite"
     assert topology.worker_mode == "in-process"
     assert topology.local_application_data is True
-    assert topology.enabled_in_process_schedulers == ()
-    assert topology.supported is True
+    assert topology.enabled_in_process_schedulers == (
+        "SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS",
+        "SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS",
+    )
+    assert topology.configuration_supported is True
 
 
 def test_enabled_schedulers_are_reported() -> None:
@@ -33,18 +36,25 @@ def test_enabled_schedulers_are_reported() -> None:
     assert topology.enabled_in_process_schedulers == (
         "SUPPORT_SYNC_INTERVAL_SECONDS",
         "SUPPORT_DELIVERY_INTERVAL_SECONDS",
+        "SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS",
+        "SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS",
     )
 
 
 @pytest.mark.parametrize(
     ("env", "message"),
     [
-        ({"MANTLY_API_REPLICAS": "2"}, "MANTLY_API_REPLICAS must remain 1"),
+        ({"MANTLY_API_REPLICAS": "2"}, "declared MANTLY_API_REPLICAS must remain 1"),
         ({"MANTLY_STORAGE_MODE": "postgres"}, "MANTLY_STORAGE_MODE='postgres' is not implemented"),
         ({"MANTLY_WORKER_MODE": "external"}, "MANTLY_WORKER_MODE='external' is not implemented"),
         ({"MANTLY_LOCAL_APPLICATION_DATA": "false"}, "MANTLY_LOCAL_APPLICATION_DATA=false is not implemented"),
         (
-            {"MANTLY_WORKER_MODE": "disabled", "SUPPORT_DELIVERY_INTERVAL_SECONDS": "10"},
+            {
+                "MANTLY_WORKER_MODE": "disabled",
+                "SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS": "0",
+                "SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS": "0",
+                "SUPPORT_DELIVERY_INTERVAL_SECONDS": "10",
+            },
             "conflicts with enabled scheduler intervals",
         ),
     ],
@@ -59,6 +69,15 @@ def test_invalid_numeric_configuration_is_rejected() -> None:
         inspect_runtime_topology({"MANTLY_API_REPLICAS": "many"})
     with pytest.raises(RuntimeError, match="SUPPORT_SYNC_INTERVAL_SECONDS cannot be negative"):
         inspect_runtime_topology({"SUPPORT_SYNC_INTERVAL_SECONDS": "-1"})
+    with pytest.raises(RuntimeError, match="MANTLY_LOCAL_APPLICATION_DATA must be a boolean"):
+        inspect_runtime_topology({"MANTLY_LOCAL_APPLICATION_DATA": "maybe"})
+
+
+def test_disabled_worker_rejects_default_on_schedulers() -> None:
+    topology = inspect_runtime_topology({"MANTLY_WORKER_MODE": "disabled"})
+    assert topology.configuration_supported is False
+    with pytest.raises(RuntimeError, match="SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS"):
+        validate_runtime_topology({"MANTLY_WORKER_MODE": "disabled"})
 
 
 def test_sitecustomize_blocks_python_process_with_multiple_replicas() -> None:
@@ -81,4 +100,4 @@ def test_sitecustomize_blocks_python_process_with_multiple_replicas() -> None:
     assert result.returncode != 0
     assert "must-not-run" not in result.stdout
     assert "Mantly startup blocked" in combined
-    assert "MANTLY_API_REPLICAS must remain 1" in combined
+    assert "declared MANTLY_API_REPLICAS must remain 1" in combined

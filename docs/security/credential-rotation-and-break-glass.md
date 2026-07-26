@@ -3,9 +3,9 @@
 Status: **Required operational procedure. Deployment-specific account IDs,
 vault paths, and contacts must be recorded before production-like customer use.**
 
-Owner: Platform security owner  
-Backup owner: Incident commander on call  
-Evidence owner: Incident scribe or change operator
+- Owner: Platform security owner
+- Backup owner: Incident commander on call
+- Evidence owner: Incident scribe or change operator
 
 This runbook defines how Mantly production credentials are inventoried, rotated,
 revoked, and accessed during an emergency. It never records secret values.

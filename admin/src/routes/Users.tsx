@@ -101,11 +101,14 @@ export const Users = ({
                 setProjects(demoProjects);
                 setBilling({
                     plan: 'business',
+                    deploymentMode: 'cloud',
+                    edition: 'business',
                     subscriptionStatus: 'active',
                     cancelAtPeriodEnd: false,
                     currentPeriodStart: '',
                     currentPeriodEnd: '',
                     usage: {
+                        agentRunsThisPeriod: 0,
                         emailsThisPeriod: 0,
                         projects: demoProjects.length,
                         users: 1,
@@ -123,13 +126,18 @@ export const Users = ({
                     },
                     syncedAddons: {},
                     limits: {
+                        agentRunsPerMonth: 1000,
                         emailsPerMonth: 1000,
-                        projects: 1,
-                        users: 5,
+                        projects: 10,
+                        users: Number.POSITIVE_INFINITY,
                         evalRunsPerMonth: Number.POSITIVE_INFINITY,
                         evalSets: Number.POSITIVE_INFINITY,
                         evalCasesPerSet: Number.POSITIVE_INFINITY,
-                        retentionDays: 90,
+                        retentionDays: 365,
+                    },
+                    metering: {
+                        unit: 'agent_run',
+                        definition: 'One inbound customer message processed.',
                     },
                     features: {
                         feedback_learnings: true,
@@ -334,7 +342,7 @@ export const Users = ({
                                             {appSettings.isSaas
                                                 ? canAddUsers
                                                     ? t('Enter the email of an existing user. They must have created their own account first.')
-                                                    : t('The Free plan is limited to 1 user. Upgrade to Pro to add team members to your organisation.')
+                                                    : t('The Cloud Sandbox is limited to 1 user. Upgrade to Cloud to add team members to your organisation.')
                                                 : t('This password is temporary. Share it securely with the user.')}
                                         </DialogDescription>
                                     </DialogHeader>
@@ -373,6 +381,7 @@ export const Users = ({
                                                 <Input
                                                     id="new-user-email"
                                                     type="email"
+                                                    autoComplete="email"
                                                     value={email}
                                                     onChange={(e) => setEmail(e.target.value)}
                                                     placeholder="user@example.com"
@@ -384,6 +393,7 @@ export const Users = ({
                                                 <Input
                                                     id="new-user-password"
                                                     type="password"
+                                                    autoComplete="new-password"
                                                     value={password}
                                                     onChange={(e) => setPassword(e.target.value)}
                                                     minLength={8}

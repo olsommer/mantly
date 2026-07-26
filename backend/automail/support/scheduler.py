@@ -12,9 +12,11 @@ from typing import Any, Callable
 from automail.core.observability import runtime_observability
 from automail.db.pocketbase.client import (
     deliver_queued_issue_replies_for_scope,
+    expire_stale_direct_channel_processing_runs_for_scope,
     record_delivery_run,
     run_sla_breach_escalations_for_scope,
 )
+from automail.support.channel_test_jobs import run_queued_channel_test_jobs
 from automail.support.crm import sync_support_crm_connectors_for_scope
 from automail.support.ingestion import sync_support_channels_for_scope
 
@@ -24,10 +26,14 @@ _started = False
 _delivery_started = False
 _crm_started = False
 _sla_started = False
+_processing_expiry_started = False
+_channel_test_jobs_started = False
 _lock = threading.Lock()
 _delivery_lock = threading.Lock()
 _crm_lock = threading.Lock()
 _sla_lock = threading.Lock()
+_processing_expiry_lock = threading.Lock()
+_channel_test_jobs_lock = threading.Lock()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -88,6 +94,9 @@ def _numeric_details(result: dict[str, Any]) -> dict[str, Any]:
         "escalated",
         "claimed",
         "retried",
+        "inspected",
+        "expired",
+        "started",
     }
     details: dict[str, Any] = {}
     for key in allowed:
@@ -254,6 +263,38 @@ def run_scheduled_support_sla_escalations(
     )
 
 
+def run_scheduled_support_processing_expiry(
+    *,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    limit: int = 200,
+    source: str = "scheduler",
+) -> dict[str, Any]:
+    return _run_observed(
+        "support.processing_expiry",
+        lambda: expire_stale_direct_channel_processing_runs_for_scope(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            limit=max(1, min(limit, 500)),
+            source=source,
+        ),
+    )
+
+
+def run_scheduled_channel_test_jobs(
+    *,
+    limit: int = 25,
+    stale_minutes: int = 16,
+) -> dict[str, Any]:
+    return _run_observed(
+        "support.channel_test_jobs",
+        lambda: run_queued_channel_test_jobs(
+            limit=max(1, min(limit, 200)),
+            stale_minutes=max(1, stale_minutes),
+        ),
+    )
+
+
 def _sleep_after(started: float, interval_seconds: int) -> None:
     elapsed = time.monotonic() - started
     time.sleep(max(1, interval_seconds - int(elapsed)))
@@ -352,6 +393,56 @@ def _configure_component(name: str, interval_seconds: int, project_id: str | Non
         stale_after_seconds=max(interval_seconds * 3, interval_seconds + 60),
         details={"intervalSeconds": interval_seconds, "projectId": project_id or "*"},
     )
+
+
+def _loop_processing_expiry(
+    interval_seconds: int,
+    tenant_id: str | None,
+    project_id: str | None,
+    limit: int,
+) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            result = run_scheduled_support_processing_expiry(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                limit=limit,
+                source="scheduler",
+            )
+            logger.info(
+                "support_processing_expiry_scheduler_run",
+                extra={"event": "support_processing_expiry_scheduler_run", **_numeric_details(result)},
+            )
+        except Exception:
+            logger.warning(
+                "support_processing_expiry_scheduler_failed",
+                exc_info=True,
+                extra={"event": "support_processing_expiry_scheduler_failed"},
+            )
+        _sleep_after(started, interval_seconds)
+
+
+def _loop_channel_test_jobs(interval_seconds: int, limit: int, stale_minutes: int) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            result = run_scheduled_channel_test_jobs(
+                limit=limit,
+                stale_minutes=stale_minutes,
+            )
+            if result.get("inspected"):
+                logger.info(
+                    "channel_test_job_scheduler_run",
+                    extra={"event": "channel_test_job_scheduler_run", **_numeric_details(result)},
+                )
+        except Exception:
+            logger.warning(
+                "channel_test_job_scheduler_failed",
+                exc_info=True,
+                extra={"event": "channel_test_job_scheduler_failed"},
+            )
+        _sleep_after(started, interval_seconds)
 
 
 def start_support_sync_scheduler() -> bool:
@@ -466,5 +557,65 @@ def start_support_sla_scheduler() -> bool:
     logger.info(
         "support_sla_scheduler_started",
         extra={"event": "support_sla_scheduler_started", "intervalSeconds": interval_seconds, "projectId": project_id or "*"},
+    )
+    return True
+
+
+def start_support_processing_expiry_scheduler() -> bool:
+    """Start the default-on abandoned-processing expiry sweep."""
+    global _processing_expiry_started
+    interval_seconds = _int_env("SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS", 60)
+    tenant_id = os.getenv("SUPPORT_PROCESSING_EXPIRY_TENANT_ID", "").strip() or None
+    project_id = os.getenv("SUPPORT_PROCESSING_EXPIRY_PROJECT_ID", "").strip() or None
+    _configure_component("support.processing_expiry", interval_seconds, project_id)
+    if interval_seconds <= 0:
+        return False
+    limit = _int_env("SUPPORT_PROCESSING_EXPIRY_LIMIT", 200)
+    with _processing_expiry_lock:
+        if _processing_expiry_started:
+            return True
+        thread = threading.Thread(
+            target=_loop_processing_expiry,
+            args=(interval_seconds, tenant_id, project_id, limit),
+            daemon=True,
+            name="support-processing-expiry-scheduler",
+        )
+        thread.start()
+        _processing_expiry_started = True
+    logger.info(
+        "support_processing_expiry_scheduler_started",
+        extra={
+            "event": "support_processing_expiry_scheduler_started",
+            "intervalSeconds": interval_seconds,
+            "projectId": project_id or "*",
+        },
+    )
+    return True
+
+
+def start_channel_test_job_scheduler() -> bool:
+    """Start default-on recovery for durably queued admin test messages."""
+
+    global _channel_test_jobs_started
+    interval_seconds = _int_env("SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS", 5)
+    _configure_component("support.channel_test_jobs", interval_seconds, None)
+    if interval_seconds <= 0:
+        return False
+    limit = _int_env("SUPPORT_CHANNEL_TEST_JOB_LIMIT", 25)
+    stale_minutes = _int_env("SUPPORT_CHANNEL_TEST_JOB_STALE_MINUTES", 16)
+    with _channel_test_jobs_lock:
+        if _channel_test_jobs_started:
+            return True
+        thread = threading.Thread(
+            target=_loop_channel_test_jobs,
+            args=(interval_seconds, limit, stale_minutes),
+            daemon=True,
+            name="channel-test-job-scheduler",
+        )
+        thread.start()
+        _channel_test_jobs_started = True
+    logger.info(
+        "channel_test_job_scheduler_started",
+        extra={"event": "channel_test_job_scheduler_started", "intervalSeconds": interval_seconds},
     )
     return True

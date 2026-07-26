@@ -1,7 +1,8 @@
-# docker-compose.onprem.yml — On-premise deployment
+# docker-compose.onprem.yml — Commercial on-premise deployment
 #
 # Uses Dockerfile.onprem which compiles Python sources to native extensions.
-# Includes license validation against the Mantly SaaS server.
+# Includes commercial license validation against the Mantly SaaS server.
+# Community self-hosting uses docker-compose.community.yml instead.
 #
 # Usage:
 #   cp .env.onprem.example .env
@@ -58,6 +59,8 @@ services:
     environment:
       REQUIRE_AUTH: "true"
       IS_SAAS: "false"
+      MANTLY_DEPLOYMENT_MODE: "dedicated"
+      MANTLY_EDITION: "enterprise"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       CORS_ORIGINS: "${PUBLIC_URL}"
       MANIFEST_BASE_URL: "${PUBLIC_URL}"

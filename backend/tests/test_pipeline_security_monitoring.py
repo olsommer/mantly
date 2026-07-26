@@ -26,11 +26,15 @@ def test_security_monitoring_is_warning_only(monkeypatch):
         "automail.pipeline.orchestrator.run_intent_agent",
         lambda **_kwargs: (
             IntentResult(matched=True, intent_name="support"),
-            AgentResponse(
-                response_text="Handled.",
-                activated_intent="support",
-                requires_human=False,
-            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "automail.pipeline.response.composer.compose_pipeline_reply",
+        lambda **_kwargs: AgentResponse(
+            response_text="Handled.",
+            activated_intent="support",
+            requires_human=False,
         ),
     )
     def fake_detect_phishing(*_args, **kwargs):

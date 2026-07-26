@@ -2,6 +2,7 @@
 config.env
 .env
 .env.*
+!.env.community.example
 !deploy/.env.example
 
 # Draft config (runtime state, not committed)
@@ -67,6 +68,8 @@ playwright-report/
 test-results/
 addin/playwright-report/
 addin/test-results/
+.playwright-cli/
+output/playwright/
 server-connection.md
 skills-lock.json
 todo.md

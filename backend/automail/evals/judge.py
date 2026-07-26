@@ -24,6 +24,8 @@ from automail.core.config import ConfigSource, read_config
 
 logger = logging.getLogger(__name__)
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
+_DEFAULT_JUDGE_TIMEOUT_SECONDS = 300
+_DEFAULT_JUDGE_MAX_RETRIES = 5
 
 
 @dataclass
@@ -133,7 +135,13 @@ def _parse_judge_response(text: str, has_response: bool) -> JudgeResult:
     )
 
 
-def _get_judge_llm(config_path: ConfigSource = None, tenant_id: str | None = None) -> Any:
+def _get_judge_llm(
+    config_path: ConfigSource = None,
+    tenant_id: str | None = None,
+    *,
+    timeout: int = _DEFAULT_JUDGE_TIMEOUT_SECONDS,
+    max_retries: int = _DEFAULT_JUDGE_MAX_RETRIES,
+) -> Any:
     """Create a LangChain LLM for the eval judge.
 
     Uses the shared ``create_llm`` factory so that provider selection,
@@ -148,8 +156,8 @@ def _get_judge_llm(config_path: ConfigSource = None, tenant_id: str | None = Non
 
     return create_llm(
         config,
-        timeout=300,
-        max_retries=5,
+        timeout=timeout,
+        max_retries=max_retries,
         temperature=0.1,
     )
 
@@ -160,6 +168,9 @@ def run_judge(
     has_response: bool,
     config_path: ConfigSource = None,
     tenant_id: str | None = None,
+    *,
+    timeout: int = _DEFAULT_JUDGE_TIMEOUT_SECONDS,
+    max_retries: int = _DEFAULT_JUDGE_MAX_RETRIES,
 ) -> JudgeResult:
     """Run the LLM judge on a single eval case.
 
@@ -167,11 +178,18 @@ def run_judge(
         expected: Dict with expected_customer_found, expected_intent_name, etc.
         actual: Dict with identity_result, intent_result, agent_response from pipeline.
         has_response: Whether to also judge the response text dimension.
+        timeout: Maximum duration in seconds for the provider request.
+        max_retries: Maximum provider retries for this judge call.
 
     Returns:
         JudgeResult with scores for each dimension.
     """
-    llm = _get_judge_llm(config_path=config_path, tenant_id=tenant_id)
+    llm = _get_judge_llm(
+        config_path=config_path,
+        tenant_id=tenant_id,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
     prompt = _build_judge_prompt(expected, actual, has_response)
 
     logger.info(

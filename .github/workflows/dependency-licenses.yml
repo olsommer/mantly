@@ -1,0 +1,71 @@
+name: Dependency licenses and SBOMs
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            admin/package-lock.json
+            addin/package-lock.json
+            landing/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install default dependencies
+        run: |
+          uv sync --directory backend --frozen --no-dev
+          npm ci --prefix admin
+          npm ci --prefix addin
+          npm ci --prefix landing
+
+      - name: Enforce reviewed license policy
+        run: node scripts/check-dependency-licenses.mjs
+
+      - name: Generate ecosystem SBOMs
+        run: |
+          mkdir -p artifacts/sbom
+          uvx --from cyclonedx-bom==7.3.0 cyclonedx-py environment \
+            backend/.venv/bin/python \
+            --pyproject backend/pyproject.toml \
+            --gather-license-texts \
+            --output-reproducible \
+            --output-format JSON \
+            --output-file artifacts/sbom/backend.cdx.json
+          for app in admin addin landing; do
+            (cd "$app" && npx --yes @cyclonedx/cyclonedx-npm@4.2.1 \
+              --omit dev \
+              --gather-license-texts \
+              --output-reproducible \
+              --output-file "../artifacts/sbom/${app}.cdx.json")
+          done
+
+      - name: Upload SBOMs and reviewed notices
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-dependency-sboms
+          path: |
+            artifacts/sbom/*.cdx.json
+            THIRD_PARTY_NOTICES.md
+          if-no-files-found: error

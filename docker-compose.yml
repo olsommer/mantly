@@ -49,6 +49,8 @@ services:
       # ── Core ────────────────────────────────────────────────────────────
       REQUIRE_AUTH: "true"
       IS_SAAS: "${VITE_IS_SAAS:-true}"
+      MANTLY_DEPLOYMENT_MODE: "${MANTLY_DEPLOYMENT_MODE:-cloud}"
+      MANTLY_EDITION: "${MANTLY_EDITION:-community}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       CORS_ORIGINS: "${CORS_ORIGINS:-${PUBLIC_URL}}"
       MANIFEST_BASE_URL: "${PUBLIC_URL}"
@@ -58,6 +60,7 @@ services:
       PB_PUBLIC_URL: "${PB_PUBLIC_URL:-${PUBLIC_URL}/pb}"
       ADDIN_ID: "${ADDIN_ID:-}"
       ENABLE_DEMO_MODE: "${ENABLE_DEMO_MODE:-false}"
+      ENABLE_E2E_FIXTURES: "${ENABLE_E2E_FIXTURES:-false}"
 
       # ── LLM ────────────────────────────────────────────────────────────
       # Free uses the Mantly-managed key. Paid tenants can BYOK in settings.

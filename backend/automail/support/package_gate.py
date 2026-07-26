@@ -66,6 +66,10 @@ SUPPORT_MIGRATIONS: tuple[str, ...] = (
     "56_support_agent_messages.js",
     "57_support_delivery_claims.js",
     "58_intent_learning_proposals.js",
+    "59_support_outbound_idempotency.js",
+    "60_llm_usage_duration.js",
+    "61_email_processing_claims.js",
+    "63_support_channel_webhook_claims.js",
 )
 
 
@@ -238,6 +242,28 @@ REQUIRED_BACKEND_FILES: tuple[PackageRequirement, ...] = (
         "pocketbase-runtime",
         "pocketbase/pb_hooks/support_delivery_helpers.js",
         ("module.exports", "support_outbound_messages"),
+    ),
+    PackageRequirement(
+        "pocketbase-runtime",
+        "pocketbase/pb_hooks/support_channel_webhook_claims.pb.js",
+        (
+            "/api/mantly/support-channel-webhooks/{id}/claim",
+            "/api/mantly/support-channel-webhooks/{id}/complete",
+            "runInTransaction",
+            "processing_claim_token",
+            "retry_policy_version",
+            "support_channel_webhook_claims_helpers.js",
+        ),
+    ),
+    PackageRequirement(
+        "pocketbase-runtime",
+        "pocketbase/pb_hooks/support_channel_webhook_claims_helpers.js",
+        (
+            "module.exports",
+            "support_channel_webhook_events",
+            "publicRecord",
+            "RETRY_POLICY_VERSION",
+        ),
     ),
     PackageRequirement(
         "backend-entrypoint",

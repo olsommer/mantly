@@ -453,7 +453,7 @@ class TestLicenseValidationEndpoint:
         assert "Missing" in body["message"]
 
     @patch("automail.api.admin.license.IS_SAAS", True)
-    @patch("automail.api.admin.license._first", return_value=None)
+    @patch("automail.billing.license_store._first", return_value=None)
     def test_validate_rejects_unknown_key(self, _mock_first):
         client = self._get_client()
         resp = client.post("/api/license/validate", json={
@@ -466,7 +466,7 @@ class TestLicenseValidationEndpoint:
         assert "Invalid" in body["message"]
 
     @patch("automail.api.admin.license.IS_SAAS", True)
-    @patch("automail.api.admin.license._first", return_value={
+    @patch("automail.billing.license_store._first", return_value={
         "id": "rec1", "key": "valid-key", "is_active": False,
         "expires_at": "", "instance_id": "", "max_users": None,
     })
@@ -481,7 +481,7 @@ class TestLicenseValidationEndpoint:
         assert "revoked" in body["message"].lower()
 
     @patch("automail.api.admin.license.IS_SAAS", True)
-    @patch("automail.api.admin.license._first", return_value={
+    @patch("automail.billing.license_store._first", return_value={
         "id": "rec1", "key": "valid-key", "is_active": True,
         "expires_at": "2020-01-01T00:00:00Z", "instance_id": "", "max_users": None,
     })
@@ -496,7 +496,7 @@ class TestLicenseValidationEndpoint:
         assert "expired" in body["message"].lower()
 
     @patch("automail.api.admin.license.IS_SAAS", True)
-    @patch("automail.api.admin.license._first", return_value={
+    @patch("automail.billing.license_store._first", return_value={
         "id": "rec1", "key": "valid-key", "is_active": True,
         "expires_at": "", "instance_id": "machine-A", "max_users": None,
     })
@@ -512,7 +512,7 @@ class TestLicenseValidationEndpoint:
 
     @patch("automail.api.admin.license.IS_SAAS", True)
     @patch("automail.api.admin.license._patch")
-    @patch("automail.api.admin.license._first", return_value={
+    @patch("automail.billing.license_store._first", return_value={
         "id": "rec1", "key": "valid-key", "is_active": True,
         "expires_at": "", "instance_id": "", "max_users": 50,
     })
@@ -531,7 +531,7 @@ class TestLicenseValidationEndpoint:
         assert "new-machine" in str(call_args)
 
     @patch("automail.api.admin.license.IS_SAAS", True)
-    @patch("automail.api.admin.license._first", return_value={
+    @patch("automail.billing.license_store._first", return_value={
         "id": "rec1", "key": "valid-key", "is_active": True,
         "expires_at": "2030-12-31T00:00:00Z", "instance_id": "machine-A", "max_users": 10,
     })
@@ -559,49 +559,76 @@ class TestLicenseAdminEndpoints:
         from automail.main import app
         return TestClient(app)
 
+    def _platform_admin_headers(self):
+        from automail.core.auth import create_token
+
+        token = create_token(
+            "platform-admin",
+            "platform@example.test",
+            "platform-tenant",
+            False,
+            is_platform_admin=True,
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    @patch("automail.core.auth.REQUIRE_AUTH", True)
     @patch("automail.api.admin.license.IS_SAAS", False)
     def test_list_licenses_404_when_not_saas(self):
         client = self._get_client()
-        resp = client.get("/api/admin/licenses")
+        resp = client.get("/api/admin/licenses", headers=self._platform_admin_headers())
         assert resp.status_code == 404
 
+    @patch("automail.core.auth.REQUIRE_AUTH", True)
     @patch("automail.api.admin.license.IS_SAAS", True)
     @patch("automail.api.admin.license._list_all", return_value=[
-        {"id": "r1", "key": "key1", "tenant_name": "Tenant A", "max_users": 5,
+        {"id": "r1", "key": "a" * 40, "tenant_name": "Tenant A", "max_users": 5,
          "expires_at": "", "is_active": True, "instance_id": "", "created": "2025-01-01"},
     ])
     def test_list_licenses_returns_records(self, _mock_list):
         client = self._get_client()
-        resp = client.get("/api/admin/licenses")
+        resp = client.get("/api/admin/licenses", headers=self._platform_admin_headers())
         assert resp.status_code == 200
         body = resp.json()
         assert len(body) == 1
         assert body[0]["tenantName"] == "Tenant A"
-        assert body[0]["key"] == "key1"
+        assert body[0]["key"] == "aaaaaaaa..."
+        assert body[0]["keyPrefix"] == "aaaaaaaa"
+        assert "a" * 40 not in resp.text
 
+    @patch("automail.core.auth.REQUIRE_AUTH", True)
     @patch("automail.api.admin.license.IS_SAAS", True)
     @patch("automail.api.admin.license._post", return_value={"id": "new_rec"})
-    def test_create_license(self, _mock_post):
+    def test_create_license(self, mock_post):
+        from automail.billing.license_store import license_key_digest
+
         client = self._get_client()
         resp = client.post("/api/admin/licenses", json={
             "tenant_name": "New Tenant",
             "max_users": 25,
-        })
+        }, headers=self._platform_admin_headers())
         assert resp.status_code == 200
         body = resp.json()
         assert body["id"] == "new_rec"
         assert body["tenantName"] == "New Tenant"
         assert len(body["key"]) == 40  # secrets.token_hex(20) → 40 chars
+        assert body["keyPrefix"] == body["key"][:8]
+        assert resp.headers["cache-control"] == "no-store"
+        stored = mock_post.call_args.args[1]
+        assert stored["key"] == license_key_digest(body["key"])
+        assert stored["key_prefix"] == body["keyPrefix"]
+        assert stored["key"] != body["key"]
 
+    @patch("automail.core.auth.REQUIRE_AUTH", True)
     @patch("automail.api.admin.license.IS_SAAS", True)
     @patch("automail.api.admin.license._patch")
     def test_revoke_license(self, mock_patch):
         client = self._get_client()
-        resp = client.delete("/api/admin/licenses/rec123")
+        resp = client.delete("/api/admin/licenses/rec123", headers=self._platform_admin_headers())
         assert resp.status_code == 200
         assert resp.json()["status"] == "revoked"
         mock_patch.assert_called_once()
 
+    @patch("automail.core.auth.REQUIRE_AUTH", True)
     @patch("automail.api.admin.license.IS_SAAS", True)
     @patch("automail.api.admin.license._patch", side_effect=httpx.HTTPStatusError(
         "not found", request=MagicMock(),
@@ -609,7 +636,7 @@ class TestLicenseAdminEndpoints:
     ))
     def test_revoke_nonexistent_license(self, _mock_patch):
         client = self._get_client()
-        resp = client.delete("/api/admin/licenses/nonexistent")
+        resp = client.delete("/api/admin/licenses/nonexistent", headers=self._platform_admin_headers())
         assert resp.status_code == 404
 
 

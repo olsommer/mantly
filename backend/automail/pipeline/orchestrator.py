@@ -57,12 +57,13 @@ def run_pipeline(
     tenant_id: str | None = None,
     project_id: str | None = None,
     config_source: Any = None,
+    compose_response: bool = True,
 ) -> PipelineResult:
     """Run the two-phase pipeline for an incoming email.
 
     Phase 1 (Identity) runs first, then Phase 2 (Intent) receives the identity
-    result so intent processing has full customer context. If the matched intent
-    has response drafting enabled, a response agent runs internally.
+    result so runbook processing has full customer context. When requested, one
+    message-level composer drafts a reply after every concern has finished.
 
     A failure in Phase 1 does not abort the pipeline — Phase 2 receives an
     empty identity result and continues best-effort.
@@ -74,6 +75,8 @@ def run_pipeline(
         tenant_id: Optional tenant ID for secrets resolution.
         project_id: Optional project ID for secrets resolution.
         config_source: Optional config source for draft/live PB pipeline storage.
+        compose_response: Draft one combined reply. Channel ingestion disables
+            this because its persisted ticket-level Inbox composer owns the reply.
 
     Returns:
         PipelineResult containing both phase outputs plus the agent response.
@@ -162,7 +165,7 @@ def run_pipeline(
                 identity_result = IdentityResult(error=str(exc))
 
             # ------------------------------------------------------------------
-            # Phase 2: Intent Analysis (classify → process → optional response)
+            # Phase 2: Concern analysis and runbook processing
             # ------------------------------------------------------------------
             try:
                 intent_result, agent_response = run_intent_agent(
@@ -179,6 +182,29 @@ def run_pipeline(
                 logger.error("Phase 2 (Intent) failed: %s — using empty fallback", exc, exc_info=True)
                 intent_result = IntentResult(error=str(exc))
                 agent_response = None
+            if compose_response and intent_result.matched:
+                try:
+                    from automail.pipeline.response.composer import compose_pipeline_reply
+
+                    agent_response = compose_pipeline_reply(
+                        email=email,
+                        identity_result=identity_result,
+                        intent_result=intent_result,
+                        intents_dir=cs if cs else None,
+                        config_path=cs if cs else None,
+                        creator=creator,
+                        parsed_attachments=parsed_attachments,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                    )
+                except Exception as exc:
+                    logger.error("Reply composer failed: %s", exc, exc_info=True)
+                    agent_response = AgentResponse(
+                        response_text="",
+                        activated_intent=intent_result.intent_name,
+                        requires_human=True,
+                        requires_human_reason=f"Reply composition failed: {exc}",
+                    )
         finally:
             generated_attachments = collect_generated_attachments(generated_token)
             tools_used = collect_tool_calls(tool_call_token)

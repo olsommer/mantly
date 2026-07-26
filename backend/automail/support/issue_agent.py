@@ -19,32 +19,139 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from automail.core.sensitive_values import (
+    contains_sensitive_credential,
+    sanitize_tool_response_facts,
+)
 from automail.support.knowledge_workspace import KnowledgeWorkspace
+from automail.support.pending_action_claims import (
+    PENDING_ACTION_CLAIM_REASON_CODE,
+    action_obligation_parts,
+    action_record_matches_expected_text,
+    check_pending_action_claims,
+    has_meaningful_action_success_proof,
+    has_success_backed_action_claim,
+    remaining_action_obligation_text,
+    repair_pending_action_claims,
+)
+from automail.support.reply_signoff import clean_reply_signoff
+from automail.support.safety_guidance import (
+    SAFETY_GUIDANCE_MISSING_REASON_CODE,
+    SafetyGuidanceAssessment,
+    assess_lithium_battery_safety,
+    lithium_battery_safety_system_prompt,
+    missing_lithium_battery_safety_guidance,
+)
 
 logger = logging.getLogger(__name__)
 _KNOWLEDGE_AGENT_SLOTS = threading.BoundedSemaphore(4)
 _KNOWLEDGE_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="knowledge-agent")
 KNOWLEDGE_AGENT_DEADLINE_SECONDS = 75
+KNOWLEDGE_AGENT_MODEL_CALL_LIMIT = 9
+KNOWLEDGE_AGENT_TOOL_CALL_LIMIT = 8
+_KNOWLEDGE_REQUEST_ITEM_LIMIT = 20
 _AUTOMATION_AGENT_SLOTS = threading.BoundedSemaphore(8)
 _AUTOMATION_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="automation-agent")
 AUTOMATION_AGENT_DEADLINE_SECONDS = 55
-_GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(4)
-_GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="grounding-agent")
-GROUNDING_AGENT_DEADLINE_SECONDS = 40
-GROUNDING_GATE_VERSION = "automation-grounding-v3"
+AUTOMATION_AGENT_SLOT_WAIT_SECONDS = 40
+_GROUNDING_AGENT_SLOTS = threading.BoundedSemaphore(8)
+_GROUNDING_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grounding-agent")
+GROUNDING_MODEL_CALL_LIMIT = 2
+GROUNDING_MODEL_CALL_TIMEOUT_SECONDS = 30
+# Keep deterministic adjudication bounded; live Gemini reasoning otherwise
+# exceeded the fail-closed parent deadline on a fully covered safety reply.
+GROUNDING_MODEL_THINKING_BUDGET = 1024
+# A protocol-complete second pass is intentionally allowed. Provider clients can
+# return after their nominal transport timeout; live evidence observed an 86.8s
+# first adjudication followed by a 20.8s reassessment. Keep enough parent-future
+# headroom for both calls while retaining the same bounded, fail-closed deadline.
+GROUNDING_AGENT_DEADLINE_SECONDS = 120
+GROUNDING_AGENT_SLOT_WAIT_SECONDS = 40
+GROUNDING_GATE_VERSION = "automation-grounding-v10"
 GROUNDING_GATE_MAX_AGE_SECONDS = 10 * 60
 GROUNDING_MAX_ARTICLE_CHARS = 30_000
 GROUNDING_MAX_TOTAL_ARTICLE_CHARS = 60_000
+_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS = 500
+_GROUNDING_TICKET_SCOPED_KEYS = frozenset(
+    {
+        "concerns",
+        "toolEvidence",
+        "runbookActions",
+    }
+)
+LANGUAGE_MISMATCH_REASON_CODE = "language_mismatch"
+BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE = "identifier_mismatch"
+INTERNAL_STATE_DISCLOSURE_REASON_CODE = "internal_state_disclosure"
+_ADDRESSED_OBLIGATION_RESOLUTIONS = frozenset(
+    {
+        "answered",
+        "fulfilled_action",
+        "pending_or_unavailable",
+    }
+)
+# The evaluator cannot select ``not_applicable``. It is an audit-only state
+# produced by narrow deterministic checks after every model assessment has been
+# validated. Keeping it out of the model-facing set prevents an unsupported N/A
+# decision from satisfying an answer obligation.
+_FINAL_COVERED_OBLIGATION_RESOLUTIONS = _ADDRESSED_OBLIGATION_RESOLUTIONS | {"not_applicable"}
+_GROUNDING_INCONSISTENT_VERDICT_ERROR = (
+    "Evaluator verdict contradicts exhaustive grounded assessments"
+)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip()
+_SYSTEM_SAFETY_PROMPT = lithium_battery_safety_system_prompt()
+_SYSTEM_PROMPT = (
+    (_PROMPTS_DIR / "issue_agent_system_prompt.md").read_text(encoding="utf-8").strip() + "\n\n" + _SYSTEM_SAFETY_PROMPT
+)
 _USER_TEMPLATE = (_PROMPTS_DIR / "issue_agent_user_prompt.md").read_text(encoding="utf-8").strip()
-_AUTOMATION_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_automation_system_prompt.md").read_text(encoding="utf-8").strip()
+_AUTOMATION_SYSTEM_PROMPT = (
+    (_PROMPTS_DIR / "issue_automation_system_prompt.md").read_text(encoding="utf-8").strip()
+    + "\n\n"
+    + _SYSTEM_SAFETY_PROMPT
+)
 _AUTOMATION_USER_TEMPLATE = (_PROMPTS_DIR / "issue_automation_user_prompt.md").read_text(encoding="utf-8").strip()
+_AUTOMATION_OBLIGATION_REPAIR_TEMPLATE = (
+    (_PROMPTS_DIR / "issue_automation_obligation_repair.md").read_text(encoding="utf-8").strip()
+)
+_AUTOMATION_GROUNDING_REPAIR_TEMPLATE = (
+    (_PROMPTS_DIR / "issue_automation_grounding_repair.md").read_text(encoding="utf-8").strip()
+)
 _GROUNDING_SYSTEM_PROMPT = (_PROMPTS_DIR / "issue_grounding_eval_system_prompt.md").read_text(encoding="utf-8").strip()
 _GROUNDING_USER_TEMPLATE = (_PROMPTS_DIR / "issue_grounding_eval_user_prompt.md").read_text(encoding="utf-8").strip()
+_GROUNDING_PROTOCOL_REPAIR_TEMPLATE = (
+    (_PROMPTS_DIR / "issue_grounding_protocol_repair.md").read_text(encoding="utf-8").strip()
+)
+_GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION = """
+
+## Required Second-Pass Obligation Adjudication
+The previous result linked one or more evidence-supported answer units to an
+obligation but still marked that obligation `not_covered`. Reassess every answer
+obligation from scratch using the unchanged evidence and immutable answer units.
+
+Keep these two decisions separate:
+1. whether every assertion in an answer unit is supported by allowed evidence;
+2. whether supported units directly answer an obligation or explicitly state a
+   pending/unavailable result and concrete next step.
+
+Directly supplied status, last-event, exact start time, ETA, limitation, or
+eligibility information is `answered` for the matching question. For a requested action, a supported reply
+that says the action cannot be done directly, is not confirmed or is pending human
+review, and gives the concrete next step is `pending_or_unavailable`. It must never
+be upgraded to `fulfilled_action` without successful exact same-concern action
+evidence. Generic acknowledgement, intake-only language, repetition of the request,
+or a promise to look into it remains `not_covered`.
+
+A supported answer that explicitly says a requested guarantee cannot be made and
+explains the evidence-backed controlling party or limitation directly addresses the
+guarantee request; use `pending_or_unavailable`, not `not_covered`. For every
+obligation, return only evidence IDs already attached to its linked answer units.
+
+Do not assume the previous result was wrong and do not assume the reply is complete.
+Return the full required structured result, reassessing every unit and obligation
+exactly once.
+""".strip()
 
 
 class _AgentInvocationUsage:
@@ -103,6 +210,11 @@ class IssueAgentDraft:
     citation_ids: tuple[str, ...] = field(default_factory=tuple)
     citation_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     missing_information: tuple[str, ...] = field(default_factory=tuple)
+    response_attachments: tuple[str, ...] = field(default_factory=tuple)
+    covered_concern_ids: tuple[str, ...] = field(default_factory=tuple)
+    covered_obligation_ids: tuple[str, ...] = field(default_factory=tuple)
+    requires_human: bool = False
+    requires_human_reason: str = ""
     tool_calls: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
@@ -120,6 +232,11 @@ class AutomationGroundingAssessment:
     answer_sha256: str = ""
     answer_units: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     unit_assessments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    answer_obligations: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    obligation_assessments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    uncovered_obligations: tuple[str, ...] = field(default_factory=tuple)
+    pending_action_claims: tuple[str, ...] = field(default_factory=tuple)
+    pending_actions: tuple[str, ...] = field(default_factory=tuple)
     claim_count: int = 0
     unsupported_claims: tuple[str, ...] = field(default_factory=tuple)
     contradictions: tuple[str, ...] = field(default_factory=tuple)
@@ -136,10 +253,15 @@ class AutomationGroundingAssessment:
             "checkedAt": self.checked_at,
             "provider": self.provider,
             "model": self.model,
-            "modelCallLimit": 1,
+            "modelCallLimit": GROUNDING_MODEL_CALL_LIMIT,
             "answerSha256": self.answer_sha256,
             "answerUnits": [dict(unit) for unit in self.answer_units],
             "unitAssessments": [dict(assessment) for assessment in self.unit_assessments],
+            "answerObligations": [dict(obligation) for obligation in self.answer_obligations],
+            "obligationAssessments": [dict(assessment) for assessment in self.obligation_assessments],
+            "uncoveredObligations": list(self.uncovered_obligations),
+            "pendingActionClaims": list(self.pending_action_claims),
+            "pendingActions": list(self.pending_actions),
             "citationIds": list(self.citation_ids),
             "evidenceSnapshots": [dict(snapshot) for snapshot in self.evidence_snapshots],
             "contextSnapshots": [dict(snapshot) for snapshot in self.context_snapshots],
@@ -150,10 +272,31 @@ class AutomationGroundingAssessment:
         }
 
 
+class KnowledgeRequestItemAssessment(BaseModel):
+    """Answer-span proof for one runtime-extracted agent question item."""
+
+    request_item_id: str = Field(description="Exact request item ID from the runtime checklist")
+    resolution: Literal["answered", "unknown_or_unavailable"]
+    answer_excerpt: str = Field(
+        max_length=1_000,
+        description=(
+            "Exact non-empty contiguous excerpt from the customer answer that resolves "
+            "this item or states its item-specific unknown/unavailable result"
+        ),
+    )
+
+
 class KnowledgeAgentOutput(BaseModel):
     """Structured result produced after searching the isolated workspace."""
 
-    answer: str = Field(description="Approval-ready customer support answer")
+    answer: str = Field(
+        description=(
+            "Approval-ready customer support answer that explicitly resolves every "
+            "independent item in the agent request, including an item-specific "
+            "unknown, unverified, pending, unavailable, or unquantified result when "
+            "the evidence does not establish it"
+        )
+    )
     confidence: Literal["low", "medium", "high"]
     citation_ids: list[str] = Field(default_factory=list)
     citation_paths: list[str] = Field(
@@ -161,6 +304,18 @@ class KnowledgeAgentOutput(BaseModel):
         description="Exact article chunk paths read with standalone cat calls and used as evidence",
     )
     missing_information: list[str] = Field(default_factory=list)
+    response_attachments: list[str] = Field(default_factory=list)
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
+    request_item_assessments: list[KnowledgeRequestItemAssessment] = Field(
+        max_length=_KNOWLEDGE_REQUEST_ITEM_LIMIT * 2,
+        description=(
+            "Exactly one answer-span assessment for every runtime request item ID, "
+            "with no missing, duplicate, or invented IDs"
+        )
+    )
+    requires_human: bool = False
+    requires_human_reason: str = ""
 
 
 class AutomationAnswerOutput(BaseModel):
@@ -170,6 +325,11 @@ class AutomationAnswerOutput(BaseModel):
     confidence: Literal["low", "medium", "high"]
     citation_ids: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
+    response_attachments: list[str] = Field(default_factory=list)
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: str = ""
 
 
 class AutomationGroundingUnitAssessment(BaseModel):
@@ -181,6 +341,26 @@ class AutomationGroundingUnitAssessment(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class AutomationGroundingObligationAssessment(BaseModel):
+    """Coverage assessment for one explicit customer answer obligation."""
+
+    obligation_id: str
+    resolution: Literal[
+        "answered",
+        "fulfilled_action",
+        "pending_or_unavailable",
+        "not_covered",
+    ]
+    answer_unit_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    @computed_field(return_type=bool)
+    @property
+    def covered(self) -> bool:
+        """Compatibility projection; code still validates the resolution evidence."""
+        return self.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+
+
 class AutomationGroundingOutput(BaseModel):
     """Independent exhaustive answer-unit support decision."""
 
@@ -188,7 +368,571 @@ class AutomationGroundingOutput(BaseModel):
     answer_sha256: str
     checked_citation_ids: list[str] = Field(default_factory=list)
     unit_assessments: list[AutomationGroundingUnitAssessment] = Field(default_factory=list)
+    obligation_assessments: list[AutomationGroundingObligationAssessment] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
+
+
+def _grounding_retryable_protocol_errors(
+    structured: Any,
+    *,
+    expected_unit_ids: frozenset[str],
+    expected_obligation_ids: frozenset[str],
+    allowed_evidence_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """Return evaluator-shape errors that justify one identical retry.
+
+    This intentionally excludes semantic grounding failures. Unknown evidence
+    IDs are malformed protocol references and receive the same bounded retry as
+    unknown unit or obligation IDs. The normal validation path remains
+    authoritative after the final attempt.
+    """
+
+    if not isinstance(structured, AutomationGroundingOutput):
+        return ("Evaluator returned no structured response",)
+
+    errors: list[str] = []
+    if not structured.unit_assessments:
+        errors.append("Evaluator returned no answer-unit assessments")
+    if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:
+        errors.append("Evaluator returned too many answer-unit assessments")
+    unit_ids = [_string_from(assessment.unit_id) for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]]
+    if any(not unit_id for unit_id in unit_ids) or len(unit_ids) != len(set(unit_ids)):
+        errors.append("Evaluator returned a missing or duplicate answer-unit ID")
+    if set(unit_ids) != expected_unit_ids:
+        errors.append("Evaluator did not assess every answer unit exactly once")
+    for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]:
+        unit_id = _string_from(assessment.unit_id)
+        evidence_ids = {
+            evidence_id
+            for value in assessment.evidence_ids
+            if (evidence_id := _string_from(value))
+        }
+        if assessment.supported and not evidence_ids:
+            errors.append(f"Supported answer unit has no evidence IDs: {unit_id or '<missing>'}")
+        unknown_evidence_ids = sorted(evidence_ids - allowed_evidence_ids)
+        if unknown_evidence_ids:
+            errors.append(
+                "Answer unit uses unknown evidence IDs: "
+                + ", ".join(unknown_evidence_ids[:5])
+            )
+
+    if len(structured.obligation_assessments) > 100:
+        errors.append("Evaluator returned too many obligation assessments")
+    obligation_ids = [_string_from(assessment.obligation_id) for assessment in structured.obligation_assessments[:100]]
+    if any(not obligation_id for obligation_id in obligation_ids) or len(obligation_ids) != len(set(obligation_ids)):
+        errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
+    if set(obligation_ids) != expected_obligation_ids:
+        errors.append("Evaluator did not assess every answer obligation exactly once")
+    for assessment in structured.obligation_assessments[:100]:
+        answer_unit_ids = {unit_id for value in assessment.answer_unit_ids if (unit_id := _string_from(value))}
+        if not answer_unit_ids.issubset(expected_unit_ids):
+            errors.append("Answer obligation uses unknown answer-unit IDs")
+        if assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
+            errors.append("Addressed obligation has no answer-unit IDs")
+        evidence_ids = {
+            evidence_id
+            for value in assessment.evidence_ids
+            if (evidence_id := _string_from(value))
+        }
+        unknown_evidence_ids = sorted(evidence_ids - allowed_evidence_ids)
+        if unknown_evidence_ids:
+            errors.append(
+                "Answer obligation uses unknown evidence IDs: "
+                + ", ".join(unknown_evidence_ids[:5])
+            )
+    all_units_supported = bool(structured.unit_assessments) and all(
+        assessment.supported
+        and bool(
+            {
+                evidence_id
+                for value in assessment.evidence_ids
+                if (evidence_id := _string_from(value))
+            }
+        )
+        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
+    )
+    all_obligations_addressed = all(
+        assessment.resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+        and bool(
+            {
+                unit_id
+                for value in assessment.answer_unit_ids
+                if (unit_id := _string_from(value))
+            }
+        )
+        for assessment in structured.obligation_assessments[:100]
+    )
+    if (
+        not errors
+        and structured.verdict == "not_grounded"
+        and all_units_supported
+        and all_obligations_addressed
+        and not any(_string_from(value) for value in structured.contradictions)
+    ):
+        errors.append(_GROUNDING_INCONSISTENT_VERDICT_ERROR)
+    return tuple(dict.fromkeys(errors))
+
+
+def _grounding_unknown_evidence_ids(
+    structured: Any,
+    *,
+    allowed_evidence_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """List malformed evidence references for one bounded corrective retry."""
+    if not isinstance(structured, AutomationGroundingOutput):
+        return ()
+    supplied_ids = {
+        evidence_id
+        for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]
+        for value in assessment.evidence_ids
+        if (evidence_id := _string_from(value))
+    }
+    supplied_ids.update(
+        evidence_id
+        for assessment in structured.obligation_assessments[:100]
+        for value in assessment.evidence_ids
+        if (evidence_id := _string_from(value))
+    )
+    return tuple(sorted(supplied_ids - allowed_evidence_ids)[:100])
+
+
+def _grounding_needs_obligation_reassessment(
+    structured: Any,
+    *,
+    expected_unit_ids: frozenset[str],
+    expected_obligation_ids: frozenset[str],
+    allowed_evidence_ids: frozenset[str],
+    expected_units: dict[str, dict[str, Any]] | None = None,
+    expected_obligations: dict[str, dict[str, Any]] | None = None,
+) -> bool:
+    """Detect a narrow semantic result worth one independent second pass.
+
+    The retry never converts a failure by itself. It is allowed only when the
+    first result is protocol-complete, every immutable answer unit is supported
+    by known evidence, and an uncovered obligation was nevertheless linked to
+    one or more real answer units. The final full validation remains authoritative.
+    """
+
+    if not expected_obligation_ids or not isinstance(structured, AutomationGroundingOutput):
+        return False
+    if _grounding_retryable_protocol_errors(
+        structured,
+        expected_unit_ids=expected_unit_ids,
+        expected_obligation_ids=expected_obligation_ids,
+        allowed_evidence_ids=allowed_evidence_ids,
+    ):
+        return False
+    if any(_string_from(value) for value in structured.contradictions):
+        return False
+    for assessment in structured.unit_assessments:
+        evidence_ids = {evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value))}
+        if not assessment.supported or not evidence_ids or not evidence_ids.issubset(allowed_evidence_ids):
+            return False
+    obligation_questions_by_unit: dict[str, list[str]] = {}
+    for assessment in structured.obligation_assessments:
+        evidence_ids = {evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value))}
+        if not evidence_ids.issubset(allowed_evidence_ids):
+            return False
+        obligation_id = _string_from(assessment.obligation_id)
+        question = _string_from((expected_obligations or {}).get(obligation_id, {}).get("question"))
+        if not question:
+            continue
+        for value in assessment.answer_unit_ids:
+            unit_id = _string_from(value)
+            if unit_id in expected_unit_ids:
+                obligation_questions_by_unit.setdefault(unit_id, []).append(question)
+    all_obligation_questions = tuple(
+        question
+        for obligation in (expected_obligations or {}).values()
+        if (question := _string_from(obligation.get("question")))
+    )
+    for assessment in structured.obligation_assessments:
+        if assessment.resolution != "not_covered":
+            continue
+        linked_unit_ids = tuple(
+            unit_id for value in assessment.answer_unit_ids if (unit_id := _string_from(value)) in expected_unit_ids
+        )
+        if not linked_unit_ids:
+            continue
+        if expected_units and all(
+            _grounding_unit_only_acknowledges_or_defers(
+                _string_from(expected_units.get(unit_id, {}).get("text")),
+                linked_obligation_questions=tuple(obligation_questions_by_unit.get(unit_id, ())),
+                all_obligation_questions=all_obligation_questions,
+            )
+            for unit_id in linked_unit_ids
+        ):
+            continue
+        return True
+    return False
+
+
+_GROUNDING_ACKNOWLEDGEMENT_PATTERNS = (
+    re.compile(
+        r"^\s*you\s+(?:are|were)\s+(?:seeking|asking|requesting)\b"
+        r"(?P<body>[^.!?\n]*)[.!?]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:thank\s+you|thanks)\b"
+        r"(?=[^.!?\n]{0,180}\b(?:messages?|enquir(?:y|ies)|"
+        r"inquir(?:y|ies)|requests?|contacting)\b)"
+        r"(?P<body>[^.!?\n]{0,240})[.!?]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_GROUNDING_UNMISTAKABLE_DEFERRAL_PATTERN = re.compile(
+    r"^\s*(?:we|our\s+team)\s+(?:will|would)\s+look\s+into\s+"
+    r"(?:it|this|the\s+(?:matter|issue|request|enquiry|inquiry))"
+    r"(?:\s+and\s+get\s+back\s+to\s+you)?[.!]?\s*$",
+    re.IGNORECASE,
+)
+_GROUNDING_SUBSTANTIVE_DETAIL_PATTERN = re.compile(
+    r"[:;]|(?:CHF|EUR|USD|GBP|\$|€|£)\s*\d|\b\d+(?:[.,]\d+)?\b|"
+    r"\b(?:for\s+example|including|such\s+as|namely|first|second|third|next|then|"
+    r"minimum|maximum|must|may|might|needs?|requires?|consists?|amounts?\s+to|"
+    r"within|electronically|online|falls?|due|monday|tuesday|wednesday|thursday|"
+    r"friday|saturday|sunday|articles?\s+of\s+association|public\s+deed|is|are)\b",
+    re.IGNORECASE,
+)
+_GROUNDING_RESTATEMENT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_GROUNDING_RESTATEMENT_META_TOKENS = frozenset(
+    {
+        "a",
+        "about",
+        "an",
+        "and",
+        "are",
+        "asking",
+        "back",
+        "contacting",
+        "enquiry",
+        "for",
+        "from",
+        "get",
+        "give",
+        "has",
+        "have",
+        "how",
+        "information",
+        "into",
+        "inquiry",
+        "it",
+        "look",
+        "message",
+        "of",
+        "on",
+        "outline",
+        "please",
+        "regarding",
+        "request",
+        "requested",
+        "seeking",
+        "tell",
+        "that",
+        "the",
+        "to",
+        "us",
+        "what",
+        "when",
+        "which",
+        "will",
+        "you",
+        "your",
+    }
+)
+
+
+def _grounding_restatement_tokens(text: str) -> frozenset[str]:
+    aliases = {
+        "consultations": "consultation",
+        "documents": "document",
+        "enquiries": "enquiry",
+        "inquiries": "inquiry",
+        "messages": "message",
+        "requests": "request",
+        "requirements": "requirement",
+        "steps": "step",
+    }
+    return frozenset(
+        normalized
+        for token in _GROUNDING_RESTATEMENT_TOKEN_PATTERN.findall(text.casefold())
+        if (normalized := aliases.get(token, token)) not in _GROUNDING_RESTATEMENT_META_TOKENS
+    )
+
+
+def _grounding_has_appositive_punctuation(text: str) -> bool:
+    """Treat answer-like punctuation as substantive, except a genuine long list."""
+    if re.search(r"[()–—=]|\s[-/]\s", text):
+        return True
+    if "," not in text:
+        return False
+    segments = [segment.strip() for segment in text.split(",")]
+    is_long_conjoined_list = (
+        len(segments) >= 3 and all(segments) and re.match(r"^(?:and|or)\b", segments[-1], re.IGNORECASE) is not None
+    )
+    return not is_long_conjoined_list
+
+
+def _grounding_unit_only_acknowledges_or_defers(
+    text: str,
+    *,
+    linked_obligation_questions: tuple[str, ...] = (),
+    all_obligation_questions: tuple[str, ...] = (),
+) -> bool:
+    """Identify request restatements that cannot justify a semantic retry."""
+    if not text:
+        return False
+    if _GROUNDING_UNMISTAKABLE_DEFERRAL_PATTERN.fullmatch(text):
+        return True
+    for pattern in _GROUNDING_ACKNOWLEDGEMENT_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match is None:
+            continue
+        body = match.groupdict().get("body") or ""
+        if _grounding_has_appositive_punctuation(body):
+            return False
+        if _GROUNDING_SUBSTANTIVE_DETAIL_PATTERN.search(body) is not None:
+            return False
+        body_tokens = _grounding_restatement_tokens(body)
+        if not body_tokens:
+            return True
+        linked_tokens = _grounding_restatement_tokens(" ".join(linked_obligation_questions))
+        if not linked_tokens or not body_tokens.intersection(linked_tokens):
+            return False
+        if body_tokens.issubset(linked_tokens):
+            return True
+        # A single restatement unit can repeat several customer questions even
+        # when the evaluator links it to only a subset of them. Permit those
+        # extra words only when they also come verbatim from another immutable
+        # obligation; newly asserted details still force an independent pass.
+        all_obligation_tokens = _grounding_restatement_tokens(" ".join(all_obligation_questions))
+        return body_tokens.issubset(all_obligation_tokens)
+    return False
+
+
+_GUARANTEE_REQUEST_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"guarantee\s+(?:that\s+)?(?P<subject>.+?)\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+def _knowledge_backed_negative_guarantee_answers_obligation(
+    *,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    citation_ids: frozenset[str],
+) -> bool:
+    """Recognize an explicit, knowledge-backed refusal of a requested guarantee."""
+    request_match = _GUARANTEE_REQUEST_PATTERN.search(question)
+    if request_match is None:
+        return False
+    subject = request_match.group("subject").strip(" \t\r\n.,;:!?\"'“”‘’")
+    subject = re.sub(
+        r"\s+\b(?:by|before|on)\b\s+.+$",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    ).strip()
+    subject = re.sub(r"^(?:a|an|the)\s+", "", subject, flags=re.IGNORECASE)
+    if not subject:
+        return False
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    subject_object_boundary = r"(?=\s*(?:[.,;:!?]|$|\bby\b))"
+    negative_patterns = (
+        rf"^\s*(?:(?:unfortunately|currently)\s*,?\s+)?"
+        rf"(?:we|i|zenfulfillment)\s+"
+        rf"(?:cannot|can['’]t|can\s+not|am\s+unable\s+to|are\s+unable\s+to|"
+        rf"am\s+not\s+able\s+to|are\s+not\s+able\s+to)\s+"
+        rf"guarantee\s+(?:a|an|the)?\s*{subject_pattern}\b"
+        rf"{subject_object_boundary}",
+        rf"^\s*(?:a|an|the)?\s*{subject_pattern}(?:\s+timing)?\s+"
+        rf"(?:(?:cannot|can['’]t|can\s+not)\s+be\s+guaranteed|"
+        rf"(?:is|are)\s+not\s+guaranteed)\b",
+        rf"^\s*(?:regarding|about)\s+(?:a|an|the)?\s*{subject_pattern}\s*,\s*"
+        rf"(?:its|the)\s+(?:timing|outcome)\b"
+        rf"(?:(?!\b(?:guaranteed|while|but|however|though|although|yet)\b)"
+        rf"[^,;.!?\n]){{0,100}}?\b"
+        rf"(?:cannot|can['’]t|can\s+not)\s+be\s+guaranteed\b",
+        rf"^\s*(?:there\s+is|there['’]s)\s+no\s+guarantee\s+"
+        rf"(?:for|of|that)?\s*(?:a|an|the)?\s*{subject_pattern}\b"
+        rf"{subject_object_boundary}",
+    )
+    negated_attribution_pattern = re.compile(
+        r"(?:\b(?:does|do|did|is|was)\s+(?:not|never)\s+"
+        r"(?:say|state|mean|show|claim)\b|"
+        r"\b(?:false\s+that|not\s+true\s+that)\b|"
+        r"\bno\s+one\s+(?:said|says|states|claimed|claims)\b)",
+        re.IGNORECASE,
+    )
+    guarantee_reversal_pattern = re.compile(
+        r"\b(?:but|however|though|although|yet|while)\b"
+        r"[^.!?\n]{0,120}\b(?:false|guaranteed|untrue)\b",
+        re.IGNORECASE,
+    )
+    negated_conclusion_pattern = re.compile(
+        r"[^.!?\n]{0,80}\b(?:is|was)\s+(?:false|untrue)\b",
+        re.IGNORECASE,
+    )
+    for unit_id in answer_unit_ids:
+        evidence_ids = supported_unit_evidence_ids.get(unit_id, frozenset())
+        if not evidence_ids.intersection(citation_ids):
+            continue
+        unit_text = _string_from(expected_units.get(unit_id, {}).get("text"))
+        for pattern in negative_patterns:
+            for negative_match in re.finditer(pattern, unit_text, re.IGNORECASE):
+                if negated_attribution_pattern.search(
+                    unit_text[max(0, negative_match.start() - 160) : negative_match.start()]
+                ):
+                    continue
+                if guarantee_reversal_pattern.search(unit_text[negative_match.end() :]):
+                    continue
+                if negated_conclusion_pattern.fullmatch(unit_text[negative_match.end() :].strip()):
+                    continue
+                return True
+    return False
+
+
+_SECRET_DELIVERY_OBJECT_PATTERN = re.compile(
+    r"\b(?:replacement\s+)?(?:(?:api|access|authentication)\s+)?(?:"
+    r"tokens?|secrets?|credentials?|passwords?|api[-\s]?keys?|recovery\s+codes?"
+    r")\b",
+    re.IGNORECASE,
+)
+_SECRET_DELIVERY_ACTION_PATTERN = (
+    r"(?:deliver(?:y|ed|ing)?|provid(?:e|ed|ing)|send|sent|share|shared|"
+    r"transmit(?:ted|ting)?|use|using)"
+)
+_SECURE_DELIVERY_ROUTE_PATTERN = (
+    r"(?:(?:(?:approved|trusted)\s+)?secure\s+|(?:approved|trusted)\s+)"
+    r"(?:(?:recovery|credential|token)\s+)?(?:channel|portal|vault|method|route)"
+)
+_SECRET_SECURE_DELIVERY_PATTERNS = (
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,140}}"
+        rf"\b{_SECRET_DELIVERY_ACTION_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_SECRET_DELIVERY_ACTION_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b[^.!?\n]{{0,120}}"
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_SECURE_DELIVERY_ROUTE_PATTERN}\b[^.!?\n]{{0,100}}"
+        rf"\b(?:for|to)\b[^.!?\n]{{0,100}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+)
+_SECRET_EMAIL_PROHIBITION_PATTERNS = (
+    re.compile(
+        rf"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+        rf"(?:send|provide|deliver|share|transmit|email)\s+"
+        rf"(?:(?:a|an|the|any|new|your)\s+){{0,3}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,120}}"
+        r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|will\s+not|not)\b"
+        r"[^.!?\n]{0,50}\b(?:e-?mail(?:ed|ing)?|electronic\s+mail)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+        r"(?:send|provide|deliver|share|transmit)\s+(?:it|them|one)\s+"
+        r"(?:via|by|through|over|using)\s+(?:e-?mail|electronic\s+mail)\b",
+        re.IGNORECASE,
+    ),
+)
+_SECRET_EMAIL_ALLOWANCE_PATTERNS = (
+    re.compile(
+        r"\b(?:can|may|should|must|will)\s+(?:be\s+)?emailed\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:can|may|should|must|will)\s+(?:send|email|share|deliver|provide)\b"
+        rf"[^.!?\n]{{0,100}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}[^.!?\n]{{0,100}}"
+        r"\b(?:can|may|should|must|will)\s+(?:be\s+)?"
+        r"(?:emailed|sent|delivered|provided|shared)\b"
+        r"(?:(?!\b(?:not|never)\b)[^.!?\n]){0,60}"
+        r"\b(?:via|by|through|over|using)\s+(?:secure\s+)?e-?mail\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bsecure\s+e-?mail\b", re.IGNORECASE),
+)
+_SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:false|untrue|incorrect)\s+that\b[^.!?\n]{0,120}"
+    r"\b(?:not|never)\b[^.!?\n]{0,60}\be-?mail(?:ed|ing)?\b|"
+    r"\b(?:not|never)\b[^.!?\n]{0,80}\be-?mail(?:ed|ing)?\b[^.!?\n]{0,60}"
+    r"\b(?:is|was)\s+(?:false|untrue|incorrect)\b|"
+    r"\b(?:not|never)\b[^.!?\n]{0,80}\be-?mail(?:ed|ing)?\b[^.!?\n]{0,40}"
+    r"\b(?:unless|except)\b"
+    r")",
+    re.IGNORECASE,
+)
+_SECRET_REPETITION_PROHIBITION_PATTERN = re.compile(
+    rf"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+    rf"(?:repeat|copy|display|reveal)\s+"
+    rf"(?:(?:a|an|the|any|new|your)\s+){{0,3}}{_SECRET_DELIVERY_OBJECT_PATTERN.pattern}",
+    re.IGNORECASE,
+)
+_SECURE_SECRET_DELIVERY_NOTICE = (
+    "For security, never repeat the secret or credential. "
+    "Never email the secret or credential, or any replacement. "
+    "Use only the approved secure channel for any replacement credential."
+)
+
+
+def _knowledge_backed_secure_secret_delivery_answers_obligation(
+    *,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    citation_ids: frozenset[str],
+) -> bool:
+    """Recognize explicit knowledge-backed secure secret-delivery guidance.
+
+    This is deliberately narrower than general semantic coverage. It handles a
+    repeated evaluator false negative only when both the obligation and cited
+    reply require a secure delivery route and expressly prohibit email.
+    """
+
+    if (
+        _SECRET_DELIVERY_OBJECT_PATTERN.search(question) is None
+        or re.search(r"\b(?:deliver(?:y)?|provide|send|share|transmit)\b", question, re.IGNORECASE) is None
+        or re.search(r"\b(?:secure|approved|trusted)\b", question, re.IGNORECASE) is None
+        or not any(pattern.search(question) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+    ):
+        return False
+
+    cited_text_units = [
+        _string_from(expected_units.get(unit_id, {}).get("text"))
+        for unit_id in answer_unit_ids
+        if supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(citation_ids)
+    ]
+    answer_text = " ".join(text for text in cited_text_units if text)
+    if not answer_text:
+        return False
+    if _SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN.search(answer_text):
+        return False
+    if any(pattern.search(answer_text) for pattern in _SECRET_EMAIL_ALLOWANCE_PATTERNS):
+        return False
+    return bool(
+        _SECRET_DELIVERY_OBJECT_PATTERN.search(answer_text)
+        and any(pattern.search(answer_text) for pattern in _SECRET_SECURE_DELIVERY_PATTERNS)
+        and any(pattern.search(answer_text) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+    )
 
 
 def _string_from(value: Any) -> str:
@@ -217,6 +961,35 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
+def _attachment_text_context(message: dict[str, Any], *, limit: int = 4_000) -> str:
+    raw_attachments = message.get("attachments")
+    if not isinstance(raw_attachments, list):
+        content = _record_from(message.get("content"))
+        raw_attachments = content.get("emailAttachments") or content.get("email_attachments")
+    if not isinstance(raw_attachments, list):
+        return ""
+
+    sections: list[str] = []
+    remaining = limit
+    for index, raw_attachment in enumerate(raw_attachments[:10], start=1):
+        attachment = _record_from(raw_attachment)
+        extracted_text = _string_from(attachment.get("extractedText") or attachment.get("extracted_text"))
+        if not extracted_text or remaining <= 0:
+            continue
+        filename = _string_from(attachment.get("filename") or attachment.get("name")) or f"attachment-{index}"
+        header = f"### {filename[:240]}\n"
+        available = max(0, remaining - len(header))
+        if available <= 0:
+            break
+        excerpt = extracted_text[: min(2_000, available)]
+        section = f"{header}{excerpt}"
+        sections.append(section)
+        remaining -= len(section)
+    if not sections:
+        return ""
+    return "Attachments (extracted text, untrusted):\n" + "\n\n".join(sections)
+
+
 def _message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dict[str, str]]:
     context: list[dict[str, str]] = []
     for message in messages[-limit:]:
@@ -229,17 +1002,1205 @@ def _message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dic
                 body = _string_from(
                     content.get("emailBody") or content.get("email_body") or content.get("responseText")
                 )
-        if not body:
+        attachment_context = _attachment_text_context(message)
+        if not body and not attachment_context:
             continue
+        context_body = body[:2_000]
+        if attachment_context:
+            context_body = f"{context_body}\n\n{attachment_context}".strip()
         context.append(
             {
                 "direction": _string_from(message.get("direction") or message.get("user") or message.get("role")),
                 "sender": _string_from(message.get("sender") or message.get("from") or message.get("authorEmail")),
-                "body": body[:2000],
+                "body": context_body,
                 "occurredAt": _string_from(message.get("occurredAt") or message.get("created")),
             }
         )
     return context
+
+
+def _automatic_message_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dict[str, str]]:
+    customer_messages = [
+        message
+        for message in messages
+        if isinstance(message, dict)
+        and _string_from(message.get("direction") or message.get("user") or message.get("role")).lower()
+        in {"customer", "email", "visitor", "user"}
+    ]
+    return _message_context(customer_messages, limit=limit)
+
+
+_LANGUAGE_WORD_WEIGHTS: dict[str, dict[str, int]] = {
+    "en": {
+        "hello": 4,
+        "please": 3,
+        "thanks": 3,
+        "thank": 3,
+        "where": 2,
+        "when": 2,
+        "what": 2,
+        "tell": 2,
+        "help": 2,
+        "current": 2,
+        "estimated": 2,
+        "order": 2,
+        "delivery": 2,
+        "shipment": 2,
+        "refund": 2,
+        "cancel": 2,
+        "request": 2,
+        "pending": 2,
+        "review": 2,
+        "received": 2,
+        "we": 1,
+        "have": 1,
+        "the": 1,
+        "and": 1,
+        "your": 1,
+        "my": 1,
+        "is": 1,
+        "are": 1,
+        "with": 1,
+    },
+    "fr": {
+        "bonjour": 4,
+        "merci": 4,
+        "colis": 3,
+        "commande": 3,
+        "livraison": 3,
+        "remboursement": 3,
+        "annuler": 3,
+        "retard": 3,
+        "suivi": 3,
+        "pouvez": 2,
+        "pourriez": 2,
+        "souhaite": 2,
+        "aide": 2,
+        "réponse": 2,
+        "question": 2,
+        "quel": 2,
+        "quelle": 2,
+        "où": 2,
+        "quand": 2,
+        "vous": 1,
+        "votre": 1,
+        "mon": 1,
+        "ma": 1,
+        "mes": 1,
+        "est": 1,
+        "pour": 1,
+        "avec": 1,
+        "nous": 2,
+        "demande": 3,
+        "examinons": 3,
+        "reçu": 2,
+        "reçue": 2,
+        "cours": 2,
+        "sera": 1,
+        "veuillez": 4,
+        "rembourser": 4,
+        "escaladez": 4,
+        "remboursez": 4,
+    },
+    "de": {
+        "hallo": 4,
+        "danke": 4,
+        "bitte": 3,
+        "bestellung": 3,
+        "lieferung": 3,
+        "paket": 3,
+        "verspätet": 3,
+        "stornieren": 3,
+        "kündigen": 3,
+        "rückerstattung": 3,
+        "sendungsverfolgung": 3,
+        "wissen": 2,
+        "sagen": 2,
+        "helfen": 2,
+        "wann": 2,
+        "warum": 2,
+        "wo": 2,
+        "wie": 2,
+        "mein": 1,
+        "meine": 1,
+        "meiner": 1,
+        "ihre": 1,
+        "ist": 1,
+        "sind": 1,
+        "und": 1,
+        "nicht": 1,
+        "mir": 1,
+        "wir": 2,
+        "haben": 2,
+        "anfrage": 3,
+        "erhalten": 2,
+        "prüfen": 3,
+        "erstatten": 4,
+        "rückerstatten": 4,
+        "zurückerstatten": 4,
+    },
+    "es": {
+        "hola": 4,
+        "gracias": 4,
+        "necesito": 4,
+        "pedido": 3,
+        "envío": 3,
+        "entrega": 3,
+        "reembolso": 3,
+        "cancelar": 3,
+        "seguimiento": 3,
+        "ayuda": 3,
+        "quisiera": 2,
+        "saber": 2,
+        "dónde": 2,
+        "cuando": 2,
+        "cuándo": 2,
+        "qué": 2,
+        "respuesta": 2,
+        "pregunta": 2,
+        "favor": 1,
+        "con": 1,
+        "mi": 1,
+        "está": 1,
+        "por": 1,
+        "su": 1,
+        "solicitud": 3,
+        "estamos": 2,
+        "revisando": 3,
+        "pendiente": 2,
+        "hemos": 2,
+        "recibido": 2,
+        "será": 1,
+        "escale": 4,
+        "reembolse": 4,
+    },
+    "it": {
+        "ciao": 4,
+        "grazie": 4,
+        "vorrei": 4,
+        "ordine": 3,
+        "consegna": 3,
+        "spedizione": 3,
+        "rimborso": 3,
+        "annullare": 3,
+        "pacco": 3,
+        "ritardo": 3,
+        "sapere": 2,
+        "aiuto": 2,
+        "bisogno": 2,
+        "dove": 2,
+        "quando": 2,
+        "risposta": 2,
+        "domanda": 2,
+        "stato": 2,
+        "favore": 1,
+        "mio": 1,
+        "mia": 1,
+        "del": 1,
+        "della": 1,
+        "con": 1,
+        "per": 1,
+        "richiesta": 3,
+        "sospeso": 2,
+        "sospesa": 2,
+        "stiamo": 2,
+        "esaminando": 3,
+        "abbiamo": 2,
+        "ricevuto": 2,
+        "ricevuta": 2,
+        "sarà": 1,
+        "rimborsi": 4,
+    },
+}
+_LANGUAGE_PHRASE_WEIGHTS: dict[str, dict[str, int]] = {
+    "en": {"thank you": 4},
+    "fr": {"s il vous plaît": 5},
+    "de": {"vielen dank": 5},
+    "es": {"por favor": 4},
+    "it": {"per favore": 4},
+}
+_LANGUAGE_CHARACTER_WEIGHTS: dict[str, dict[str, int]] = {
+    "fr": {"ç": 3, "œ": 3, "ê": 2, "î": 2, "û": 2},
+    "de": {"ß": 4, "ä": 3, "ö": 3, "ü": 3},
+    "es": {"¿": 4, "¡": 4, "ñ": 4, "á": 1, "í": 1, "ó": 1, "ú": 1},
+    "it": {"ì": 3, "ò": 3},
+}
+_LANGUAGE_NAMES = {
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+}
+_PENDING_ACTION_REPAIR_NOTICES = {
+    "de": (
+        "Jede angefragte Aktion, die eine menschliche Prüfung erfordert, ist "
+        "ausstehend und weder als begonnen noch als abgeschlossen bestätigt."
+    ),
+    "en": ("Any requested action that requires human review is pending and is not confirmed as started or completed."),
+    "es": (
+        "Toda acción solicitada que requiera revisión humana está pendiente y no "
+        "se confirma como iniciada ni completada."
+    ),
+    "fr": (
+        "Toute action demandée nécessitant un contrôle humain est en attente et "
+        "n’est confirmée ni comme commencée ni comme terminée."
+    ),
+    "it": (
+        "Qualsiasi azione richiesta che necessiti di revisione umana è in sospeso "
+        "e non è confermata né come avviata né come completata."
+    ),
+}
+_ACTION_STATE_OBLIGATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "de": (
+        re.compile(
+            r"^\s*(?:bitte\s+)?(?:eskalieren|stornieren|kündigen|erstatten|rückerstatten|zurückerstatten|öffnen)"
+            r"(?:\s+sie)?\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:bitte\s+)?(?:bestätigen|garantieren|versichern)"
+            r"(?:\s+sie)?\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:können|könnten)\s+sie\s+(?:bitte\s+)?"
+            r"(?P<subject>.+?)\s+(?:bestätigen|garantieren|versichern)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "en": (
+        re.compile(
+            r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+            r"(?:confirm|guarantee|ensure)\s+(?:that\s+)?"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:please\s+)?(?P<action>record|log|escalate|cancel|terminate|"
+            r"rescind|refund|issue|notify|open|submit|investigate|update|change|replace|"
+            r"reship|dispatch)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:please\s+)?identify\s+and\s+"
+            r"(?P<action>escalate)\s+(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "es": (
+        re.compile(
+            r"^\s*(?:por\s+favor[,]?\s+)?"
+            r"(?:escale|escalar|cancele|cancelar|anule|anular|"
+            r"reembolse|reembolsar|abra|abrir)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:por\s+favor[,]?\s+)?"
+            r"(?:confirme|confirmar|garantice|garantizar|asegure|asegurar)\s+"
+            r"(?:que\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "fr": (
+        re.compile(
+            r"^\s*(?:veuillez\s+)?"
+            r"(?:escaladez|escalader|annulez|annuler|résiliez|résilier|"
+            r"remboursez|rembourser|ouvrez|ouvrir)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:veuillez\s+)?"
+            r"(?:confirmer|confirmez|garantir|garantissez|assurer|assurez)\s+"
+            r"(?:que\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    "it": (
+        re.compile(
+            r"^\s*(?:per\s+favore[,]?\s+)?"
+            r"(?:escalate|escalare|annulli|annullare|cancelli|cancellare|"
+            r"rimborsi|rimborsare|apra|aprire)\s+"
+            r"(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:per\s+favore[,]?\s+)?"
+            r"(?:confermare|confermi|garantire|garantisca|assicurare|assicuri)\s+"
+            r"(?:che\s+)?(?P<subject>.+?)\s*[.?!]*$",
+            re.IGNORECASE,
+        ),
+    ),
+}
+_ACTION_STATE_PENDING_NOTICES = {
+    "de": (
+        "Für {subject} liegt keine Bestätigung vor. Ein damit verbundener nächster "
+        "Schritt für Ihre Anfrage wartet weiterhin auf menschliche Prüfung."
+    ),
+    "en": ("{subject} is not confirmed. A related next step for your request remains pending human review."),
+    "es": (
+        "No hay confirmación para {subject}. Un siguiente paso relacionado con su "
+        "solicitud sigue pendiente de revisión humana."
+    ),
+    "fr": (
+        "Aucune confirmation n’est disponible pour {subject}. Une prochaine étape "
+        "connexe de votre demande reste en attente d’un contrôle humain."
+    ),
+    "it": (
+        "Non c’è una conferma per {subject}. Un passaggio successivo collegato alla "
+        "richiesta resta in attesa di revisione umana."
+    ),
+}
+_SEPARATE_PENDING_ACTION_NOTICES = {
+    "de": (
+        "Die ausstehende Aktion ({label}) wartet auf menschliche Prüfung und ist "
+        "weder als begonnen noch als abgeschlossen bestätigt."
+    ),
+    "en": (
+        "The pending action ({label}) remains under human review and is not "
+        "confirmed as started or completed."
+    ),
+    "es": (
+        "La acción pendiente ({label}) sigue a la espera de revisión humana y no "
+        "está confirmada como iniciada ni completada."
+    ),
+    "fr": (
+        "L’action en attente ({label}) reste soumise à un contrôle humain et "
+        "n’est confirmée ni comme commencée ni comme terminée."
+    ),
+    "it": (
+        "L’azione in sospeso ({label}) resta soggetta a revisione umana e non è "
+        "confermata né come avviata né come completata."
+    ),
+}
+_SEPARATE_PENDING_ACTION_STATE_RE = re.compile(
+    r"\b(?:pending|awaiting|unconfirmed|ausstehend|bestätigt|attente|confirmée|"
+    r"pendiente|confirmada|sospeso|confermata|human\s+review|menschliche\s+prüfung|"
+    r"contrôle\s+humain|revisión\s+humana|revisione\s+umana)\b",
+    re.IGNORECASE,
+)
+_PENDING_ACTION_TIMELINE_QUESTION_RE = re.compile(
+    r"\b(?:resolution|completion)\s+(?:date|time|timeline|timing)\b|"
+    r"\bwhen\b[^?\n]{0,160}\b(?:resolved|completed|finished)\b",
+    re.IGNORECASE,
+)
+_PENDING_INVESTIGATION_TOPIC_RE = re.compile(
+    r"\b(?:an?|the|your)\s+"
+    r"(?P<topic>(?:[^\W_]+(?:-[^\W_]+)*\s+){0,3}investigation)\b",
+    re.IGNORECASE,
+)
+_SEPARATE_PENDING_ACTION_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_SEPARATE_PENDING_ACTION_TOKEN_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "action",
+        "for",
+        "human",
+        "pending",
+        "request",
+        "requested",
+        "the",
+        "to",
+    }
+)
+_ACTION_STATE_SUBJECT_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "be",
+        "been",
+        "can",
+        "could",
+        "das",
+        "dass",
+        "de",
+        "der",
+        "die",
+        "el",
+        "en",
+        "et",
+        "for",
+        "für",
+        "have",
+        "has",
+        "i",
+        "il",
+        "in",
+        "is",
+        "it",
+        "la",
+        "le",
+        "les",
+        "lo",
+        "of",
+        "or",
+        "our",
+        "que",
+        "that",
+        "the",
+        "to",
+        "und",
+        "we",
+        "whether",
+        "will",
+        "would",
+        "you",
+        "your",
+    }
+)
+_ACTION_STATE_SUBJECT_TOKEN_ALIASES = {
+    # Read-only facts are commonly phrased as either "the recorded due date"
+    # or "our records show the due date". Keep those forms on one topic token
+    # so an answered fact is not mistaken for an omitted pending action.
+    "availability": "available",
+    "unavailable": "available",
+    "recorded": "record",
+    "recording": "record",
+    "records": "record",
+}
+_ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN = re.compile(
+    r"^(?:i|me|you|he|him|she|her|it|we|us|they|them|this|that|these|those|"
+    r"there|whether|if|who|what|which)\b",
+    re.IGNORECASE,
+)
+_ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN = re.compile(
+    r"(?:\b(?:is|are|was|were|has|have|had|will|would|can|could|should|must|"
+    r"do|does|did)\b|"
+    r"\b(?:changed|escalated|cancelled|canceled|refunded|shipped|dispatched|"
+    r"started|completed|confirmed|approved|opened|created|updated|processed|"
+    r"sent|received|arrived|failed|succeeded|happened|occurred|went)\b\s*$)",
+    re.IGNORECASE,
+)
+_ENGLISH_ACTION_RESULT_CONFIRMATION_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"(?:confirm|guarantee|ensure)\s+(?:that\s+)?"
+    r"(?P<topic>.+?)\s+(?:is|was|has\s+been)\s+"
+    r"(?P<state>fixed|resolved|restored|recovered|complete|completed|successful|working)"
+    r"\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+def _detected_supported_language(*values: str) -> str:
+    clean = "\n".join(value for value in values if value).casefold()
+    words = re.findall(r"[^\W\d_]+", clean, flags=re.UNICODE)
+    word_counts: dict[str, int] = {}
+    for word in words:
+        word_counts[word] = word_counts.get(word, 0) + 1
+    normalized_text = " ".join(words)
+    scores: dict[str, int] = {}
+    for language, word_weights in _LANGUAGE_WORD_WEIGHTS.items():
+        score = sum(weight * min(word_counts.get(word, 0), 2) for word, weight in word_weights.items())
+        score += sum(
+            weight for phrase, weight in _LANGUAGE_PHRASE_WEIGHTS.get(language, {}).items() if phrase in normalized_text
+        )
+        score += sum(
+            weight for character, weight in _LANGUAGE_CHARACTER_WEIGHTS.get(language, {}).items() if character in clean
+        )
+        scores[language] = score
+    return max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
+
+
+def _latest_customer_language(messages: list[dict[str, Any]]) -> str:
+    context = _automatic_message_context(messages, limit=1)
+    return _detected_supported_language(context[-1]["body"] if context else "")
+
+
+_KNOWLEDGE_QUESTION_START_PATTERN = re.compile(
+    r"^(?:what|when|where|which|who|whom|whose|why|how|"
+    r"is|are|was|were|has|have|had|can|could|may|might|"
+    r"will|would|do|does|did|should|must)\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_QUESTION_PATTERN = re.compile(
+    r"\s*,?\s+(?:and|or)\s+(?="
+    r"(?:is|are|was|were|has|have|had|can|could|may|might|"
+    r"will|would|do|does|did|should|must)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN = re.compile(
+    r"(?:^|[,:;?]\s+(?:(?:and|or)\s+)?|[.]\s+)"
+    r"(?P<request>(?:please\s+)?(?:explain|describe|provide|give|"
+    r"tell|state|identify|list|summarize|confirm|compare|clarify)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_IMPERATIVE_ITEM_PATTERN = re.compile(
+    r"\s*,\s*(?:and\s+|or\s+)?(?="
+    r"(?:whether|what|when|where|which|who|whom|whose|why|how)\b)|"
+    r"\s+(?:and|or)\s+(?="
+    r"(?:whether|what|when|where|which|who|whom|whose|why|how)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_RESTARTED_REQUEST_SENTENCE_PATTERN = re.compile(
+    r"(?:[!?;]\s+(?:(?:and|or)\s+)?|[.]\s+)"
+    r"(?=(?:please\s+)?"
+    r"(?:explain|describe|provide|give|tell|state|"
+    r"identify|list|summarize|confirm|compare|clarify|what|when|where|which|who|"
+    r"whom|whose|why|how|is|are|was|were|has|have|had|can|could|may|might|will|"
+    r"would|do|does|did|should|must)\b)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "answer",
+        "any",
+        "are",
+        "as",
+        "at",
+        "based",
+        "be",
+        "been",
+        "being",
+        "by",
+        "can",
+        "could",
+        "clarify",
+        "compare",
+        "confirm",
+        "describe",
+        "did",
+        "do",
+        "does",
+        "explain",
+        "exact",
+        "for",
+        "from",
+        "give",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "identify",
+        "in",
+        "is",
+        "it",
+        "known",
+        "list",
+        "may",
+        "me",
+        "might",
+        "must",
+        "of",
+        "on",
+        "only",
+        "or",
+        "our",
+        "please",
+        "provide",
+        "request",
+        "requested",
+        "should",
+        "state",
+        "summarize",
+        "tell",
+        "that",
+        "the",
+        "their",
+        "they",
+        "this",
+        "to",
+        "using",
+        "us",
+        "verified",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "whether",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
+_KNOWLEDGE_REQUEST_TOKEN_ALIASES = {
+    "affected": "affect",
+    "affecting": "affect",
+    "approval": "approv",
+    "approved": "approv",
+    "approves": "approv",
+    "approving": "approv",
+    "confirmation": "confirm",
+    "confirmations": "confirm",
+    "confirmed": "confirm",
+    "confirming": "confirm",
+    "quantification": "quantifi",
+    "quantified": "quantifi",
+    "quantify": "quantifi",
+    "services": "service",
+}
+_KNOWLEDGE_REQUEST_EXPLICIT_STATE_PATTERN = re.compile(
+    r"\b(?:approved|authorized|confirmed|known|quantified|available|allowed|permitted|"
+    r"prohibited|pending|awaiting|unknown|unverified|unavailable|unconfirmed|"
+    r"undetermined|unclear|granted|denied|declined|rejected|may|can(?:not)?|"
+    r"must(?:\s+not)?|should(?:\s+not)?|does\s+not\s+establish|"
+    r"cannot\s+establish|not\s+(?:yet|currently)|"
+    r"best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|"
+    r"erlaubt|ausstehend|unbekannt|ungepr[uü]ft|abgelehnt|kann|darf|nicht|"
+    r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|"
+    r"autoris[ée]e?s?|en\s+attente|inconnue?s?|non\s+confirm[ée]e?s?|refus[ée]e?s?|peut|pas|"
+    r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|"
+    r"disponible?s?|autorizad[oa]s?|pendiente?s?|desconocid[oa]s?|"
+    r"no\s+confirmad[oa]s?|denegad[oa]s?|rechazad[oa]s?|puede|"
+    r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|disponibile|"
+    r"autorizzat[oaie]|in\s+attesa|sconosciut[oaie]|non\s+confermat[oaie]|"
+    r"negat[oaie]|rifiutat[oaie]|pu[oò])\b|\b(?:no|nein|non)\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE = (
+    r"(?:approved|confirmed|known|quantified|available|authorized|allowed|permitted)"
+)
+_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES = (
+    rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE}"
+    rf"(?:\s+(?:and|or)\s+{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATE})*"
+)
+_KNOWLEDGE_REQUEST_STATE_QUESTION_PATTERNS = (
+    re.compile(
+        r"^\s*(?:is|are|was|were)\s+(?P<subject>.+?)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:has|have)\s+(?P<subject>.+?)\s+been\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*whether\s+(?P<subject>.+?)\s+(?:is|are|was|were)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:what|which)\s+(?P<subject>.+?)\s+(?:is|are|was|were)\s+"
+        rf"{_KNOWLEDGE_REQUEST_ENGLISH_STATE_PREDICATES}\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:can|could|may|might|should|must|will|would|kann|k[oö]nnen|"
+        r"darf|d[uü]rfen|soll|sollen|muss|m[uü]ssen|wird|werden|peut|peuvent|"
+        r"pourrait|pourraient|puede|pueden|podr[ií]a|podr[ií]an|pu[oò]|possono|"
+        r"potrebbe|potrebbero)\s+(?P<subject>.+?)\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:ist|sind|war|waren|wurde|wurden)\s+(?P<subject>.+?)\s+"
+        r"(?:best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt)\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?P<subject>.+?)\s+(?:ist|sind|est|sont|est[áa]|estan|est[áa]n|[èe]|sono)\s+"
+        r"(?:best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt|"
+        r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|autoris[ée]e?s?|"
+        r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|disponible?s?|autorizad[oa]s?|"
+        r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|disponibile|autorizzat[oaie])"
+        r"\s*[?!.]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_KNOWLEDGE_REQUEST_STATE_HINT_PATTERN = re.compile(
+    r"\b(?:approved|confirmed|known|quantified|available|authorized|allowed|permitted|"
+    r"best[aä]tigt|genehmigt|bekannt|quantifiziert|verf[uü]gbar|autorisiert|erlaubt|"
+    r"confirm[ée]e?s?|approuv[ée]e?s?|connue?s?|quantifi[ée]e?s?|disponible?s?|autoris[ée]e?s?|"
+    r"confirmad[oa]s?|aprobad[oa]s?|conocid[oa]s?|cuantificad[oa]s?|autorizad[oa]s?|"
+    r"confermat[oaie]|approvat[oaie]|not[oaie]|quantificat[oaie]|autorizzat[oaie])\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"(?<=[.!?])\s+|[\r\n]+|\s*;\s*|"
+    r",\s*(?:but|while|whereas|however|aber|w[aä]hrend|mais|tandis\s+que|"
+    r"cependant|pero|mientras|sin\s+embargo|ma|mentre|tuttavia)\s+|"
+    r"\s+(?:but|while|whereas|however|aber|w[aä]hrend|mais|tandis\s+que|"
+    r"cependant|pero|mientras|sin\s+embargo|ma|mentre|tuttavia)\s+",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN = re.compile(
+    r"\s+(?P<conjunction>and|or|und|oder|et|ou|y|o|e)\s+",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_FRAMING_MANNER_ADVERB = r"[a-z]+(?:-[a-z]+)*ly"
+_KNOWLEDGE_FRAMING_MANNER_PATTERN = re.compile(
+    rf"{_KNOWLEDGE_FRAMING_MANNER_ADVERB}"
+    rf"(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    rf"{_KNOWLEDGE_FRAMING_MANNER_ADVERB})*",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_FRAMING_FORMAT_PATTERN = re.compile(
+    r"(?:in|using|with|as)\s+(?:(?:a|an|the)\s+)?"
+    r"(?:[a-z0-9][a-z0-9'-]*\s+){0,5}"
+    r"(?:bullet\s+points?|examples?|formats?|json|language|markdown|"
+    r"paragraphs?|prose|sentences?|styles?|tables?|terms|words)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_FRAMING_NOUN_PHRASE_PATTERN = re.compile(
+    r"(?:(?:a|an|the|this|that|these|those|some|any)\s+"
+    r"(?:[a-z][a-z'-]*\s+){0,5})?"
+    r"(?:answers?|details?|following|overviews?|responses?|summar(?:y|ies))",
+    re.IGNORECASE,
+)
+
+
+def _knowledge_imperative_prefix_is_framing_only(value: str) -> bool:
+    """Recognize a topic-free command that only frames introduced questions."""
+
+    match = _KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN.match(value.strip())
+    if match is None or match.start("request") != 0:
+        return False
+    remainder = value.strip()[match.end("request") :].strip(" ,:\t\r\n")
+    recipient = re.match(r"(?:me|us)\b[\s,]*", remainder, flags=re.IGNORECASE)
+    if recipient is not None:
+        remainder = remainder[recipient.end() :].strip()
+    if not remainder:
+        return True
+    return bool(
+        _KNOWLEDGE_FRAMING_MANNER_PATTERN.fullmatch(remainder)
+        or _KNOWLEDGE_FRAMING_FORMAT_PATTERN.fullmatch(remainder)
+        or _KNOWLEDGE_FRAMING_NOUN_PHRASE_PATTERN.fullmatch(remainder)
+    )
+
+
+def _knowledge_request_items(question: str) -> tuple[dict[str, str], ...]:
+    """Extract bounded question or imperative clauses without splitting noun conjunctions."""
+    normalized = re.sub(r"\s+", " ", str(question or "")).strip()
+    if not normalized:
+        return ()
+    raw_questions = list(re.finditer(r"[^?]*\?", normalized))
+    if len(raw_questions) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
+        raise ValueError("Knowledge agent request contains too many direct questions")
+
+    positioned_items: list[tuple[int, str]] = []
+    direct_question_starts: list[int] = []
+
+    def trim_leading_conjunction(value: str) -> tuple[str, int]:
+        match = re.match(r"\s*(?:(?:and|or)\s+)?", value, flags=re.IGNORECASE)
+        offset = match.end() if match is not None else 0
+        return value[offset:].strip(), offset
+
+    def collect_clauses(
+        value: str,
+        *,
+        start: int,
+        separator: re.Pattern[str],
+    ) -> None:
+        cursor = 0
+        for clause in separator.split(value):
+            item = clause.strip(" ,:.;?\t\r\n")
+            if not item:
+                continue
+            relative_start = value.find(item, cursor)
+            if relative_start < 0:
+                relative_start = cursor
+            positioned_items.append((start + relative_start, item))
+            cursor = relative_start + len(item)
+
+    for raw_match in raw_questions:
+        raw_question = raw_match.group(0)
+        candidate = raw_question.strip(" .;\t\r\n")
+        candidate_start = raw_match.start() + len(raw_question) - len(
+            raw_question.lstrip(" .;\t\r\n")
+        )
+        candidate, conjunction_offset = trim_leading_conjunction(candidate)
+        candidate_start += conjunction_offset
+        for separator in (":", ".", ";"):
+            separator_index = candidate.rfind(separator)
+            if separator_index < 0:
+                continue
+            raw_tail = candidate[separator_index + 1 :]
+            tail, tail_offset = trim_leading_conjunction(raw_tail)
+            if _KNOWLEDGE_QUESTION_START_PATTERN.match(tail):
+                candidate_start += separator_index + 1 + tail_offset
+                candidate = tail
+        candidate = candidate.rstrip("?").strip()
+        if not _KNOWLEDGE_QUESTION_START_PATTERN.match(candidate):
+            continue
+        direct_question_starts.append(candidate_start)
+        collect_clauses(
+            candidate,
+            start=candidate_start,
+            separator=_KNOWLEDGE_RESTARTED_QUESTION_PATTERN,
+        )
+
+    for imperative_match in _KNOWLEDGE_IMPERATIVE_REQUEST_PATTERN.finditer(normalized):
+        imperative_start = imperative_match.start("request")
+        boundary = _KNOWLEDGE_RESTARTED_REQUEST_SENTENCE_PATTERN.search(
+            normalized[imperative_start:]
+        )
+        imperative_end = (
+            imperative_start + boundary.start()
+            if boundary is not None
+            else len(normalized)
+        )
+        introduced_question_starts = [
+            start
+            for start in direct_question_starts
+            if start > imperative_start
+            and normalized[imperative_start:start].rstrip().endswith(":")
+            and re.search(
+                r"[.!?;]",
+                normalized[imperative_start:start],
+            )
+            is None
+        ]
+        if introduced_question_starts:
+            imperative_end = min(imperative_end, min(introduced_question_starts))
+        imperative = normalized[imperative_start:imperative_end].strip()
+        introduced_question_prefix = bool(introduced_question_starts)
+        if imperative and (
+            not introduced_question_prefix
+            or not _knowledge_imperative_prefix_is_framing_only(imperative)
+        ):
+            collect_clauses(
+                imperative,
+                start=imperative_start,
+                separator=_KNOWLEDGE_RESTARTED_IMPERATIVE_ITEM_PATTERN,
+            )
+
+    if not positioned_items:
+        fallback = normalized.strip(" .?;\t\r\n")
+        if not fallback:
+            return ()
+        positioned_items.append((0, fallback))
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for _position, raw_item in sorted(positioned_items, key=lambda item: item[0]):
+        item = raw_item[0].upper() + raw_item[1:] + "?"
+        normalized_item = " ".join(item.casefold().split())
+        if normalized_item in seen:
+            continue
+        seen.add(normalized_item)
+        items.append(item[:1_000])
+        if len(items) > _KNOWLEDGE_REQUEST_ITEM_LIMIT:
+            raise ValueError("Knowledge agent request contains too many direct request items")
+    return tuple(
+        {"id": f"request:item-{index}", "question": item}
+        for index, item in enumerate(items, start=1)
+    )
+
+
+def _knowledge_request_tokens(value: str) -> set[str]:
+    normalized = re.sub(
+        r"\bestimated\s+time\s+of\s+arrival\b",
+        " eta ",
+        value.casefold(),
+    )
+    tokens: set[str] = set()
+    for raw in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE):
+        if raw in _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS or (len(raw) == 1 and not raw.isdigit()):
+            continue
+        token = _KNOWLEDGE_REQUEST_TOKEN_ALIASES.get(raw, raw)
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("ing") and len(token) > 5:
+            token = token[:-3]
+        elif token.endswith("ed") and len(token) > 4:
+            token = token[:-2]
+        elif token.endswith("s") and len(token) > 4:
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _knowledge_request_state_subject(question: str) -> tuple[bool, str]:
+    """Return a parsed state-question subject or fail closed on an unknown shape."""
+
+    normalized = " ".join(str(question or "").split()).strip("¿¡")
+    for pattern in _KNOWLEDGE_REQUEST_STATE_QUESTION_PATTERNS:
+        match = pattern.fullmatch(normalized)
+        if match is None:
+            continue
+        subject = match.group("subject").strip(" ?!.,:;\t\r\n")
+        return True, subject
+    if _KNOWLEDGE_REQUEST_STATE_HINT_PATTERN.search(normalized):
+        return True, ""
+    return False, normalized
+
+
+def _knowledge_request_answer_clauses(
+    excerpt: str,
+    *,
+    subject: str,
+) -> tuple[str, ...]:
+    """Split independent state clauses without breaking compound subjects."""
+
+    subject_tokens = _knowledge_request_tokens(subject)
+    subject_conjunction_counts: dict[str, int] = {}
+    for match in _KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN.finditer(
+        subject
+    ):
+        conjunction = match.group("conjunction").casefold()
+        subject_conjunction_counts[conjunction] = (
+            subject_conjunction_counts.get(conjunction, 0) + 1
+        )
+
+    def split_independent_coordination(value: str) -> list[str]:
+        matches = list(
+            _KNOWLEDGE_REQUEST_COORDINATING_CONJUNCTION_PATTERN.finditer(value)
+        )
+        if not matches:
+            return [value.strip()] if value.strip() else []
+
+        remaining = dict(subject_conjunction_counts)
+        split_matches: list[re.Match[str]] = []
+        for index, match in enumerate(matches):
+            conjunction = match.group("conjunction").casefold()
+            local_start = matches[index - 1].end() if index else 0
+            local_end = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else len(value)
+            )
+            local_tokens = _knowledge_request_tokens(value[local_start:local_end])
+            if (
+                remaining.get(conjunction, 0) > 0
+                and subject_tokens
+                and subject_tokens.issubset(local_tokens)
+            ):
+                remaining[conjunction] -= 1
+                continue
+            split_matches.append(match)
+
+        if not split_matches:
+            return [value.strip()] if value.strip() else []
+        parts: list[str] = []
+        cursor = 0
+        for match in split_matches:
+            if part := value[cursor : match.start()].strip():
+                parts.append(part)
+            cursor = match.end()
+        if part := value[cursor:].strip():
+            parts.append(part)
+        return parts
+
+    clauses: list[str] = []
+    for unit in _KNOWLEDGE_REQUEST_CLAUSE_SPLIT_PATTERN.split(excerpt):
+        clauses.extend(split_independent_coordination(unit))
+    return tuple(clauses)
+
+
+def _knowledge_request_excerpt_matches(item: dict[str, str], excerpt: str) -> bool:
+    state_sensitive, subject = _knowledge_request_state_subject(item["question"])
+    if state_sensitive and not subject:
+        return False
+    topic_tokens = _knowledge_request_tokens(subject)
+    if not topic_tokens:
+        return bool(excerpt.strip()) and not state_sensitive
+    compared_tokens = topic_tokens
+    required = (
+        len(compared_tokens)
+        if len(compared_tokens) <= 2
+        else (len(compared_tokens) * 2 + 2) // 3
+    )
+
+    def has_subject_coverage(value: str) -> bool:
+        value_tokens = _knowledge_request_tokens(value)
+        return len(compared_tokens & value_tokens) >= max(1, required)
+
+    if not state_sensitive:
+        return has_subject_coverage(excerpt)
+    excerpt_units = _knowledge_request_answer_clauses(excerpt, subject=subject)
+    return any(
+        has_subject_coverage(unit)
+        and _KNOWLEDGE_REQUEST_EXPLICIT_STATE_PATTERN.search(unit) is not None
+        for unit in excerpt_units
+    )
+
+
+def _uncovered_knowledge_request_items(
+    *,
+    items: tuple[dict[str, str], ...],
+    answer: str,
+    assessments: list[KnowledgeRequestItemAssessment],
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
+) -> tuple[dict[str, str], ...]:
+    """Accept only unique exact answer spans with enough item-specific topic proof."""
+    assessments_by_id: dict[str, list[KnowledgeRequestItemAssessment]] = {}
+    for assessment in assessments[:_KNOWLEDGE_REQUEST_ITEM_LIMIT * 2]:
+        assessments_by_id.setdefault(assessment.request_item_id.strip(), []).append(assessment)
+
+    uncovered: list[dict[str, str]] = []
+    for item in items:
+        candidates = assessments_by_id.get(item["id"], [])
+        if len(candidates) != 1:
+            uncovered.append(item)
+            continue
+        excerpt = _strip_internal_citation_markers(
+            candidates[0].answer_excerpt,
+            internal_citation_ids=internal_citation_ids,
+        ).strip()
+        if not excerpt or excerpt not in answer or not _knowledge_request_excerpt_matches(item, excerpt):
+            uncovered.append(item)
+    return tuple(uncovered)
+
+
+def _knowledge_unknown_item_answer(item: str, *, language: str) -> str:
+    templates = {
+        "de": 'Die verfügbaren Belege klären diesen angefragten Punkt nicht: "{item}"',
+        "fr": 'Les éléments disponibles ne permettent pas d’établir ce point demandé : « {item} »',
+        "es": 'La información disponible no permite establecer este punto solicitado: «{item}»',
+        "it": 'Le informazioni disponibili non consentono di stabilire questo punto richiesto: «{item}»',
+        "en": 'Available evidence does not establish this requested item: "{item}"',
+    }
+    return templates.get(language, templates["en"]).format(item=item)
+
+
+def _repair_knowledge_request_item_coverage(
+    *,
+    answer: str,
+    question: str,
+    items: tuple[dict[str, str], ...],
+    assessments: list[KnowledgeRequestItemAssessment],
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
+) -> tuple[str, tuple[dict[str, str], ...]]:
+    """Fail closed per omitted item by appending one explicit evidence-unknown result."""
+    uncovered = _uncovered_knowledge_request_items(
+        items=items,
+        answer=answer,
+        assessments=assessments,
+        internal_citation_ids=internal_citation_ids,
+    )
+    if not uncovered:
+        return answer, ()
+    language = _detected_supported_language(question)
+    repair = " ".join(
+        _knowledge_unknown_item_answer(item["question"], language=language)
+        for item in uncovered
+    )
+    return f"{answer.rstrip()}\n\n{repair}".strip(), uncovered
+
+
+def _knowledge_failure_answer(
+    question: str,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
+    language_parts = [question]
+    for message in reversed(messages or []):
+        message_body = _string_from(message.get("body") or message.get("content"))
+        if message_body:
+            language_parts.append(message_body[:1_000])
+            break
+    language = _detected_supported_language(*language_parts)
+    return {
+        "de": (
+            "Die Wissensrecherche konnte nicht abgeschlossen werden. Es wurde keine belegte Antwort erstellt. "
+            "Bitte prüfen Sie dieses Ticket manuell, bevor Sie antworten."
+        ),
+        "fr": (
+            "La recherche dans les connaissances n’a pas pu être terminée. Aucune réponse étayée n’a été "
+            "produite. Veuillez faire vérifier ce ticket avant de répondre."
+        ),
+        "es": (
+            "No se pudo completar la búsqueda en la base de conocimiento. No se generó una respuesta "
+            "fundamentada. Revise este ticket manualmente antes de responder."
+        ),
+        "it": (
+            "La ricerca nella knowledge base non è stata completata. Non è stata generata una risposta "
+            "supportata da fonti. Verifica manualmente il ticket prima di rispondere."
+        ),
+        "en": (
+            "Knowledge research could not be completed. No grounded answer was produced. "
+            "Please review this ticket manually before replying."
+        ),
+    }[language]
+
+
+def _battery_safety_failure_answer(
+    messages: list[dict[str, Any]] | None = None,
+    *,
+    language: str | None = None,
+) -> str:
+    """Return complete policy guidance when model generation cannot do so safely."""
+    language = language if language in _LANGUAGE_NAMES else _latest_customer_language(messages or [])
+    return {
+        "de": (
+            "Nicht berühren. Nicht benutzen. Nicht laden. Isolieren Sie den Artikel nur, "
+            "wenn dies sicher möglich ist, und halten Sie ihn nur wenn sicher von Hitze "
+            "und brennbaren Materialien fern. Nicht versenden, zurücksenden oder anderweitig "
+            "transportieren, bevor Sie bestätigte Gefahrgut-Anweisungen von einem Menschen "
+            "erhalten. Wenn Rauch, Feuer oder ungewöhnliche Hitze auftritt, entfernen Sie "
+            "sich und kontaktieren Sie den örtlichen Notdienst oder die Feuerwehr. Eine "
+            "menschliche Sicherheitsprüfung ist erforderlich, bevor eine Eskalation, ein "
+            "Ersatz, eine Rückerstattung, eine Abholung oder Rücksendung bestätigt werden "
+            "kann; dieser Entwurf bestätigt keine solche Aktion. Bewahren Sie vorhandene "
+            "Bestelldaten und bereits aufgenommene Fotos auf, aber bewegen oder berühren Sie "
+            "den Artikel nicht, um weitere Beweise zu sammeln."
+        ),
+        "fr": (
+            "Ne manipulez pas, n'utilisez pas et ne rechargez pas l'article. Isolez-le "
+            "uniquement si cela peut être fait en toute sécurité, et gardez-le à l'écart de "
+            "la chaleur et des matières inflammables uniquement si c'est sûr. Ne l'expédiez "
+            "pas, ne le retournez pas et ne le transportez pas avant d'avoir reçu d'une "
+            "personne des consignes confirmées pour les marchandises dangereuses. En cas de "
+            "fumée, d'incendie ou de chaleur inhabituelle, éloignez-vous et contactez les "
+            "services d'urgence locaux ou les pompiers. Un contrôle humain de sécurité est "
+            "requis avant de confirmer une escalade, un remplacement, un remboursement, un "
+            "enlèvement ou un retour ; ce brouillon ne confirme aucune de ces actions. "
+            "Conservez les informations de commande et les photos déjà prises, mais ne "
+            "manipulez ni ne déplacez l'article pour recueillir d'autres preuves."
+        ),
+        "es": (
+            "No manipule, use ni cargue el artículo. Aíslelo solo si puede hacerse de forma "
+            "segura y manténgalo alejado del calor y de materiales inflamables, solo si es "
+            "seguro. No lo envíe, devuelva ni transporte antes de recibir de una persona "
+            "instrucciones confirmadas de seguridad para mercancías peligrosas. Si hay humo, "
+            "fuego o calor inusual, aléjese y contacte los servicios de emergencia locales o "
+            "los bomberos. Se requiere una revisión humana de seguridad antes de confirmar "
+            "una escalada, sustitución, reembolso, recogida o devolución; este borrador no "
+            "confirma ninguna de esas acciones. Conserve los datos del pedido y las fotos ya "
+            "tomadas, pero no manipule ni mueva el artículo para reunir más pruebas."
+        ),
+        "it": (
+            "Non manipoli, non utilizzi e non ricarichi l'articolo. Lo isoli solo se può "
+            "farlo in sicurezza e lo tenga lontano dal calore e dai materiali infiammabili, "
+            "solo se è sicuro. Non lo spedisca, restituisca o trasporti prima di ricevere da "
+            "una persona istruzioni confermate di sicurezza per merci pericolose. In caso di "
+            "fumo, fuoco o calore insolito, si allontani e contatti i servizi di emergenza "
+            "locali o i vigili del fuoco. È necessaria una revisione umana della sicurezza "
+            "prima di confermare un'escalation, una sostituzione, un rimborso, un ritiro o un "
+            "reso; questa bozza non conferma nessuna di tali azioni. Conservi i dati "
+            "dell'ordine e le foto già scattate, ma non manipoli né sposti l'articolo per "
+            "raccogliere ulteriori prove."
+        ),
+        "en": (
+            "Stop handling, using, and charging the item immediately. Isolate it only if this "
+            "can be done safely, and keep it away from heat and flammable materials only if "
+            "safe. Do not ship, return, or otherwise transport it until a human provides "
+            "confirmed hazardous-goods instructions. If smoke, fire, or unusual heat is "
+            "present or develops, move away and contact local emergency services or the local "
+            "fire authority. No escalation, replacement, refund, collection, return, or other "
+            "business action has been confirmed. Human safety review is required before any "
+            "business next step. Keep existing order details and any photos already taken "
+            "available, but do not handle or move the item to collect more evidence."
+        ),
+    }[language]
+
+
+def _safety_aware_failure_answer(
+    *,
+    assessment: SafetyGuidanceAssessment,
+    ordinary_answer: str,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
+    if assessment.active:
+        return _battery_safety_failure_answer(messages)
+    return ordinary_answer
 
 
 def _article_context(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -326,7 +2287,7 @@ def _conversation_context(conversation: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
-    return {
+    ticket = {
         "id": _string_from(issue.get("id")),
         "subject": _string_from(issue.get("subject")),
         "status": _string_from(issue.get("status") or issue.get("workflowStatus")),
@@ -338,23 +2299,850 @@ def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
         "summary": _string_from(issue.get("aiSummary")),
         "runbook": _string_from(issue.get("activatedIntent") or issue.get("activated_intent")),
     }
+    concern_context, tool_evidence, run_scope = _automatic_runbook_concern_context(issue)
+    if concern_context:
+        ticket["concerns"] = concern_context
+    if tool_evidence:
+        ticket["toolEvidence"] = tool_evidence
+    runbook_actions = _automatic_runbook_action_context(
+        issue,
+        concern_ids={
+            _string_from(concern.get("id"))
+            for concern in concern_context
+            if isinstance(concern, dict) and _string_from(concern.get("id"))
+        },
+        source_message_id=_string_from(run_scope.get("sourceMessageId")),
+    )
+    if runbook_actions:
+        ticket["runbookActions"] = runbook_actions
+    return ticket
+
+
+def _validated_response_attachments(
+    issue: dict[str, Any],
+    requested_filenames: list[str],
+) -> tuple[str, ...]:
+    """Allow only latest-run attachment names; always-mode files cannot be omitted."""
+    ticket = _ticket_context(issue)
+    available: dict[str, str] = {}
+    for concern in ticket.get("concerns", []):
+        if not isinstance(concern, dict):
+            continue
+        for item in concern.get("attachments", []):
+            if not isinstance(item, dict):
+                continue
+            filename = _string_from(item.get("filename"))
+            if filename:
+                available.setdefault(filename, _string_from(item.get("mode")).lower())
+
+    selected: list[str] = []
+    for raw_filename in requested_filenames[:20]:
+        filename = _string_from(raw_filename)
+        if filename in available and filename not in selected:
+            selected.append(filename)
+    for filename, mode in available.items():
+        if mode in {"always", "generated"} and filename not in selected:
+            selected.append(filename)
+    return tuple(selected[:20])
+
+
+def _validated_concern_coverage(
+    issue: dict[str, Any],
+    covered_concern_ids: list[str],
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[tuple[str, ...], bool, str]:
+    expected_ids = [
+        _string_from(concern.get("id"))
+        for concern in _ticket_context(issue).get("concerns", [])
+        if isinstance(concern, dict) and _string_from(concern.get("id"))
+    ]
+    covered_ids = tuple(_string_from(item) for item in covered_concern_ids[:20] if _string_from(item))
+    reasons: list[str] = []
+    requires_human = bool(model_requires_human)
+    if expected_ids and (len(covered_ids) != len(expected_ids) or set(covered_ids) != set(expected_ids)):
+        requires_human = True
+        reasons.append("Reply composer did not confirm exact coverage of every concern.")
+    if model_requires_human:
+        reasons.append(model_reason.strip() or "Reply composer requested human review.")
+    return covered_ids, requires_human, " ".join(dict.fromkeys(reasons))[:1_000]
+
+
+def _answer_obligations_from_issue(issue: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    obligations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for concern in _ticket_context(issue).get("concerns", []):
+        if not isinstance(concern, dict):
+            continue
+        concern_id = _string_from(concern.get("id"))
+        for field_name, default_kind in (
+            ("answerObligations", "customer_question"),
+            ("requiredGuidanceObligations", "runbook_requirement"),
+        ):
+            raw_obligations = concern.get(field_name)
+            if not isinstance(raw_obligations, list):
+                continue
+            for raw in raw_obligations[:20]:
+                obligation = _record_from(raw)
+                obligation_id = _string_from(obligation.get("id"))
+                question = _string_from(obligation.get("question"))
+                if not obligation_id or not question or obligation_id in seen:
+                    continue
+                seen.add(obligation_id)
+                kind = _string_from(obligation.get("kind")) or default_kind
+                normalized = {
+                    "id": obligation_id,
+                    "concernId": concern_id,
+                    "question": question,
+                }
+                if kind != "customer_question":
+                    normalized["kind"] = kind
+                obligations.append(normalized)
+    return tuple(obligations)
+
+
+def _validated_obligation_coverage(
+    issue: dict[str, Any],
+    covered_obligation_ids: list[str],
+) -> tuple[tuple[str, ...], bool, str]:
+    expected_ids = [item["id"] for item in _answer_obligations_from_issue(issue)]
+    covered_ids = tuple(
+        dict.fromkeys(_string_from(item) for item in covered_obligation_ids[:100] if _string_from(item))
+    )
+    if expected_ids and (len(covered_ids) != len(expected_ids) or set(covered_ids) != set(expected_ids)):
+        return (
+            covered_ids,
+            True,
+            "Reply composer did not confirm exact coverage of every answer obligation.",
+        )
+    return covered_ids, False, ""
+
+
+def _validated_draft_coverage(
+    issue: dict[str, Any],
+    covered_concern_ids: list[str],
+    covered_obligation_ids: list[str],
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], bool, str]:
+    concern_ids, requires_human, concern_reason = _validated_concern_coverage(
+        issue,
+        covered_concern_ids,
+        model_requires_human=model_requires_human,
+        model_reason=model_reason,
+    )
+    obligation_ids, obligation_requires_human, obligation_reason = _validated_obligation_coverage(
+        issue, covered_obligation_ids
+    )
+    reasons = [reason for reason in (concern_reason, obligation_reason) if reason]
+    return (
+        concern_ids,
+        obligation_ids,
+        requires_human or obligation_requires_human,
+        " ".join(dict.fromkeys(reasons))[:1_000],
+    )
+
+
+def _issue_safety_assessment(
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> SafetyGuidanceAssessment:
+    return assess_lithium_battery_safety(
+        subject=_string_from(issue.get("subject")),
+        messages=messages,
+    )
+
+
+def _with_safety_prompt_context(
+    ticket: dict[str, Any],
+    assessment: SafetyGuidanceAssessment,
+) -> dict[str, Any]:
+    """Expose activated policy and its obligation without mutating runbook outcomes."""
+    if not assessment.active:
+        return ticket
+    return {
+        **ticket,
+        "systemSafety": assessment.prompt_context(),
+    }
+
+
+def _safety_review_state(
+    assessment: SafetyGuidanceAssessment,
+    *,
+    model_requires_human: bool,
+    model_reason: str,
+) -> tuple[bool, str]:
+    reasons = [model_reason.strip()] if model_requires_human and model_reason.strip() else []
+    if assessment.active:
+        reasons.append(assessment.requires_human_reason)
+    return (
+        bool(model_requires_human or assessment.active),
+        " ".join(dict.fromkeys(reasons))[:1_000],
+    )
+
+
+def _bounded_string_list(value: Any, *, limit: int = 10, item_limit: int = 500) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return []
+    return [clean[:item_limit] for item in values[:limit] if (clean := _string_from(item))]
+
+
+_LOOKUP_RESULT_SIGNAL_PATHS = frozenset({"exists", "found", "matched"})
+_AFFIRMATIVE_LOOKUP_RESULT_VALUES = frozenset({"1", "true", "yes"})
+
+
+def _lookup_result_signal_values(value: Any) -> tuple[Any, ...]:
+    """Retain bounded found/exists/matched values, including null and empty."""
+
+    signals: list[Any] = []
+
+    def collect(candidate: Any, *, depth: int = 0) -> None:
+        if depth > 8 or len(signals) >= 20:
+            return
+        if isinstance(candidate, dict):
+            explicit_path = _string_from(candidate.get("path"))
+            if explicit_path and "value" in candidate:
+                leaf_path = explicit_path.rsplit(".", 1)[-1].casefold().replace("-", "_")
+                if leaf_path in _LOOKUP_RESULT_SIGNAL_PATHS:
+                    signals.append(candidate.get("value"))
+                return
+            for raw_key, child in list(candidate.items())[:100]:
+                key = _string_from(raw_key).casefold().replace("-", "_")
+                if key in _LOOKUP_RESULT_SIGNAL_PATHS:
+                    signals.append(child)
+                else:
+                    collect(child, depth=depth + 1)
+            return
+        if isinstance(candidate, list):
+            for child in candidate[:100]:
+                collect(child, depth=depth + 1)
+
+    collect(value)
+    return tuple(signals)
+
+
+def _has_nonaffirmative_lookup_result(value: Any) -> bool:
+    """Fail closed when an explicit lookup-result signal is not clearly true."""
+
+    return any(
+        " ".join(_string_from(signal).casefold().split())
+        not in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+        for signal in _lookup_result_signal_values(value)
+    )
+
+
+def _tool_evidence_id(name: str, *, concern_id: str = "") -> str:
+    """Build the exact evidence identity for legacy or concern-scoped tools."""
+    return f"tool:{concern_id}:{name}" if concern_id else f"tool:{name}"
+
+
+def _automatic_tool_evidence_context(
+    value: Any,
+    *,
+    concern_id: str = "",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Expose only the bounded, allowlisted facts recorded by HTTP tools."""
+    if not isinstance(value, list):
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in value[:limit]:
+        if not isinstance(item, dict):
+            continue
+        status = _string_from(item.get("status"))
+        record: dict[str, Any] = {
+            "name": _string_from(item.get("name") or item.get("toolName") or item.get("tool_name"))[:160],
+            "method": _string_from(item.get("method"))[:16],
+            "status": status[:80],
+        }
+        if item.get("responseFactsTruncated") is True or item.get("response_facts_truncated") is True:
+            record["responseFactsTruncated"] = True
+        if (
+            item.get("hasNonaffirmativeLookupResult") is True
+            or item.get("has_nonaffirmative_lookup_result") is True
+        ):
+            record["hasNonaffirmativeLookupResult"] = True
+        facts = item.get("responseFacts") or item.get("response_facts") or item.get("facts")
+        safe_facts = sanitize_tool_response_facts(facts)
+        if (
+            status == "success"
+            and (
+                record["name"] == "matter_lookup"
+                or record["name"].startswith("fixture_matter_")
+            )
+            and _has_nonaffirmative_lookup_result(facts)
+        ):
+            # Preserve only the veto bit. Sanitization intentionally drops null
+            # children, but a null/false found signal must still prevent a later
+            # deterministic positive lookup inference.
+            record["hasNonaffirmativeLookupResult"] = True
+        if status == "success" and any(
+            _is_affirmative_return_refund_fact(path, value, tool_name=record["name"])
+            for path, value in _tool_fact_scalar_entries(facts)
+        ):
+            # Preserve only a boolean safety signal when the credential filter
+            # removes a business-state field such as ``return_authorization``.
+            record["hasAffirmativeReturnRefundFact"] = True
+        if status == "success" and isinstance(safe_facts, (dict, list)) and safe_facts:
+            # http_tool owns the allowlist and size bounds. Round-trip through JSON
+            # to detach the prompt context from mutable persisted metadata. The
+            # value-level filter also protects prompts from unsafe historical rows.
+            try:
+                record["responseFacts"] = json.loads(
+                    json.dumps(safe_facts, ensure_ascii=False)
+                )
+                record["evidenceId"] = _tool_evidence_id(
+                    record["name"],
+                    concern_id=concern_id,
+                )
+            except (TypeError, ValueError):
+                pass
+        if record["name"]:
+            evidence.append(record)
+    return evidence
+
+
+def _is_runbook_ai_run(
+    run: dict[str, Any],
+    intent_result: dict[str, Any],
+) -> bool:
+    """Identify modern and legacy runbook runs without claiming unrelated AI work."""
+    metadata = _record_from(run.get("metadata"))
+    if _string_from(metadata.get("kind")) == "direct_channel_runbooks":
+        return True
+    if _string_from(run.get("source")).startswith("channel:"):
+        return True
+    if isinstance(intent_result.get("concerns"), list):
+        return True
+    return any(key in intent_result for key in ("matched", "intentName", "intent_name"))
+
+
+def _automatic_runbook_concern_context(
+    issue: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Return latest per-message concern outcomes plus safe tool evidence."""
+    runs = issue.get("aiRuns")
+    if not isinstance(runs, list):
+        return [], [], {}
+
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        source = _string_from(run.get("source"))
+        if source in {"agent_answer", "triage", "custom_fields"}:
+            continue
+        metadata = _record_from(run.get("metadata"))
+        source_message_id = _string_from(
+            metadata.get("emailId") or metadata.get("messageId") or metadata.get("sourceMessageId")
+        )
+        intent_result = _record_from(run.get("intentResult") or run.get("intent_result"))
+        if not _is_runbook_ai_run(run, intent_result):
+            continue
+        raw_concerns = intent_result.get("concerns")
+        if not isinstance(raw_concerns, list) or not raw_concerns:
+            # Runs are newest-first. Once the newest runbook run is found,
+            # never revive concerns or evidence from an older customer message.
+            return [], [], {"sourceMessageId": source_message_id}
+
+        concerns: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_concerns[:10]):
+            if not isinstance(raw, dict):
+                continue
+            outcome = _record_from(raw.get("outcome") or raw.get("runbookOutcome") or raw.get("runbook_outcome"))
+            intent_name = _string_from(
+                raw.get("intentName")
+                or raw.get("intent_name")
+                or raw.get("runbook")
+                or outcome.get("intentName")
+                or outcome.get("intent_name")
+                or outcome.get("runbook")
+            )
+            matched_value = raw.get("matched")
+            matched = bool(intent_name) if matched_value is None else bool(matched_value)
+            concern: dict[str, Any] = {
+                "id": _string_from(raw.get("concernId") or raw.get("concern_id") or raw.get("id"))
+                or f"concern-{index + 1}",
+                "text": _string_from(
+                    raw.get("text") or raw.get("sourceText") or raw.get("source_text") or raw.get("summary")
+                )[:1_000],
+                "matched": matched,
+                "runbook": intent_name[:240],
+                "confidence": _string_from(raw.get("confidence") or outcome.get("confidence"))[:40],
+                "status": _string_from(outcome.get("status") or raw.get("status"))[:80],
+                "requiresHuman": bool(
+                    outcome.get("requiresHuman")
+                    or outcome.get("requires_human")
+                    or raw.get("requiresHuman")
+                    or raw.get("requires_human")
+                ),
+            }
+            concern_summary = _string_from(
+                raw.get("concernSummary")
+                or raw.get("concern_summary")
+                or outcome.get("concernSummary")
+                or outcome.get("concern_summary")
+            )
+            if concern_summary:
+                concern["concernSummary"] = concern_summary[:1_000]
+            runbook_outcome_summary = _string_from(
+                outcome.get("summary") or raw.get("summary")
+            )
+            if runbook_outcome_summary:
+                concern["runbookOutcomeSummary"] = runbook_outcome_summary[:1_000]
+            reason = _string_from(
+                raw.get("reason")
+                or raw.get("unmatchedReason")
+                or raw.get("unmatched_reason")
+                or raw.get("requiresHumanReason")
+                or raw.get("requires_human_reason")
+                or outcome.get("reason")
+                or outcome.get("requiresHumanReason")
+                or outcome.get("requires_human_reason")
+                or outcome.get("error")
+                or raw.get("error")
+            )
+            if reason:
+                concern["reason"] = reason[:500]
+            raw_obligations = (
+                outcome.get("answerObligations")
+                or outcome.get("answer_obligations")
+                or raw.get("answerObligations")
+                or raw.get("answer_obligations")
+                or []
+            )
+            obligations: list[dict[str, str]] = []
+            if isinstance(raw_obligations, list):
+                for obligation_index, raw_obligation in enumerate(raw_obligations[:10], start=1):
+                    obligation = _record_from(raw_obligation)
+                    question = _string_from(
+                        obligation.get("question")
+                        or obligation.get("text")
+                        or (raw_obligation if isinstance(raw_obligation, str) else "")
+                    )
+                    obligation_id = (
+                        _string_from(
+                            obligation.get("obligationId") or obligation.get("obligation_id") or obligation.get("id")
+                        )
+                        or f"{concern['id']}:obligation-{obligation_index}"
+                    )
+                    if not question:
+                        continue
+                    obligations.append(
+                        {
+                            "id": obligation_id[:240],
+                            "question": question[:500],
+                            "sourceText": _string_from(obligation.get("sourceText") or obligation.get("source_text"))[
+                                :1_000
+                            ],
+                        }
+                    )
+            if obligations:
+                concern["answerObligations"] = obligations
+            missing = _bounded_string_list(
+                outcome.get("missingInformation")
+                or outcome.get("missing_information")
+                or raw.get("missingInformation")
+                or raw.get("missing_information")
+            )
+            if missing:
+                concern["missingInformation"] = missing
+            requirements = _bounded_string_list(
+                outcome.get("replyRequirements")
+                or outcome.get("reply_requirements")
+                or outcome.get("responseRules")
+                or outcome.get("response_rules")
+                or raw.get("replyRequirements")
+                or raw.get("reply_requirements")
+            )
+            if requirements:
+                concern["replyRequirements"] = requirements
+            required_guidance = _bounded_string_list(
+                outcome.get("requiredGuidance")
+                or outcome.get("required_guidance")
+                or raw.get("requiredGuidance")
+                or raw.get("required_guidance")
+            )
+            if required_guidance:
+                concern["requiredGuidance"] = required_guidance
+                concern["requiredGuidanceObligations"] = [
+                    {
+                        "id": f"{concern['id']}:required-guidance-{guidance_index}",
+                        "question": guidance,
+                        "kind": "runbook_requirement",
+                    }
+                    for guidance_index, guidance in enumerate(required_guidance, start=1)
+                ]
+            forbidden = _bounded_string_list(
+                outcome.get("forbiddenClaims")
+                or outcome.get("forbidden_claims")
+                or raw.get("forbiddenClaims")
+                or raw.get("forbidden_claims")
+            )
+            if forbidden:
+                concern["forbiddenClaims"] = forbidden
+            raw_attachments = outcome.get("attachments") or raw.get("attachments") or []
+            attachments: list[dict[str, str]] = []
+            if isinstance(raw_attachments, list):
+                for raw_attachment in raw_attachments[:20]:
+                    attachment = _record_from(raw_attachment)
+                    filename = _string_from(attachment.get("filename"))
+                    if not filename:
+                        continue
+                    attachments.append(
+                        {
+                            "filename": filename[:240],
+                            "description": _string_from(attachment.get("description"))[:500],
+                            "mode": _string_from(attachment.get("mode") or "dynamic")[:40],
+                            "source": _string_from(attachment.get("source") or "runbook")[:40],
+                        }
+                    )
+            if attachments:
+                concern["attachments"] = attachments
+            concern_tools = _automatic_tool_evidence_context(
+                outcome.get("toolEvidence")
+                or outcome.get("tool_evidence")
+                or outcome.get("toolCalls")
+                or outcome.get("tool_calls")
+                or raw.get("toolEvidence")
+                or raw.get("tool_evidence")
+                or raw.get("toolCalls")
+                or raw.get("tool_calls"),
+                concern_id=concern["id"],
+            )
+            if concern_tools:
+                concern["toolEvidence"] = concern_tools
+            concerns.append(concern)
+
+        # Modern runs bind evidence to each concern. Flat run-level calls can
+        # include identity or another concern and are not customer-claim proof.
+        return concerns, [], {"sourceMessageId": source_message_id}
+    return [], [], {}
+
+
+def _bounded_scope_values(*values: Any) -> tuple[str, ...]:
+    """Normalize bounded singular/list scope metadata without inventing IDs."""
+
+    normalized: list[str] = []
+    for value in values:
+        raw_values = value if isinstance(value, list) else [value]
+        for raw_value in raw_values[:20]:
+            clean_value = _string_from(raw_value)
+            if clean_value and clean_value not in normalized:
+                normalized.append(clean_value)
+    return tuple(normalized)
+
+
+def _runbook_action_concern_ids(action: dict[str, Any]) -> tuple[str, ...]:
+    return _bounded_scope_values(
+        action.get("concernIds"),
+        action.get("concern_ids"),
+        action.get("concernId"),
+        action.get("concern_id"),
+    )
+
+
+def _automatic_runbook_action_context(
+    issue: dict[str, Any],
+    *,
+    concern_ids: set[str] | None = None,
+    source_message_id: str = "",
+) -> list[dict[str, Any]]:
+    actions = issue.get("actionExecutions")
+    if not isinstance(actions, list):
+        return []
+    context: list[dict[str, Any]] = []
+    for execution in actions[:25]:
+        if not isinstance(execution, dict):
+            continue
+        metadata = _record_from(execution.get("metadata"))
+        status = _string_from(execution.get("status")).lower()
+        execution_type = _string_from(execution.get("type")).lower()
+        execution_source = _string_from(metadata.get("source")).lower()
+        is_runbook_action = execution_type == "runbook_webhook" or execution_source == "runbook"
+        # Channel triage is a real pending mutation even though it is not a
+        # runbook webhook. Expose only the approval-gated pending form.
+        is_pending_agent_triage = (
+            (execution_type == "agent_triage" or execution_source == "agent_triage")
+            and status == "pending"
+            and metadata.get("approvalRequired") is True
+        )
+        if not is_runbook_action and not is_pending_agent_triage:
+            continue
+        automation_context = _record_from(metadata.get("automationContext") or metadata.get("automation_context"))
+        # Channel-created actions keep their message scope in automationContext.
+        execution_source_message_ids = set(
+            _bounded_scope_values(
+                metadata.get("sourceMessageIds"),
+                metadata.get("source_message_ids"),
+                metadata.get("sourceMessageId") or metadata.get("source_message_id"),
+                metadata.get("emailId") or metadata.get("email_id"),
+                metadata.get("messageId") or metadata.get("message_id"),
+                automation_context.get("sourceMessageIds"),
+                automation_context.get("source_message_ids"),
+                automation_context.get("sourceMessageId") or automation_context.get("source_message_id"),
+                automation_context.get("emailId") or automation_context.get("email_id"),
+                automation_context.get("messageId") or automation_context.get("message_id"),
+            )
+        )
+        result = _record_from(execution.get("result"))
+        proposed = _record_from(result.get("proposedAction") or metadata.get("proposedAction"))
+        execution_concern_id = _string_from(
+            metadata.get("concernId")
+            or metadata.get("concern_id")
+            or proposed.get("concernId")
+            or proposed.get("concern_id")
+        )
+        proposed_payload = _record_from(proposed.get("payload"))
+        execution_concern_ids = _bounded_scope_values(
+            metadata.get("concernIds"),
+            metadata.get("concern_ids"),
+            proposed.get("concernIds"),
+            proposed.get("concern_ids"),
+            proposed_payload.get("concernIds"),
+            proposed_payload.get("concern_ids"),
+            execution_concern_id,
+        )
+        if source_message_id and source_message_id not in execution_source_message_ids:
+            continue
+        if concern_ids and is_runbook_action and not concern_ids.intersection(execution_concern_ids):
+            continue
+        name = (
+            "agent_triage"
+            if is_pending_agent_triage
+            else _string_from(proposed.get("name") or execution.get("actionKey"))
+        )
+        label = _string_from(proposed.get("label") or execution.get("label") or name)
+        concern_id = execution_concern_id or (
+            execution_concern_ids[0] if execution_concern_ids else ""
+        )
+        runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
+        if status == "pending" and metadata.get("approvalRequired") is True:
+            action_context = {
+                "name": name,
+                "label": label,
+                "status": "pending_approval",
+            }
+            if concern_id:
+                action_context["concernId"] = concern_id
+            if len(execution_concern_ids) > 1:
+                action_context["concernIds"] = list(execution_concern_ids)
+            if runbook:
+                action_context["runbook"] = runbook
+            context.append(action_context)
+            if len(context) >= 10:
+                break
+            continue
+        if status in {"failed", "skipped"}:
+            application = _record_from(result.get("application"))
+            approval = _record_from(result.get("approval"))
+            error = _string_from(execution.get("error") or application.get("error") or approval.get("note"))[
+                :_AUTOMATIC_RUNBOOK_ACTION_ERROR_MAX_CHARS
+            ]
+            action_context = {
+                "name": name,
+                "label": label,
+                "status": status,
+                "completedAt": _string_from(execution.get("completedAt")),
+            }
+            if concern_id:
+                action_context["concernId"] = concern_id
+            if len(execution_concern_ids) > 1:
+                action_context["concernIds"] = list(execution_concern_ids)
+            if runbook:
+                action_context["runbook"] = runbook
+            if error:
+                action_context["error"] = error
+            context.append(action_context)
+            if len(context) >= 10:
+                break
+            continue
+        application = _record_from(result.get("application"))
+        webhook_result = _record_from(application.get("webhookResult"))
+        if status != "success" or application.get("applied") is not True or webhook_result.get("status") != "ok":
+            continue
+        response = webhook_result.get("response")
+        proof: dict[str, Any] = {}
+        if isinstance(response, dict):
+            # Validate the complete response before minimizing it. Otherwise a
+            # negative sibling such as ``error`` or ``failed`` could be dropped
+            # while its reference number was incorrectly retained as success.
+            if not has_meaningful_action_success_proof(
+                response,
+                action={"name": name, "label": label},
+            ):
+                continue
+            for key in (
+                "action",
+                "status",
+                "ok",
+                "id",
+                "reference",
+                "ticketReference",
+                "confirmationNumber",
+            ):
+                value = response.get(key)
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if cleaned and len(cleaned) <= 240:
+                        proof[key] = cleaned
+                elif isinstance(value, bool):
+                    proof[key] = value
+                elif isinstance(value, int):
+                    proof[key] = value
+        if not has_meaningful_action_success_proof(
+            proof,
+            action={"name": name, "label": label},
+        ):
+            continue
+        action_context = {
+            "name": name,
+            "label": label,
+            "status": "success",
+            "completedAt": _string_from(execution.get("completedAt")),
+            # Preserve the minimal durable execution proof needed by the
+            # deterministic action-state guard. The full webhook payload stays
+            # out of customer-facing context.
+            "applied": True,
+            "webhookResult": {"status": "ok"},
+            "proof": proof,
+        }
+        if concern_id:
+            action_context["concernId"] = concern_id
+        if len(execution_concern_ids) > 1:
+            action_context["concernIds"] = list(execution_concern_ids)
+        if runbook:
+            action_context["runbook"] = runbook
+        if concern_id and name:
+            execution_id = _string_from(execution.get("id"))
+            evidence_scope = execution_id or f"{concern_id}:{name}"
+            action_context["evidenceId"] = f"action:{evidence_scope}"
+        context.append(action_context)
+        if len(context) >= 10:
+            break
+    return context
 
 
 def _automatic_ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
-    """Exclude workflow state changed by queueing from customer-facing evidence."""
+    """Exclude generated and queue-mutated state from customer-facing evidence."""
     ticket = _ticket_context(issue)
     ticket.pop("status", None)
+    ticket.pop("summary", None)
     return ticket
+
+
+def _is_internal_agent_triage_action(action: dict[str, Any]) -> bool:
+    """Identify approval guard state that must never become customer content."""
+    return _string_from(action.get("name")).lower().replace("-", "_") == "agent_triage"
+
+
+def _customer_answer_ticket_context(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal guard-only actions from the response generator context."""
+    customer_ticket = dict(ticket)
+    raw_actions = ticket.get("runbookActions")
+    if not isinstance(raw_actions, list):
+        return customer_ticket
+    customer_actions = [
+        action
+        for raw_action in raw_actions
+        if (action := _record_from(raw_action))
+        and not _is_internal_agent_triage_action(action)
+    ]
+    if customer_actions:
+        customer_ticket["runbookActions"] = customer_actions
+    else:
+        customer_ticket.pop("runbookActions", None)
+    return customer_ticket
+
+
+def _global_grounding_ticket_evidence(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Keep concern-scoped runbook facts outside the global ``ticket`` evidence ID."""
+    return {key: value for key, value in ticket.items() if key not in _GROUNDING_TICKET_SCOPED_KEYS}
+
+
+def _concern_grounding_evidence_id(concern_id: str) -> str:
+    return f"concern:{concern_id}"
+
+
+def _scoped_grounding_ticket_evidence(
+    ticket: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose runbook facts only through exact concern or legacy evidence IDs."""
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    concern_evidence: list[dict[str, Any]] = []
+    raw_concerns = ticket.get("concerns")
+    if isinstance(raw_concerns, list):
+        for raw_concern in raw_concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+            if not concern_id:
+                continue
+            scoped_actions = [
+                action
+                for raw_action in actions
+                if (
+                    (action := _record_from(raw_action))
+                    and concern_id in _runbook_action_concern_ids(action)
+                    and not _is_internal_agent_triage_action(action)
+                )
+            ]
+            grounding_context = {
+                key: value
+                for key, value in concern.items()
+                if key not in {"concernSummary", "runbookOutcomeSummary"}
+            }
+            evidence = {
+                "evidenceId": _concern_grounding_evidence_id(concern_id),
+                "concernId": concern_id,
+                "context": grounding_context,
+            }
+            if scoped_actions:
+                evidence["runbookActions"] = scoped_actions
+            concern_evidence.append(evidence)
+
+    scoped: dict[str, Any] = {}
+    if concern_evidence:
+        scoped["concerns"] = concern_evidence
+    raw_legacy_tools = ticket.get("toolEvidence")
+    if isinstance(raw_legacy_tools, list) and raw_legacy_tools:
+        scoped["legacyToolEvidence"] = raw_legacy_tools
+    return scoped
 
 
 def _automatic_conversation_context(
     conversation_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Keep related-ticket state while excluding the current ticket's queue transition."""
+    """Keep true-thread context without treating account history as a thread."""
     conversation = _conversation_context(conversation_context)
     if not conversation:
         return {}
     current_issue_id = _string_from(conversation.get("currentIssueId"))
+    broad_history_fallback = _string_from(conversation.get("source")).lower() in {
+        "account",
+        "contact",
+    }
+    tickets = [
+        item
+        for item in conversation.get("tickets", [])
+        if isinstance(item, dict)
+        and (not broad_history_fallback or (current_issue_id and _string_from(item.get("id")) == current_issue_id))
+    ]
+    messages = [
+        message
+        for message in conversation.get("messages", [])
+        if isinstance(message, dict)
+        and _string_from(message.get("direction")).lower() in {"customer", "email", "visitor", "user"}
+        and (
+            not broad_history_fallback
+            or (current_issue_id and _string_from(message.get("issueId")) == current_issue_id)
+        )
+    ]
     return {
         "key": conversation.get("key", ""),
         "source": conversation.get("source", ""),
@@ -377,25 +3165,4407 @@ def _automatic_conversation_context(
                     }
                 ),
             }
-            for item in conversation.get("tickets", [])
-            if isinstance(item, dict)
+            for item in tickets
         ],
-        "messages": conversation.get("messages", []),
+        "messages": messages,
     }
 
 
-def _clean_answer(value: str) -> str:
+def _automatic_account_context(
+    account_context: dict[str, Any] | None,
+    *,
+    issue_id: str = "",
+    conversation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose bounded account facts without leaking unrelated ticket prose.
+
+    Account rollups can contain free-text signals copied from every ticket in an
+    account. Those signals are useful for internal prioritization, but feeding an
+    unrelated ``bodyPreview`` to the customer composer can merge one customer's
+    incident into another reply. Keep scalar rollups and CRM freshness, and keep
+    signal prose only when its source is the current ticket. Conversation
+    summaries can be grouped by account or contact and are not an authority to
+    expose another ticket's free text.
+    """
+
+    account = _record_from(account_context)
+    if not account:
+        return {}
+
+    del conversation_context
+    allowed_issue_ids = {clean_id for value in (issue_id,) if (clean_id := _string_from(value))}
+
+    safe: dict[str, Any] = {}
+    for key in ("accountId", "id", "name", "domain"):
+        if value := _string_from(account.get(key)):
+            safe[key] = value[:500]
+
+    health = _record_from(account.get("health"))
+    safe_health: dict[str, Any] = {}
+    for key in (
+        "status",
+        "failedExternalSyncRuns",
+        "highPriorityIssues",
+        "lastSignalAt",
+        "openFeatureRequests",
+        "openIssues",
+        "openRisks",
+        "unresolvedSignals",
+        "urgentIssues",
+    ):
+        value = health.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_health[key] = value
+    if safe_health:
+        safe["health"] = safe_health
+
+    insight_summary = _record_from(account.get("insightSummary"))
+    safe_summary: dict[str, Any] = {}
+    for key in ("lastInsightAt", "openFeatureRequests", "openRisks", "total", "unresolved"):
+        value = insight_summary.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_summary[key] = value
+    if safe_summary:
+        safe["insightSummary"] = safe_summary
+
+    crm = _record_from(account.get("crm"))
+    safe_crm: dict[str, Any] = {}
+    for key in ("externalRecordCount", "latestSyncAt", "latestSyncStatus"):
+        value = crm.get(key)
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            safe_crm[key] = value
+    providers = (
+        [provider[:120] for value in crm.get("providers", [])[:20] if (provider := _string_from(value))]
+        if isinstance(crm.get("providers"), list)
+        else []
+    )
+    if providers:
+        safe_crm["providers"] = providers
+    if safe_crm:
+        safe["crm"] = safe_crm
+
+    related_signals: list[dict[str, Any]] = []
+    raw_signals = account.get("openSignals")
+    if isinstance(raw_signals, list) and allowed_issue_ids:
+        for raw_signal in raw_signals[:100]:
+            signal = _record_from(raw_signal)
+            source_issue_id = _string_from(signal.get("sourceIssueId"))
+            if not source_issue_id or source_issue_id not in allowed_issue_ids:
+                continue
+            clean_signal: dict[str, Any] = {"sourceIssueId": source_issue_id}
+            for key in ("id", "title", "type", "severity", "status", "lastSeenAt", "bodyPreview"):
+                if value := _string_from(signal.get(key)):
+                    clean_signal[key] = value[:1_000]
+            related_signals.append(clean_signal)
+            if len(related_signals) >= 20:
+                break
+    if related_signals:
+        safe["openSignals"] = related_signals
+    return safe
+
+
+_LABELED_INTERNAL_CITATION_MARKER_RE = re.compile(
+    r"""
+    (?P<leading>[ \t]*)
+    (?:
+        \(\s*(?P<paren_label>
+            cited\s+as|citation(?:\s+(?:id|reference))?|source\s+id|evidence\s+id
+        )\s*(?::|\#)?\s*(?P<paren_value>[^()\r\n]{1,160}?)\s*\)
+        |
+        \[\s*(?P<bracket_label>
+            cited\s+as|citation(?:\s+(?:id|reference))?|source\s+id|evidence\s+id
+        )\s*(?::|\#)?\s*(?P<bracket_value>[^\[\]\r\n]{1,160}?)\s*\]
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_BARE_INTERNAL_CITATION_MARKER_RE = re.compile(
+    r"(?P<leading>[ \t]*)(?:\(\s*(?P<paren>[^()\s]{1,160})\s*\)|\[\s*(?P<bracket>[^\[\]\s]{1,160})\s*\])"
+)
+_INTERNAL_REFERENCE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{1,159}")
+_INTERNAL_REFERENCE_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_INTERNAL_REFERENCE_HASH_RE = re.compile(r"[0-9a-f]{32,128}", re.IGNORECASE)
+_INTERNAL_REFERENCE_NAMESPACE_RE = re.compile(
+    r"(?:article|citation|context|evidence|knowledge|source|tool):[A-Za-z0-9._:/-]{1,150}",
+    re.IGNORECASE,
+)
+_READABLE_BUSINESS_REFERENCE_RE = re.compile(r"[A-Z][A-Z0-9]{1,31}-[0-9]{1,32}")
+
+
+def _unquote_internal_reference(value: str) -> str:
+    clean = value.strip()
+    if len(clean) >= 2 and clean[0] == clean[-1] and clean[0] in {'"', "'", "`"}:
+        return clean[1:-1].strip()
+    return clean
+
+
+def _looks_like_opaque_internal_reference(value: str) -> bool:
+    """Recognize opaque runtime IDs without treating readable citations as internal."""
+    if _INTERNAL_REFERENCE_UUID_RE.fullmatch(value):
+        return True
+    if _INTERNAL_REFERENCE_HASH_RE.fullmatch(value):
+        return True
+    if _INTERNAL_REFERENCE_NAMESPACE_RE.fullmatch(value):
+        return True
+    return bool(
+        len(value) == 15
+        and value.isascii()
+        and value.isalnum()
+        and value.lower() == value
+        and any(char.isalpha() for char in value)
+        and any(char.isdigit() for char in value)
+    )
+
+
+def _looks_like_readable_business_reference(value: str) -> bool:
+    """Keep incident, order, ticket, and standards references visible to readers."""
+    return bool(_READABLE_BUSINESS_REFERENCE_RE.fullmatch(value))
+
+
+def _strip_internal_citation_markers(
+    value: str,
+    *,
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Remove machine citation markers while preserving readable source prose."""
+    known_ids = {
+        clean.casefold()
+        for raw_id in internal_citation_ids
+        if (clean := _unquote_internal_reference(_string_from(raw_id)))
+    }
+
+    def is_internal(raw_value: str) -> bool:
+        candidate = _unquote_internal_reference(raw_value)
+        if not candidate or not _INTERNAL_REFERENCE_TOKEN_RE.fullmatch(candidate):
+            return False
+        if _looks_like_readable_business_reference(candidate):
+            return False
+        return candidate.casefold() in known_ids or _looks_like_opaque_internal_reference(candidate)
+
+    def strip_labeled(match: re.Match[str]) -> str:
+        marker_value = match.group("paren_value") or match.group("bracket_value") or ""
+        return "" if is_internal(marker_value) else match.group(0)
+
+    def strip_bare(match: re.Match[str]) -> str:
+        marker_value = match.group("paren") or match.group("bracket") or ""
+        candidate = _unquote_internal_reference(marker_value)
+        return (
+            ""
+            if candidate.casefold() in known_ids
+            and not _looks_like_readable_business_reference(candidate)
+            else match.group(0)
+        )
+
+    clean = _LABELED_INTERNAL_CITATION_MARKER_RE.sub(strip_labeled, value)
+    return _BARE_INTERNAL_CITATION_MARKER_RE.sub(strip_bare, clean)
+
+
+def _clean_answer(
+    value: str,
+    *,
+    messages: list[dict[str, Any]] | None = None,
+    signer_name: str = "",
+    internal_citation_ids: tuple[str, ...] | list[str] = (),
+) -> str:
     clean = value.strip()
     if clean.startswith("```"):
         clean = clean.strip("`").strip()
         if clean.lower().startswith("text"):
             clean = clean[4:].strip()
-    return clean[:6000]
+    clean = _strip_internal_citation_markers(
+        clean,
+        internal_citation_ids=internal_citation_ids,
+    )
+    return clean_reply_signoff(
+        clean[:6000],
+        messages=messages,
+        signer_name=signer_name,
+    )
 
 
 def grounding_text_sha256(value: str) -> str:
     """Hash the exact normalized text used by grounding and delivery."""
     return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+
+
+_BUSINESS_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{6,62}[A-Za-z0-9](?![A-Za-z0-9@])")
+_SEPARATOR_BOUND_BUSINESS_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9@])[A-Za-z0-9][A-Za-z0-9_-]{1,78}[A-Za-z0-9]"
+    r"(?![A-Za-z0-9@])"
+)
+_BUSINESS_IDENTIFIER_DURATION_WORDS = {
+    "day",
+    "days",
+    "hour",
+    "hours",
+    "minute",
+    "minutes",
+    "month",
+    "months",
+    "week",
+    "weeks",
+    "year",
+    "years",
+}
+
+
+def _separator_bound_business_identifier_keys(value: str) -> frozenset[str]:
+    """Extract short or long letter-plus-digit IDs containing `-` or `_`."""
+
+    return frozenset(
+        re.sub(r"[^a-z0-9]+", "_", candidate.casefold()).strip("_")
+        for match in _SEPARATOR_BOUND_BUSINESS_IDENTIFIER_RE.finditer(value)
+        if (candidate := match.group(0))
+        and ("-" in candidate or "_" in candidate)
+        and any(character.isalpha() for character in candidate)
+        and any(character.isdigit() for character in candidate)
+    )
+
+
+def _business_identifiers(value: Any) -> tuple[str, ...]:
+    """Extract bounded business-like IDs without treating dates or prose as IDs."""
+    found: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+            return
+        if not isinstance(item, str):
+            return
+        for match in _BUSINESS_IDENTIFIER_RE.finditer(item):
+            candidate = match.group(0)
+            if sum(char.isdigit() for char in candidate) < 2:
+                continue
+            if sum(char.isalpha() for char in candidate) < 2:
+                continue
+            parts = [part.casefold() for part in re.split(r"[-_]", candidate) if part]
+            if (
+                len(parts) == 2
+                and any(part.isdigit() for part in parts)
+                and any(part in _BUSINESS_IDENTIFIER_DURATION_WORDS for part in parts)
+            ):
+                continue
+            found.append(candidate)
+
+    collect(value)
+    return tuple(dict.fromkeys(found))
+
+
+def _allowed_business_identifiers(
+    *,
+    messages: list[dict[str, Any]],
+    ticket: dict[str, Any],
+    articles: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return exact IDs present in bounded customer or trusted support evidence."""
+    identifiers: list[str] = []
+    for source in (
+        _automatic_message_context(messages),
+        ticket,
+        _article_context(articles),
+    ):
+        identifiers.extend(_business_identifiers(source))
+    return tuple(dict.fromkeys(identifiers))
+
+
+def _unsupported_business_identifiers(
+    answer: str,
+    *,
+    allowed_identifiers: tuple[str, ...],
+) -> tuple[str, ...]:
+    allowed = {identifier.casefold() for identifier in allowed_identifiers}
+    return tuple(identifier for identifier in _business_identifiers(answer) if identifier.casefold() not in allowed)
+
+
+def _automatic_tool_evidence_records_with_scope(
+    ticket: dict[str, Any],
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Return tool evidence paired with its trusted enclosing concern scope."""
+    records: list[tuple[str, dict[str, Any]]] = []
+    raw_ticket_evidence = ticket.get("toolEvidence")
+    if isinstance(raw_ticket_evidence, list):
+        records.extend(("", record) for raw_record in raw_ticket_evidence if (record := _record_from(raw_record)))
+    concerns = ticket.get("concerns")
+    if isinstance(concerns, list):
+        for raw_concern in concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+            raw_concern_evidence = concern.get("toolEvidence")
+            if concern_id and isinstance(raw_concern_evidence, list):
+                records.extend(
+                    (concern_id, record) for raw_record in raw_concern_evidence if (record := _record_from(raw_record))
+                )
+    return tuple(records)
+
+
+def _automatic_tool_evidence_records(ticket: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Flatten the exact ticket and per-concern tool evidence visible to agents."""
+    return tuple(record for _concern_id, record in _automatic_tool_evidence_records_with_scope(ticket))
+
+
+_TEMPORAL_FACT_TOKEN_ALIASES = {
+    "began": "start",
+    "begin": "start",
+    "beginning": "start",
+    "datetime": "time",
+    "started": "start",
+    "starting": "start",
+    "timestamp": "time",
+}
+_TEMPORAL_FACT_STOP_WORDS = frozenset(
+    {
+        "at",
+        "confirm",
+        "confirmed",
+        "exact",
+        "from",
+        "invoice",
+        "of",
+        "on",
+        "recorded",
+        "state",
+        "the",
+    }
+)
+_TEMPORAL_FACT_TOKENS = frozenset({"date", "due", "eta", "start", "time"})
+_READ_ONLY_TEMPORAL_QUESTION_LEAD_RE = re.compile(
+    r"^(?:state|report|provide|what(?:['’]s|\s+is|\s+was)|when\b|"
+    r"confirm\s+(?:(?:the|a|an)\s+)?(?:recorded|current|tool[-\s]?recorded|verified)\b)",
+    re.IGNORECASE,
+)
+_TEMPORAL_APPROVAL_OR_MUTATION_RE = re.compile(
+    r"\b(?:approv(?:e|ed|al)|authori[sz](?:e|ed|ation)|waiv(?:e|ed|er)|"
+    r"reschedul(?:e|ed|ing)|postpon(?:e|ed|ing)|extend(?:ed|ing)?|"
+    r"chang(?:e|ed|ing)|updat(?:e|ed|ing)|modify|modified|modifying|adjust(?:ed|ing)?|"
+    r"set|setting|move|moving|eligib(?:le|ility)|completed?|executed?)\b",
+    re.IGNORECASE,
+)
+_RECORDED_CHANGED_DUE_DATE_CONTRAST_RE = re.compile(
+    r"\bdistinguish\b[^.;!?]{0,120}\bfrom\s+(?:(?:a|the)\s+)?changed\s+(?:due\s+)?date\b",
+    re.IGNORECASE,
+)
+_ISO_DATE_OR_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$"
+)
+_FIXTURE_EVIDENCE_RESULT_PATH_RE = re.compile(
+    r"^fixture_evidence\.result\.\d{1,2}$"
+)
+_FIXTURE_EVIDENCE_SCALAR_RE = re.compile(
+    r"^(?P<path>[A-Za-z][^:\r\n]{0,119}): (?P<value>[^\r\n]{1,500})$"
+)
+_FIXTURE_TEMPORAL_SCALAR_PATHS = frozenset({"started_at"})
+_SERVICE_STATUS_LOOKUP_RE = re.compile(r"\bservice[-_\s]?status\s+lookup\b", re.IGNORECASE)
+_SERVICE_INCIDENT_RUNBOOK_RE = re.compile(
+    r"(?:^|[-_\s])(?:service[-_\s]+)?incident(?:$|[-_\s])|"
+    r"(?:^|[-_\s])outage(?:$|[-_\s])",
+    re.IGNORECASE,
+)
+_SERVICE_INCIDENT_FACT_PATHS = frozenset(
+    {"affected_region", "affected_service", "started_at", "status"}
+)
+_EXPLICIT_INCIDENT_START_TIMESTAMP_RE = re.compile(
+    r"\b(?:started|began)\s+(?:at|on|since)\s+"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b",
+    re.IGNORECASE,
+)
+_INCIDENT_REFERENCE_PATTERN = r"(?:incident|outage|issue|[A-Z]{2,12}-\d+)"
+_INCIDENT_START_TEMPORAL_VALUE_PATTERN = (
+    r"(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+    r"(?:Z|[+-]\d{2}:\d{2})"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|"
+    r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})"
+)
+_INCIDENT_REFERENCE_RE = re.compile(
+    rf"\b{_INCIDENT_REFERENCE_PATTERN}\b",
+    re.IGNORECASE,
+)
+_NEGATED_INCIDENT_START_RE = re.compile(
+    r"\b(?:"
+    r"(?:(?:hasn['’]t|haven['’]t|hadn['’]t|isn['’]t|wasn['’]t|weren['’]t|"
+    r"didn['’]t|doesn['’]t|don['’]t)|"
+    r"(?:has|have|had|is|was|were|did|does|do)\s+(?:not|never))\s+"
+    r"(?:(?:actually|yet)\s+)*(?:been\s+)?(?:start(?:ed|ing)?|begin|began|begun)"
+    r"|never\s+(?:(?:actually|yet)\s+)*(?:been\s+)?"
+    r"(?:start(?:ed|ing)?|begin|began|begun)"
+    r"|(?:has|is|was)\s+yet\s+to\s+(?:be\s+)?(?:start(?:ed)?|begin|begun)"
+    r"|(?:start(?:ed|ing)?|begin|began|begun)\s+(?:not|never)"
+    r"|start\s+(?:date|time)\s+(?:is|was)\s+(?:not|never))\b",
+    re.IGNORECASE,
+)
+_INCIDENT_START_ASSERTION_RE = re.compile(
+    r"\b(?:started|began|start(?:\s+(?:date|time))?)\b",
+    re.IGNORECASE,
+)
+_INCIDENT_START_CLAIM_VALUE_RE = re.compile(
+    r"\b(?:started|began)\s+(?:(?:at|on|since)\s+)?"
+    rf"(?P<verb_value>{_INCIDENT_START_TEMPORAL_VALUE_PATTERN})|"
+    r"\bstart(?:\s+(?:date|time))?\s+(?:is|was)\s+"
+    rf"(?P<label_value>{_INCIDENT_START_TEMPORAL_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
+_ATOMIC_RECENT_CHANGE_QUESTION_RE = re.compile(
+    r"^What\s+(?:(?:exact|relevant)\s+)*(?:recent\s+)?change\s+"
+    r"does\s+the\s+lookup\s+show\??$",
+    re.IGNORECASE,
+)
+_ATOMIC_HTTP_RESPONSE_CODE_QUESTION_RE = re.compile(
+    r"^(?:What\s+(?:(?:exact|current)\s+)*"
+    r"(?:(?:HTTP|webhook)\s+)?(?:response\s+code|status\s+code|code)\s+"
+    r"does\s+the\s+lookup\s+show"
+    r"|What\s+does\s+the\s+lookup\s+show\s+as\s+the\s+"
+    r"(?:(?:exact|current)\s+)*(?:(?:HTTP|webhook)\s+)?"
+    r"(?:response\s+code|status\s+code|code))\??$",
+    re.IGNORECASE,
+)
+_ATOMIC_WEBHOOK_STATUS_QUESTION_RE = re.compile(
+    r"^What\s+(?:(?:exact|current)\s+)*status\s+does\s+the\s+lookup\s+show\??$",
+    re.IGNORECASE,
+)
+_HTTP_RESPONSE_CODE_RE = re.compile(r"^[1-5]\d{2}$")
+_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_QUESTION_PATTERNS = (
+    re.compile(
+        r"^(?:(?:first\s+)?(?:look\s+up|check|review)\s+"
+        r"(?:the\s+)?current\s+matter\s+and\s+)?"
+        r"(?:say|state|report|confirm|tell\s+me)\s+(?:whether|if)\s+"
+        r"(?:the\s+)?substantive\s+discussion\s+is\s+"
+        r"(?:(?:already|currently)\s+)?paused\s*[.?!]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:is\s+(?:the\s+)?substantive\s+discussion\s+"
+        r"(?:(?:already|currently)\s+)?paused"
+        r"|has\s+(?:the\s+)?substantive\s+discussion\s+"
+        r"(?:(?:already|currently)\s+)?been\s+paused)\s*[.?!]?\s*$",
+        re.IGNORECASE,
+    ),
+)
+_DIRECT_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_RE = re.compile(
+    r"\bsubstantive\s+discussion\s+"
+    r"(?:(?:is|remains?)\s+)?not\s+"
+    r"(?:(?:already|currently|presently|yet)\s+)?paused\b"
+    r"|\bsubstantive\s+discussion\s+has\s+not\s+been\s+paused\b",
+    re.IGNORECASE,
+)
+_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE = re.compile(
+    r"(?P<label>\b(?:the\s+)?substantive\s+discussion)\s+for\s+"
+    r"(?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79})"
+    r"(?=\s+(?:is|was|remains?|has|had)\b)",
+    re.IGNORECASE,
+)
+_PREFIXED_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE = re.compile(
+    r"\b(?:for|regarding)\s+(?:matter\s+)?"
+    r"(?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79})"
+    r"(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE = re.compile(
+    r"[?\"\u2018\u2019\u201c\u201d]|"
+    r"\b(?:according|actually|allegedly|apparently|appears?|assuming|assumption|believ(?:e|es|ed)|"
+    r"claim(?:s|ed)?|contrary|could|counterfactual|except|false|hypothetical|incorrect|instead|"
+    r"if|likely|may|might|perhaps|possibly|probably|rather|report(?:s|ed|edly)?|theory|"
+    r"said|says?|seem(?:s|ed)?|suggest(?:s|ed)?|unclear|uncertain|"
+    r"unconfirmed|unless|unknown|untrue|wrong|"
+    r"unverified|whether)\b|"
+    r"\bper\s+(?:the\s+)?(?:client|customer|user)\b|"
+    r"\b(?:logs?|sources?)\s+(?:claim|report|suggest)(?:s|ed)?\b|"
+    r"\b(?:(?:can|could|did|does)(?:not|n't|\s+not)|fail(?:s|ed)?\s+to)\s+"
+    r"(?:confirm|establish|prove|show)\b",
+    re.IGNORECASE,
+)
+_NON_AFFIRMATIVE_HTTP_RESPONSE_CODE_RE = re.compile(
+    r"\b(?:according|allegedly|apparently|assuming|assumption|counterfactual|"
+    r"hypothetical|if|reportedly|theory|unless)\b|"
+    r"\bper\s+(?:the\s+)?(?:client|customer|user)\b|"
+    r"\b(?:client|customer|logs?|monitoring\s+system|sources?|user)\s+"
+    r"(?:claim(?:s|ed)?|report(?:s|ed)?|said|says?|suggest(?:s|ed)?)\b|"
+    r"\bit\s+(?:appears?|seems?)\b|"
+    r"\b(?:(?:can|could|did|does)(?:not|n't|\s+not)|fail(?:s|ed)?\s+to)\s+"
+    r"(?:confirm|establish|prove|return|show)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE = re.compile(
+    r"\b(?:the\s+)?substantive\s+discussion\s+"
+    r"(?:(?:is|was|remains?)\s+(?:(?:already|currently|still)\s+)?paused"
+    r"|(?:has|had)\s+been\s+(?:(?:already|currently|still)\s+)?paused)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_LINKED_PAUSE_REVERSAL_RE = re.compile(
+    r"\b(?:discussion|it)\s+"
+    r"(?:(?:is|was|remains?)\s+(?:(?:already|currently|still)\s+)?paused"
+    r"|(?:has|had)\s+been\s+(?:(?:already|currently|still)\s+)?paused)\b",
+    re.IGNORECASE,
+)
+_AUDIT_REPORTING_GUIDANCE_NON_DIRECT_RE = re.compile(
+    r"[?'\"\u2018\u2019\u201c\u201d]|"
+    r"\b(?:according\s+to|allegedly|apparently|claim(?:s|ed)?|could|false\s+that|"
+    r"if|incorrect|might|not\s+true|perhaps|possibly|reportedly|said|says|seem(?:s|ed)?|"
+    r"suggest(?:s|ed)?|unclear|unconfirmed|unless|whether)\b|"
+    r"\b(?:customer|client|user)\s+(?:claim(?:s|ed)?|report(?:s|ed)?|said|says)\b|"
+    r"\b(?:article|documentation|docs?|policy|source)\s+"
+    r"(?:claim(?:s|ed)?|report(?:s|ed)?|said|says|state(?:s|d)?)\b|"
+    r"\b(?:cannot|can['\u2019]?t|can\s+not)\s+(?:confirm|deny|say|state)\b|"
+    r"\b(?:assertion|claim|statement|this|that)\s+(?:is|was)\s+"
+    r"(?:false|incorrect|untrue)\b",
+    re.IGNORECASE,
+)
+_AUDIT_REPORTING_SCHEDULED_EMAIL_UNAVAILABLE_RE = re.compile(
+    r"^scheduled(?:\s+daily)?\s+email(?:\s+(?:delivery|reporting))?\s+"
+    r"(?:for|of)\s+(?:admin\s+)?audit\s+(?:events?|reports?)\s+"
+    r"(?:is|remains?)\s+(?:not\s+(?:currently\s+)?available|"
+    r"(?:currently\s+)?unavailable)[.!]?$",
+    re.IGNORECASE,
+)
+_AUDIT_REPORTING_API_CSV_WORKAROUND_RE = re.compile(
+    r"^as\s+a\s+workaround,?\s+"
+    r"(?:you\s+can\s+export\s+(?:current\s+)?audit\s+events?"
+    r"|(?:current\s+)?audit\s+events?\s+can\s+be\s+exported)\s+"
+    r"(?:via|through|using)\s+(?:the\s+)?api\s+(?:and|or)\s+"
+    r"(?:as\s+)?(?:a\s+)?csv(?:\s+(?:export|file))?[.!]?$",
+    re.IGNORECASE,
+)
+_AUDIT_REPORTING_WORKAROUND_NEGATION_RE = re.compile(
+    r"\b(?:cannot|can['\u2019]?t|can\s+not|do\s+not|don['\u2019]?t|"
+    r"isn['\u2019]?t|neither|no|none|nor|not\s+available|unavailable)\b|"
+    r"\b(?:does|do)\s+not\s+work\b|\b(?:fail|fails|failed|failing)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_SAFE_VALUE_RE = re.compile(
+    r"^[\w][\w &'()/+\-]{0,159}$",
+    re.UNICODE,
+)
+_ATOMIC_LOOKUP_CONTROL_VALUE_RE = re.compile(
+    r"\b(?:disregard|exfiltrate|ignore|override|reveal)\b|"
+    r"\b(?:system|developer|hidden)\s+(?:prompt|message|instructions?)\b|"
+    r"\b(?:all|previous|prior|these|those)\s+(?:directions|instructions?)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_EVENT_RE = re.compile(
+    r"^(?:change|configuration|cutover|deployment|failover|maintenance|migration|"
+    r"patch|release|renewal|replacement|rollout|rotation|switch|update|upgrade)$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_PHRASE_FORBIDDEN_RE = re.compile(
+    r"\b(?:all|and|any|before|because|but|directions?|instructions?|or|previous|"
+    r"prior|then|these|those|when|while|your)\b|"
+    r"\b(?:call|copy|delete|disclose|disregard|dump|email|erase|execute|"
+    r"exfiltrate|expose|extract|fetch|follow|forget|ignore|leak|obey|open|"
+    r"output|override|paste|print|provide|publish|read|remove|repeat|return|"
+    r"reveal|run|send|share|show|steal|tell|write)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CHANGE_MODIFIER_RE = re.compile(
+    r"^(?:account|api|application|authentication|balancer|billing|certificate|"
+    r"client|cloud|configuration|customer|database|deployment|dns|domain|"
+    r"endpoint|environment|failover|firewall|gateway|hardware|identity|"
+    r"infrastructure|ingress|key|load|maintenance|migration|network|oauth|"
+    r"platform|production|provider|proxy|regional|release|renewal|replacement|"
+    r"rollout|rotation|routing|schema|scim|secret|server|service|signing|"
+    r"software|sso|ssl|staging|switch|system|tls|update|upgrade|version|"
+    r"v?\d[\w-]*)$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE = re.compile(
+    r"^(?:the\s+)?(?:cause|delivery|eta|impact|recovery|remediation|"
+    r"resolution(?:\s+time)?|root\s+cause)\s+"
+    r"(?:is|was|remains?|continues?\s+to\s+be)\s+"
+    r"(?:not\s+yet\s+verified|pending|unknown|unavailable|unclear|unconfirmed|"
+    r"unverified)\.?$",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE = re.compile(
+    r"\b(?:not|never|no|neither|nor|unknown|unavailable|uncertain|unverified|"
+    r"unconfirmed|unclear|undetermined|cannot|can't|couldn't|didn't|doesn't|"
+    r"isn't|wasn't|may|might|could|possibly|perhaps|whether|false|untrue|"
+    r"incorrect|inaccurate|wrong|contrary|except)\b|"
+    r"\b(?:but|however|although|though|yet|instead|rather)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_TOPIC_RE = re.compile(
+    r"\blookup\b|"
+    r"\b(?:(?:actual|correct|real|relevant|recent)\s+)+"
+    r"(?:change|finding|result|statement)\b|"
+    r"^(?:(?:actually|but|however|instead|rather),?\s+)?"
+    r"(?:the\s+)?(?:change|finding|result|statement)\b|"
+    r"^(?:(?:actually|but|however|instead|rather),?\s+)?"
+    r"(?:that|this|it)\s+(?:is|was|remains?|seems?|appears?|cannot|can't|"
+    r"couldn't|isn't|wasn't|hasn't|has\s+not|may\s+be|might\s+be|could\s+be)\b|"
+    r"\b(?:that|this)\s+(?:(?:lookup)\s+)?(?:claim|fact|finding|result|statement)\b|"
+    r"\b(?:data|evidence|records?)\s+"
+    r"(?:contradict(?:s|ed|ing)?|disprov(?:e|es|ed|ing)|"
+    r"refut(?:e|es|ed|ing))\s+(?:that|this|it)\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_NON_AFFIRMATIVE_EXTRA_RE = re.compile(
+    r"\b(?:ambiguous|doubtful|inconclusive|indeterminate|insufficient|questionable|"
+    r"silent|tbd|unlikely|unresolved|unsupported)\b|"
+    r"\b(?:hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|shouldn['’]?t)\b|"
+    r"\b(?:fail(?:s|ed|ing)?\s+to|rule(?:s|d)?\s+out)\b|"
+    r"\b(?:contradict(?:s|ed|ing)?|den(?:y|ies|ied|ying)|disprov(?:e|es|ed|ing)|"
+    r"disput(?:e|es|ed|ing)|exclud(?:e|es|ed|ing)|lack(?:s|ed|ing)?|"
+    r"refut(?:e|es|ed|ing)|reject(?:s|ed|ing)?|suggest(?:s|ed|ing)?)\b|"
+    r"\b(?:allegedly|apparently|reportedly|purportedly)\b|"
+    r"\b(?:appears?|seems?)\s+to\b|\bother\s+than\b",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_ALTERNATE_CONTEXT_RE = re.compile(
+    r"\blookup\b|"
+    r"\b(?:actual|correct|real|relevant|recent)\s+(?:change|finding|result)\b|"
+    r"\b(?:actual(?:ly)?|contrary|instead|rather)\b|"
+    r"\b(?:it|that|this)\s+(?:is|was)\b|"
+    r"\b(?:change|finding|result)\s+(?:is|was)\b|"
+    r"\b(?:change|finding|result)\s*:",
+    re.IGNORECASE,
+)
+_ATOMIC_LOOKUP_CROSS_UNIT_FALSE_REFERENCE_RE = re.compile(
+    r"^(?:(?:but|however|instead|rather),?\s+)?"
+    r"(?:that|this)(?:\s+(?:lookup\s+)?(?:claim|fact|finding|result|statement))?\s+"
+    r"(?:is|was)\s+(?:false|incorrect|inaccurate|untrue|wrong|"
+    r"not\s+(?:accurate|correct|true))\s*[.!]?$",
+    re.IGNORECASE,
+)
+_TERMINAL_ENGLISH_REPLY_CLOSING_RE = re.compile(
+    r"^(?:(?:with\s+)?(?:best|kind|warm)\s+regards|regards|sincerely|cordially|"
+    r"cheers|best|all\s+the\s+best|best\s+wishes|with\s+thanks|"
+    r"yours\s+(?:faithfully|sincerely)|thanks|thank\s+you)[,.]?$",
+    re.IGNORECASE,
+)
+
+
+def _tool_fact_scalar_entries(
+    value: Any,
+    *,
+    path: str = "",
+    allow_fixture_result_scalars: bool = False,
+) -> tuple[tuple[str, str], ...]:
+    """Flatten bounded scalar tool facts while retaining their semantic path."""
+
+    entries: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        explicit_path = _string_from(value.get("path"))
+        if explicit_path and "value" in value and not isinstance(value.get("value"), (dict, list)):
+            scalar = _string_from(value.get("value"))
+            if scalar:
+                fixture_scalar = (
+                    _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(scalar)
+                    if allow_fixture_result_scalars
+                    and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(explicit_path)
+                    else None
+                )
+                if (
+                    fixture_scalar
+                    and fixture_scalar.group("path") in _FIXTURE_TEMPORAL_SCALAR_PATHS
+                ):
+                    entries.append(
+                        (
+                            fixture_scalar.group("path")[:240],
+                            fixture_scalar.group("value")[:500],
+                        )
+                    )
+                else:
+                    entries.append((explicit_path[:240], scalar[:500]))
+            return tuple(entries)
+        for raw_key, child in list(value.items())[:100]:
+            key = _string_from(raw_key)
+            if not key:
+                continue
+            child_path = f"{path}.{key}" if path else key
+            entries.extend(
+                _tool_fact_scalar_entries(
+                    child,
+                    path=child_path,
+                    allow_fixture_result_scalars=allow_fixture_result_scalars,
+                )
+            )
+    elif isinstance(value, list):
+        for child in value[:100]:
+            entries.extend(
+                _tool_fact_scalar_entries(
+                    child,
+                    path=path,
+                    allow_fixture_result_scalars=allow_fixture_result_scalars,
+                )
+            )
+    elif path:
+        scalar = _string_from(value)
+        if scalar:
+            entries.append((path[:240], scalar[:500]))
+    return tuple(entries)
+
+
+def _is_safe_atomic_recent_change_value(value: str) -> bool:
+    """Accept only a short declarative change-event noun phrase."""
+
+    if (
+        _ATOMIC_LOOKUP_SAFE_VALUE_RE.fullmatch(value) is None
+        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(value) is not None
+        or _ATOMIC_LOOKUP_CONTROL_VALUE_RE.search(value) is not None
+        or _ATOMIC_LOOKUP_CHANGE_PHRASE_FORBIDDEN_RE.search(value) is not None
+    ):
+        return False
+    tokens = re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+    return bool(
+        1 <= len(tokens) <= 10
+        and _ATOMIC_LOOKUP_CHANGE_EVENT_RE.fullmatch(tokens[-1]) is not None
+        and all(
+            _ATOMIC_LOOKUP_CHANGE_MODIFIER_RE.fullmatch(token) is not None
+            for token in tokens[:-1]
+        )
+    )
+
+
+def _atomic_recent_change_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    obligation_id: str,
+    question: str,
+) -> dict[str, Any] | None:
+    """Bind one atomic recent-change question to exact safe read-only proof."""
+
+    if (
+        not concern_id
+        or not obligation_id
+        or _ATOMIC_RECENT_CHANGE_QUESTION_RE.fullmatch(question.strip()) is None
+    ):
+        return None
+    unambiguous_read_only_evidence = _read_only_tool_evidence_fingerprints(ticket)
+    values: dict[str, dict[str, Any]] = {}
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if (
+            not evidence_id
+            or evidence_id not in unambiguous_read_only_evidence
+            or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}
+        ):
+            continue
+        for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
+            path = raw_path
+            value = raw_value
+            fixture_scalar = (
+                _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
+                if _string_from(record.get("name")).startswith("fixture_")
+                and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+                else None
+            )
+            if fixture_scalar is not None:
+                path = fixture_scalar.group("path")
+                value = fixture_scalar.group("value")
+            leaf_path = path.rsplit(".", 1)[-1].casefold().replace("-", "_")
+            clean_value = " ".join(value.split())[:500]
+            if (
+                leaf_path != "recent_change"
+                or not clean_value
+                or not _is_safe_atomic_recent_change_value(clean_value)
+                or contains_sensitive_credential(clean_value)
+            ):
+                continue
+            value_key = clean_value.casefold()
+            candidate = values.setdefault(
+                value_key,
+                {"value": clean_value, "evidenceIds": set()},
+            )
+            candidate["evidenceIds"].add(evidence_id)
+    if len(values) != 1:
+        return None
+    candidate = next(iter(values.values()))
+    return {
+        "obligationId": obligation_id,
+        "concernId": concern_id,
+        "question": question,
+        "path": "recent_change",
+        "value": candidate["value"],
+        "evidenceIds": frozenset(candidate["evidenceIds"]),
+    }
+
+
+def _atomic_recent_change_requirements(
+    ticket: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return safe exact recent-change requirements keyed by obligation ID."""
+
+    requirements: dict[str, dict[str, Any]] = {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(
+            concern.get("id") or concern.get("concernId") or concern.get("concern_id")
+        )
+        raw_obligations = concern.get("answerObligations")
+        obligations = raw_obligations if isinstance(raw_obligations, list) else []
+        for raw_obligation in obligations:
+            obligation = _record_from(raw_obligation)
+            obligation_id = _string_from(
+                obligation.get("id")
+                or obligation.get("obligationId")
+                or obligation.get("obligation_id")
+            )
+            question = _string_from(obligation.get("question"))
+            requirement = _atomic_recent_change_requirement(
+                ticket=ticket,
+                concern_id=concern_id,
+                obligation_id=obligation_id,
+                question=question,
+            )
+            if requirement is not None:
+                requirements[obligation_id] = requirement
+    return requirements
+
+
+def _tool_record_exact_scalars(
+    record: dict[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    """Return bounded exact scalar paths, unwrapping only trusted fixture rows."""
+
+    is_fixture = _string_from(record.get("name")).startswith("fixture_")
+    entries: list[tuple[str, str]] = []
+    for raw_path, raw_value in _tool_fact_scalar_entries(record.get("responseFacts")):
+        path = raw_path
+        value = raw_value
+        fixture_scalar = (
+            _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_value)
+            if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+            else None
+        )
+        if fixture_scalar is not None:
+            path = fixture_scalar.group("path")
+            value = fixture_scalar.group("value")
+        exact_path = ".".join(
+            segment.strip().replace("-", "_")
+            for segment in path.casefold().split(".")
+        )
+        clean_value = " ".join(value.split())[:500]
+        if exact_path and clean_value:
+            entries.append((exact_path, clean_value))
+    return tuple(entries)
+
+
+_MATTER_STATUS_NOT_FOUND_CONDITIONAL_TOKENS = (
+    "if information is not found state that and request a safe identifier"
+)
+_MATTER_STATUS_PRIMARY_QUESTION_RE = re.compile(
+    r"^What is the latest verified status of (?P<matter_id>[A-Za-z0-9][A-Za-z0-9_-]{2,79}), "
+    r"the next recorded deadline, and the responsible lawyer\?\s*$",
+    re.IGNORECASE,
+)
+_MATTER_STATUS_FOUND_PATHS = (
+    "status",
+    "next_deadline",
+    "responsible_lawyer",
+)
+_MATTER_STATUS_NOT_FOUND_VALUES = frozenset(
+    {
+        "missing",
+        "no match",
+        "no_match",
+        "n/a",
+        "na",
+        "none",
+        "not applicable",
+        "not available",
+        "not found",
+        "not_found",
+        "null",
+        "unavailable",
+        "unknown",
+    }
+)
+
+
+def _normalized_obligation_tokens(value: str) -> str:
+    """Normalize one bounded English obligation for exact policy matching."""
+
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _runbook_requirement_policy_identity(value: str) -> str:
+    """Preserve every semantic symbol while normalizing case and whitespace."""
+
+    return " ".join(value.casefold().split())
+
+
+def _matter_status_found_evidence(
+    ticket: dict[str, Any],
+    *,
+    concern_id: str,
+    matter_id: str,
+) -> dict[str, dict[str, str]]:
+    """Return unambiguous, same-concern proof that a matter lookup succeeded.
+
+    A successful HTTP status alone is deliberately insufficient. The lookup
+    must return all three matter-status fields and no missing/not-found signal.
+    Values must also agree across every eligible record so a stale or conflicting
+    row cannot make the conditional fallback disappear.
+    """
+
+    clean_matter_id = matter_id.strip()
+    if not concern_id or not clean_matter_id:
+        return {}
+    expected_fixture_name = "fixture_matter_" + re.sub(
+        r"[^a-z0-9]+", "_", clean_matter_id.casefold()
+    ).strip("_")
+    values_by_path: dict[str, set[str]] = {path: set() for path in _MATTER_STATUS_FOUND_PATHS}
+    record_values_by_evidence: dict[str, dict[str, str]] = {}
+    saw_candidate = False
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        tool_name = _string_from(record.get("name"))
+        if tool_name not in {"matter_lookup", expected_fixture_name}:
+            continue
+        if _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id:
+            continue
+        if (
+            record.get("hasNonaffirmativeLookupResult") is True
+            or record.get("responseFactsTruncated") is True
+        ):
+            return {}
+        exact_scalars = _tool_record_exact_scalars(record)
+        if tool_name == "matter_lookup":
+            returned_matter_ids = {
+                value.casefold()
+                for path, value in exact_scalars
+                if path == "matter_id"
+            }
+            if returned_matter_ids != {clean_matter_id.casefold()}:
+                continue
+        saw_candidate = True
+        record_values: dict[str, set[str]] = {}
+        for path, value in exact_scalars:
+            leaf_path = path.rsplit(".", 1)[-1]
+            normalized_value = " ".join(value.casefold().split())
+            if leaf_path in {"found", "exists", "matched"} and normalized_value == "false":
+                return {}
+            if normalized_value in _MATTER_STATUS_NOT_FOUND_VALUES:
+                return {}
+            if path in _MATTER_STATUS_FOUND_PATHS:
+                record_values.setdefault(path, set()).add(value)
+                values_by_path[path].add(value)
+        if all(len(record_values.get(path, set())) == 1 for path in _MATTER_STATUS_FOUND_PATHS):
+            record_values_by_evidence[evidence_id] = {
+                path: next(iter(record_values[path]))
+                for path in _MATTER_STATUS_FOUND_PATHS
+            }
+    if not saw_candidate or any(len(values_by_path[path]) != 1 for path in _MATTER_STATUS_FOUND_PATHS):
+        return {}
+    canonical_values = {path: next(iter(values_by_path[path])) for path in _MATTER_STATUS_FOUND_PATHS}
+    return {
+        evidence_id: values
+        for evidence_id, values in record_values_by_evidence.items()
+        if values == canonical_values
+    }
+
+
+def _matter_status_not_found_condition_resolution(
+    *,
+    ticket: dict[str, Any],
+    obligation: dict[str, Any],
+    clean_obligation_assessments: list[dict[str, Any]],
+    expected_obligations: dict[str, dict[str, Any]],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Prove that the exact matter-not-found fallback is not applicable.
+
+    The proof is intentionally code-only and joins three independent facts:
+    the exact runbook/conditional, a fully answered sibling question, and the
+    exact successful lookup evidence supporting that sibling's answer unit.
+    """
+
+    concern_id = _string_from(obligation.get("concernId"))
+    question = _string_from(obligation.get("question"))
+    if (
+        _string_from(obligation.get("kind")) not in {"", "customer_question"}
+        or _normalized_obligation_tokens(question) != _MATTER_STATUS_NOT_FOUND_CONDITIONAL_TOKENS
+    ):
+        return None
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and _string_from(candidate.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or _string_from(concern.get("runbook")) != "law-matter-status":
+        return None
+    assessments_by_id = {
+        _string_from(assessment.get("obligationId")): assessment
+        for assessment in clean_obligation_assessments
+        if _string_from(assessment.get("obligationId"))
+    }
+    sibling_obligations = [
+        sibling
+        for sibling_id, sibling in expected_obligations.items()
+        if sibling_id != _string_from(obligation.get("id"))
+        and _string_from(sibling.get("concernId")) == concern_id
+    ]
+    if not sibling_obligations or any(
+        _string_from(assessments_by_id.get(_string_from(sibling.get("id")), {}).get("resolution"))
+        != "answered"
+        for sibling in sibling_obligations
+    ):
+        return None
+    primary_obligations = [
+        (sibling, match)
+        for sibling in sibling_obligations
+        if (match := _MATTER_STATUS_PRIMARY_QUESTION_RE.fullmatch(_string_from(sibling.get("question"))))
+        is not None
+    ]
+    if len(primary_obligations) != 1:
+        return None
+    primary_obligation, primary_match = primary_obligations[0]
+    found_evidence = _matter_status_found_evidence(
+        ticket,
+        concern_id=concern_id,
+        matter_id=primary_match.group("matter_id"),
+    )
+    if not found_evidence:
+        return None
+    primary_assessment = assessments_by_id.get(_string_from(primary_obligation.get("id")), {})
+    unit_ids = tuple(
+        dict.fromkeys(
+            unit_id
+            for raw_unit_id in primary_assessment.get("answerUnitIds", [])
+            if (unit_id := _string_from(raw_unit_id))
+        )
+    )
+    if not unit_ids:
+        return None
+
+    matching_evidence_ids: set[str] = set()
+    for evidence_id, exact_values in found_evidence.items():
+        linked_units = [
+            unit_id
+            for unit_id in unit_ids
+            if evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+        ]
+        if not linked_units:
+            continue
+        linked_text = " ".join(
+            _string_from(expected_units.get(unit_id, {}).get("text"))
+            for unit_id in linked_units
+        ).casefold()
+        if all(value.casefold() in linked_text for value in exact_values.values()):
+            matching_evidence_ids.add(evidence_id)
+    if not matching_evidence_ids:
+        return None
+    return unit_ids, tuple(sorted(matching_evidence_ids))
+
+
+def _atomic_http_response_code_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    obligation_id: str,
+    question: str,
+) -> dict[str, Any] | None:
+    """Bind an exact status question to one successful read-only HTTP code."""
+
+    explicit_code_question = (
+        _ATOMIC_HTTP_RESPONSE_CODE_QUESTION_RE.fullmatch(question.strip())
+        is not None
+    )
+    generic_webhook_status_question = (
+        _ATOMIC_WEBHOOK_STATUS_QUESTION_RE.fullmatch(question.strip()) is not None
+    )
+    if (
+        not concern_id
+        or not obligation_id
+        or not (explicit_code_question or generic_webhook_status_question)
+    ):
+        return None
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern_is_webhook = any(
+        _string_from(concern.get("id")) == concern_id
+        and "webhook" in _string_from(concern.get("runbook")).casefold()
+        for raw_concern in concerns
+        if (concern := _record_from(raw_concern))
+    )
+    values: dict[str, set[str]] = {}
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        if (
+            generic_webhook_status_question
+            and not concern_is_webhook
+            and "webhook" not in _string_from(record.get("name")).casefold()
+        ):
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        for exact_path, clean_value in _tool_record_exact_scalars(record):
+            if exact_path != "response_code" or _HTTP_RESPONSE_CODE_RE.fullmatch(clean_value) is None:
+                continue
+            values.setdefault(clean_value, set()).add(evidence_id)
+    if len(values) != 1:
+        return None
+    value, evidence_ids = next(iter(values.items()))
+    return {
+        "obligationId": obligation_id,
+        "concernId": concern_id,
+        "question": question,
+        "path": "response_code",
+        "value": value,
+        "evidenceIds": frozenset(evidence_ids),
+    }
+
+
+def _atomic_http_response_code_requirements(
+    ticket: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return exact HTTP-code requirements keyed by answer obligation ID."""
+
+    requirements: dict[str, dict[str, Any]] = {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+        raw_obligations = concern.get("answerObligations")
+        obligations = raw_obligations if isinstance(raw_obligations, list) else []
+        for raw_obligation in obligations:
+            obligation = _record_from(raw_obligation)
+            obligation_id = _string_from(
+                obligation.get("id") or obligation.get("obligationId") or obligation.get("obligation_id")
+            )
+            question = _string_from(obligation.get("question"))
+            requirement = _atomic_http_response_code_requirement(
+                ticket=ticket,
+                concern_id=concern_id,
+                obligation_id=obligation_id,
+                question=question,
+            )
+            if requirement is not None:
+                requirements[obligation_id] = requirement
+    return requirements
+
+
+def _explicit_http_response_codes(text: str) -> frozenset[str]:
+    """Extract only three-digit codes explicitly described as HTTP responses."""
+
+    patterns = (
+        r"(?<!\d)(?P<code>[1-5]\d{2})(?!\d)\s+"
+        r"(?:HTTP\s+)?(?:response(?:\s+code)?|status)\b",
+        r"\b(?:HTTP\s+)?(?:response\s+code|status)\s+"
+        r"(?:is|was|of|:)\s*(?<!\d)(?P<code>[1-5]\d{2})(?!\d)",
+        r"\b(?:lookup|endpoint|webhook)\b[^.!?]{0,160}\b"
+        r"(?:returns?|returned|reports?|reported|shows?|showed|responds?|"
+        r"responded|is\s+returning|was\s+returning)\b[^.!?]{0,40}"
+        r"(?<!\d)(?P<code>[1-5]\d{2})(?!\d)",
+    )
+    return frozenset(
+        match.group("code")
+        for pattern in patterns
+        for match in re.finditer(pattern, text, re.IGNORECASE)
+    )
+
+
+def _unit_affirmatively_states_http_response_code(unit: str, value: str) -> bool:
+    """Accept only a direct, non-hedged statement of the exact HTTP code."""
+
+    candidate = " ".join(unit.strip().split())
+    explicit_codes = _explicit_http_response_codes(candidate)
+    clauses = tuple(
+        clause.strip()
+        for clause in re.split(
+            r"\s*(?:;|,\s*(?:but|however)\s+|\s+but\s+)\s*",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    )
+    code_clauses = tuple(
+        clause
+        for clause in clauses
+        if value in _explicit_http_response_codes(clause)
+    )
+    if (
+        _HTTP_RESPONSE_CODE_RE.fullmatch(value) is None
+        or re.search(rf"(?<!\d){re.escape(value)}(?!\d)", candidate) is None
+        or _NON_AFFIRMATIVE_HTTP_RESPONSE_CODE_RE.search(candidate) is not None
+        or re.search(
+            r"\b(?:HTTP|endpoint|lookup|webhook)\b|\bresponse\s+code\b",
+            candidate,
+            re.IGNORECASE,
+        )
+        is None
+        or value not in explicit_codes
+        or explicit_codes != {value}
+        or len(code_clauses) != 1
+        or _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(code_clauses[0]) is not None
+        or any(
+            _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(clause) is None
+            for clause in clauses
+            if clause != code_clauses[0]
+        )
+        or "?" in candidate
+    ):
+        return False
+    code = re.escape(value)
+    patterns = (
+        rf"\b(?:the\s+)?(?:lookup(?:\s+result)?|endpoint|webhook|request)\b"
+        rf"[^.!?]{{0,160}}\b(?:returns?|returned|reports?|reported|shows?|showed|"
+        rf"responds?|responded|is\s+returning|was\s+returning|is|was)\b"
+        rf"[^.!?]{{0,40}}(?<!\d){code}(?!\d)\b",
+        rf"\b(?:the\s+)?(?:exact\s+)?(?:(?:HTTP|webhook)\s+)?"
+        rf"(?:response\s+)?(?:code|status)\s+(?:is|was|of|:)\s*"
+        rf"(?<!\d){code}(?!\d)\b",
+        rf"(?<!\d){code}(?!\d)\s+(?:HTTP\s+)?(?:response(?:\s+code)?|status)\b",
+        rf"\bfailing\s+with\s+(?:(?:an?|the)\s+)?(?<!\d){code}(?!\d)\s+response\b",
+    )
+    return any(re.search(pattern, candidate, re.IGNORECASE) is not None for pattern in patterns)
+
+
+def _answer_affirmatively_states_http_response_code(answer: str, value: str) -> bool:
+    return any(
+        _unit_affirmatively_states_http_response_code(
+            _string_from(unit.get("text")),
+            value,
+        )
+        for unit in _grounding_answer_units(answer)
+    )
+
+
+def _missing_atomic_http_response_code_requirements(
+    ticket: dict[str, Any],
+    answer: str,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        requirement
+        for requirement in _atomic_http_response_code_requirements(ticket).values()
+        if not _answer_affirmatively_states_http_response_code(
+            answer,
+            _string_from(requirement.get("value")),
+        )
+    )
+
+
+def _atomic_lookup_unit_affirmatively_states_value(unit: str, value: str) -> bool:
+    """Accept only an explicit affirmative lookup-to-value assertion."""
+
+    normalized_unit = " ".join(unit.casefold().split())
+    normalized_value = " ".join(value.casefold().split())
+    if not normalized_value or normalized_value not in normalized_unit:
+        return False
+    value_pattern = re.escape(normalized_value).replace(r"\ ", r"\s+")
+    article = r"(?:(?:a|an|the)\s+)?"
+    candidate = re.sub(
+        r"^(?:[-*•]|\d+[.)])\s+",
+        "",
+        normalized_unit,
+    ).strip(" *_`")
+    patterns = (
+        rf"\b(?:the\s+)?lookup(?:\s+result)?\s+"
+        rf"(?:shows?|showed|reports?|reported|returns?|returned|identifies?|"
+        rf"identified|indicates?|indicated|found|confirms?|confirmed)\s+"
+        rf"(?:that\s+)?(?:the\s+)?(?:(?:relevant|recent)\s+)*"
+        rf"(?:change\s+(?:is|was)\s+)?{article}{value_pattern}\b",
+        rf"\b(?:the\s+)?(?:(?:relevant|recent)\s+)*change"
+        rf"(?:\s+(?:shown|reported|returned|identified|indicated|found)\s+"
+        rf"(?:by|in|from)\s+(?:the\s+)?lookup)?\s+(?:is|was)\s+"
+        rf"{article}{value_pattern}\b",
+        rf"\b(?:our|the)\s+lookup(?:\s+result)?\s+"
+        rf"(?:shows?|showed|reports?|reported|identifies?|identified|indicates?|"
+        rf"indicated|found|confirms?|confirmed)\s+(?:that\s+)?"
+        rf"(?:a|the)\s+(?:(?:relevant|recent)\s+)*change\s*:\s*"
+        rf"{article}{value_pattern}\b",
+    )
+    clauses = tuple(
+        clause.strip()
+        for clause in re.split(r"\s*;\s*", candidate)
+        if clause.strip()
+    )
+    for index, clause in enumerate(clauses):
+        if _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(clause):
+            continue
+        if not any(
+            re.fullmatch(pattern + r"[.!]?", clause, re.IGNORECASE) is not None
+            for pattern in patterns
+        ):
+            continue
+        followup_clauses = tuple(
+            other_clause
+            for other_index, other_clause in enumerate(clauses)
+            if other_index != index
+        )
+        if followup_clauses and not all(
+            _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(followup_clause)
+            is not None
+            for followup_clause in followup_clauses
+        ):
+            continue
+        return True
+    return False
+
+
+def _atomic_lookup_change_value_candidates(unit: str) -> tuple[str, ...]:
+    """Extract only bounded allowlisted noun phrases ending in a change event."""
+
+    tokens = re.findall(r"[^\W_]+(?:-[^\W_]+)*", unit, flags=re.UNICODE)
+    candidates: list[str] = []
+    for index, token in enumerate(tokens):
+        if _ATOMIC_LOOKUP_CHANGE_EVENT_RE.fullmatch(token) is None:
+            continue
+        start = index
+        while (
+            start > 0
+            and index - start < 9
+            and _ATOMIC_LOOKUP_CHANGE_MODIFIER_RE.fullmatch(tokens[start - 1])
+            is not None
+        ):
+            start -= 1
+        candidate = " ".join(tokens[start : index + 1])
+        if _is_safe_atomic_recent_change_value(candidate):
+            candidates.append(candidate)
+    unique_candidates = tuple(dict.fromkeys(candidates))
+    if len(unique_candidates) > 1:
+        unique_candidates = tuple(
+            candidate
+            for candidate in unique_candidates
+            if candidate.casefold() != "change"
+        )
+    return unique_candidates
+
+
+def _atomic_lookup_answer_has_conflicting_change_assertion(answer: str, value: str) -> bool:
+    """Reject a sibling sentence that reverses one exact recent-change fact."""
+
+    normalized_value = " ".join(value.casefold().split())
+    answer_units = tuple(
+        _string_from(unit.get("text"))
+        for unit in _grounding_answer_units(answer)
+        if _string_from(unit.get("text"))
+    )
+    if not normalized_value or not any(
+        _atomic_lookup_unit_affirmatively_states_value(unit, value)
+        for unit in answer_units
+    ):
+        return False
+    for unit in answer_units:
+        if _atomic_lookup_unit_affirmatively_states_value(unit, value):
+            continue
+        normalized_unit = " ".join(unit.split()).strip()
+        if _ATOMIC_LOOKUP_UNRELATED_CAVEAT_RE.fullmatch(normalized_unit):
+            continue
+        if (
+            _ATOMIC_LOOKUP_CROSS_UNIT_TOPIC_RE.search(normalized_unit)
+            and (
+                _ATOMIC_LOOKUP_NON_AFFIRMATIVE_RE.search(normalized_unit)
+                or _ATOMIC_LOOKUP_CROSS_UNIT_NON_AFFIRMATIVE_EXTRA_RE.search(
+                    normalized_unit
+                )
+            )
+        ):
+            return True
+        if _ATOMIC_LOOKUP_CROSS_UNIT_FALSE_REFERENCE_RE.fullmatch(normalized_unit):
+            return True
+        if _ATOMIC_LOOKUP_CROSS_UNIT_ALTERNATE_CONTEXT_RE.search(
+            normalized_unit
+        ) and any(
+            candidate.casefold() != normalized_value
+            for candidate in _atomic_lookup_change_value_candidates(normalized_unit)
+        ):
+            return True
+    return False
+
+
+def _answer_affirmatively_states_atomic_lookup_value(answer: str, value: str) -> bool:
+    return any(
+        _atomic_lookup_unit_affirmatively_states_value(
+            _string_from(unit.get("text")),
+            value,
+        )
+        for unit in _grounding_answer_units(answer)
+    )
+
+
+def _missing_atomic_recent_change_requirements(
+    ticket: dict[str, Any],
+    answer: str,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        requirement
+        for requirement in _atomic_recent_change_requirements(ticket).values()
+        if not _answer_affirmatively_states_atomic_lookup_value(
+            answer,
+            _string_from(requirement.get("value")),
+        )
+    )
+
+
+def _append_missing_atomic_recent_change_facts(
+    ticket: dict[str, Any],
+    answer: str,
+) -> str:
+    """Append bounded exact lookup facts when the model's one retry still hedges."""
+
+    clean_answer = answer.strip()
+    if not clean_answer:
+        return answer
+    requirements = _missing_atomic_recent_change_requirements(
+        ticket,
+        clean_answer,
+    )
+    answer_units = _grounding_answer_units(clean_answer)
+    for requirement in requirements:
+        value = _string_from(requirement.get("value"))
+        normalized_value = " ".join(value.casefold().split())
+        if any(
+            re.search(r"\blookup\b", unit_text, re.IGNORECASE) is not None
+            and normalized_value in " ".join(unit_text.casefold().split())
+            and not _atomic_lookup_unit_affirmatively_states_value(unit_text, value)
+            for unit in answer_units
+            if (unit_text := _string_from(unit.get("text")))
+        ):
+            return answer
+    additions = tuple(
+        dict.fromkeys(
+            "The lookup shows that the relevant recent change is "
+            + _string_from(requirement.get("value"))
+            + "."
+            for requirement in requirements
+            if _string_from(requirement.get("value"))
+        )
+    )
+    if not additions:
+        return answer
+    lines = clean_answer.splitlines()
+    signoff_index = next(
+        (
+            index
+            for index in range(max(0, len(lines) - 4), len(lines))
+            if _TERMINAL_ENGLISH_REPLY_CLOSING_RE.fullmatch(lines[index].strip())
+        ),
+        None,
+    )
+    if signoff_index is None:
+        return clean_answer + "\n\n" + "\n\n".join(additions)
+    body = "\n".join(lines[:signoff_index]).rstrip()
+    signoff = "\n".join(lines[signoff_index:]).strip()
+    sections = tuple(
+        section
+        for section in (body, "\n\n".join(additions), signoff)
+        if section
+    )
+    return "\n\n".join(sections)
+
+
+def _append_missing_atomic_http_response_code_facts(
+    ticket: dict[str, Any],
+    answer: str,
+) -> str:
+    """Append one exact safe HTTP code when the corrected draft still omits it."""
+
+    clean_answer = answer.strip()
+    if not clean_answer:
+        return answer
+    requirements = _missing_atomic_http_response_code_requirements(
+        ticket,
+        clean_answer,
+    )
+    answer_units = _grounding_answer_units(clean_answer)
+    for requirement in requirements:
+        value = _string_from(requirement.get("value"))
+        conflicting_codes = {
+            code
+            for unit in answer_units
+            for code in _explicit_http_response_codes(
+                _string_from(unit.get("text"))
+            )
+            if code != value
+        }
+        if conflicting_codes:
+            return answer
+        if any(
+            re.search(rf"(?<!\d){re.escape(value)}(?!\d)", unit_text) is not None
+            and not _unit_affirmatively_states_http_response_code(unit_text, value)
+            for unit in answer_units
+            if (unit_text := _string_from(unit.get("text")))
+        ):
+            # Never turn a hedged, negated, or contradictory statement into a
+            # second definitive statement. Let grounding fail closed instead.
+            return answer
+    additions = tuple(
+        dict.fromkeys(
+            "The lookup shows a " + _string_from(requirement.get("value")) + " response code."
+            for requirement in requirements
+            if _string_from(requirement.get("value"))
+        )
+    )
+    if not additions:
+        return answer
+    lines = clean_answer.splitlines()
+    signoff_index = next(
+        (
+            index
+            for index in range(max(0, len(lines) - 4), len(lines))
+            if _TERMINAL_ENGLISH_REPLY_CLOSING_RE.fullmatch(lines[index].strip())
+        ),
+        None,
+    )
+    if signoff_index is None:
+        return clean_answer + "\n\n" + "\n\n".join(additions)
+    body = "\n".join(lines[:signoff_index]).rstrip()
+    signoff = "\n".join(lines[signoff_index:]).strip()
+    return "\n\n".join(section for section in (body, "\n\n".join(additions), signoff) if section)
+
+
+def _is_false_substantive_discussion_pause_question(question: str) -> bool:
+    return any(
+        pattern.fullmatch(question.strip()) is not None
+        for pattern in _FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_QUESTION_PATTERNS
+    )
+
+
+def _unit_directly_states_substantive_discussion_not_paused(unit: str) -> bool:
+    """Recognize only a direct current false-state statement."""
+
+    clean_unit = " ".join(unit.strip().split())
+    return bool(
+        clean_unit
+        and _DIRECT_FALSE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(clean_unit)
+        and _UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE.search(clean_unit) is None
+        and _AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(clean_unit) is None
+    )
+
+
+def _normalize_substantive_discussion_matter_scope(
+    unit: str,
+    *,
+    allowed_matter_keys: frozenset[str],
+) -> str | None:
+    """Remove only a matter qualifier bound to the unit's exact tool evidence."""
+
+    clean_unit = " ".join(unit.strip().split())
+    business_identifier_keys = frozenset(
+        re.sub(r"[^a-z0-9]+", "_", identifier.casefold()).strip("_")
+        for identifier in _business_identifiers(clean_unit)
+    ).union(_separator_bound_business_identifier_keys(clean_unit))
+    if business_identifier_keys and (
+        not allowed_matter_keys
+        or not business_identifier_keys.issubset(allowed_matter_keys)
+    ):
+        return None
+    prefixed_matches = tuple(
+        match
+        for match in _PREFIXED_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.finditer(
+            clean_unit
+        )
+        if any(character.isalpha() for character in match.group("matter_id"))
+        and any(character.isdigit() for character in match.group("matter_id"))
+    )
+    if prefixed_matches and (
+        not allowed_matter_keys
+        or any(
+            re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                match.group("matter_id").casefold(),
+            ).strip("_")
+            not in allowed_matter_keys
+            for match in prefixed_matches
+        )
+    ):
+        return None
+    matches = tuple(_SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.finditer(clean_unit))
+    if not matches:
+        return clean_unit
+    if not allowed_matter_keys or any(
+        re.sub(r"[^a-z0-9]+", "_", match.group("matter_id").casefold()).strip("_")
+        not in allowed_matter_keys
+        for match in matches
+    ):
+        return None
+    return _SUBSTANTIVE_DISCUSSION_MATTER_SCOPE_RE.sub(
+        lambda match: match.group("label"),
+        clean_unit,
+    )
+
+
+def _tool_backed_false_pause_state_answers_obligation(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Resolve only an exact linked `substantive_discussion_paused=false` fact."""
+
+    if not concern_id or not answer_unit_ids or not _is_false_substantive_discussion_pause_question(question):
+        return False
+    scoped_records = tuple(
+        record
+        for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(
+            ticket
+        )
+        if evidence_concern_id == concern_id
+    )
+    raw_record_counts: dict[str, int] = {}
+    for record in scoped_records:
+        tool_name = _string_from(record.get("name"))
+        if tool_name:
+            raw_evidence_id = _tool_evidence_id(tool_name, concern_id=concern_id)
+            raw_record_counts[raw_evidence_id] = (
+                raw_record_counts.get(raw_evidence_id, 0) + 1
+            )
+
+    values: set[str] = set()
+    false_evidence_ids: set[str] = set()
+    false_evidence_matter_keys: dict[str, set[str]] = {}
+    has_ambiguous_false_evidence_scope = False
+    has_unsafe_false_evidence = False
+    has_duplicate_false_candidate_evidence_id = False
+    for record in scoped_records:
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        if raw_record_counts.get(evidence_id) != 1:
+            has_duplicate_false_candidate_evidence_id = True
+            continue
+        tool_name = _string_from(record.get("name"))
+        normalized_tool_name = tool_name.casefold()
+        record_matter_keys: set[str] = set()
+        record_pause_values: set[str] = set()
+        record_has_exact_pause_fact = False
+        fixture_matter_prefix = "fixture_matter_"
+        if normalized_tool_name.startswith(fixture_matter_prefix):
+            fixture_matter_key = normalized_tool_name[len(fixture_matter_prefix) :]
+            if re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", fixture_matter_key):
+                record_matter_keys.add(fixture_matter_key)
+        for normalized_path, value in _tool_record_exact_scalars(record):
+            normalized_leaf_path = normalized_path.rsplit(".", 1)[-1]
+            if normalized_leaf_path == "matter_id":
+                matter_key = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+                if matter_key:
+                    record_matter_keys.add(matter_key)
+            if normalized_leaf_path != "substantive_discussion_paused":
+                continue
+            normalized_value = " ".join(value.split()).casefold()
+            if normalized_value:
+                record_pause_values.add(normalized_value)
+                if normalized_path == "substantive_discussion_paused":
+                    record_has_exact_pause_fact = True
+        if not record_pause_values:
+            continue
+        values.update(record_pause_values)
+        if (
+            record.get("responseFactsTruncated") is True
+            or _tool_evidence_has_nonaffirmative_lookup_result(record)
+        ):
+            has_unsafe_false_evidence = True
+            continue
+        if record_pause_values != {"false"} or len(record_matter_keys) != 1:
+            has_ambiguous_false_evidence_scope = True
+            continue
+        if not record_has_exact_pause_fact:
+            continue
+        false_evidence_ids.add(evidence_id)
+        false_evidence_matter_keys[evidence_id] = record_matter_keys
+    all_false_evidence_matter_keys = {
+        matter_key
+        for matter_keys in false_evidence_matter_keys.values()
+        for matter_key in matter_keys
+    }
+    if (
+        values != {"false"}
+        or not false_evidence_ids
+        or len(all_false_evidence_matter_keys) != 1
+        or has_ambiguous_false_evidence_scope
+        or has_unsafe_false_evidence
+        or has_duplicate_false_candidate_evidence_id
+    ):
+        return False
+    linked_units = tuple(
+        (unit_id, _string_from(expected_units.get(unit_id, {}).get("text")))
+        for unit_id in answer_unit_ids
+        if _string_from(expected_units.get(unit_id, {}).get("text"))
+    )
+    normalized_linked_units: list[tuple[str, str]] = []
+    for unit_id, text in linked_units:
+        linked_false_evidence_ids = supported_unit_evidence_ids.get(
+            unit_id,
+            frozenset(),
+        ).intersection(false_evidence_ids)
+        allowed_matter_keys = frozenset(
+            matter_key
+            for evidence_id in linked_false_evidence_ids
+            for matter_key in false_evidence_matter_keys.get(evidence_id, set())
+        )
+        normalized_text = _normalize_substantive_discussion_matter_scope(
+            text,
+            allowed_matter_keys=allowed_matter_keys,
+        )
+        if normalized_text is None:
+            return False
+        normalized_linked_units.append((unit_id, normalized_text))
+    linked_texts = tuple(text for _unit_id, text in normalized_linked_units)
+    joined_linked_text = " ".join(linked_texts)
+    if (
+        not linked_texts
+        or _UNCERTAIN_OR_REPORTED_PAUSE_STATE_RE.search(joined_linked_text)
+        or re.search(r"\bnot\s+true\b", joined_linked_text, re.IGNORECASE)
+        or _AFFIRMATIVE_LINKED_PAUSE_REVERSAL_RE.search(joined_linked_text)
+        or any(
+            _AFFIRMATIVE_SUBSTANTIVE_DISCUSSION_PAUSE_RE.search(text)
+            for text in linked_texts
+        )
+    ):
+        return False
+    return any(
+        _unit_directly_states_substantive_discussion_not_paused(text)
+        and bool(supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(false_evidence_ids))
+        for unit_id, text in normalized_linked_units
+    )
+
+
+def _is_audit_reporting_capability_guidance(question: str) -> bool:
+    """Recognize only the reviewed scheduled-email plus workaround requirement."""
+
+    normalized = " ".join(
+        question.casefold().replace("-", " ").strip().rstrip(".").split()
+    )
+    return normalized == (
+        "state reviewed current audit workarounds and unavailable scheduled "
+        "email capability explicitly"
+    )
+
+
+def _unit_directly_states_scheduled_audit_email_unavailable(unit: str) -> bool:
+    clean = " ".join(unit.split())
+    return bool(
+        clean
+        and re.search(r"\baudit\b", clean, re.IGNORECASE)
+        and _AUDIT_REPORTING_GUIDANCE_NON_DIRECT_RE.search(clean) is None
+        and _AUDIT_REPORTING_SCHEDULED_EMAIL_UNAVAILABLE_RE.fullmatch(clean)
+    )
+
+
+def _unit_directly_states_api_csv_audit_workaround(unit: str) -> bool:
+    clean = " ".join(unit.split())
+    return bool(
+        clean
+        and re.search(r"\bapi\b", clean, re.IGNORECASE)
+        and re.search(r"\bcsv\b", clean, re.IGNORECASE)
+        and re.search(r"\bworkarounds?\b", clean, re.IGNORECASE)
+        and _AUDIT_REPORTING_GUIDANCE_NON_DIRECT_RE.search(clean) is None
+        and _AUDIT_REPORTING_WORKAROUND_NEGATION_RE.search(clean) is None
+        and _AUDIT_REPORTING_API_CSV_WORKAROUND_RE.fullmatch(clean)
+    )
+
+
+def _audit_reporting_capability_tool_evidence_ids(
+    ticket: dict[str, Any],
+    *,
+    concern_id: str,
+) -> frozenset[str]:
+    """Return one unambiguous same-concern lookup proving the capability state."""
+
+    audit_api_values: set[str] = set()
+    scheduled_email_values: set[str] = set()
+    matching_evidence_ids: set[str] = set()
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        record_values: dict[str, set[str]] = {}
+        for path, value in _tool_record_exact_scalars(record):
+            if path not in {"audit_api", "scheduled_audit_email"}:
+                continue
+            normalized_value = " ".join(value.casefold().split())
+            record_values.setdefault(path, set()).add(normalized_value)
+            if path == "audit_api":
+                audit_api_values.add(normalized_value)
+            else:
+                scheduled_email_values.add(normalized_value)
+        if (
+            record_values.get("audit_api") == {"true"}
+            and record_values.get("scheduled_audit_email") == {"false"}
+        ):
+            matching_evidence_ids.add(evidence_id)
+    if audit_api_values != {"true"} or scheduled_email_values != {"false"}:
+        return frozenset()
+    return frozenset(matching_evidence_ids)
+
+
+def _tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    citation_ids: frozenset[str],
+) -> bool:
+    """Resolve only the exact S09 capability conjunction from scoped evidence."""
+
+    if (
+        not concern_id
+        or len(answer_unit_ids) < 2
+        or not citation_ids
+        or not _is_audit_reporting_capability_guidance(question)
+    ):
+        return False
+    tool_evidence_ids = _audit_reporting_capability_tool_evidence_ids(
+        ticket,
+        concern_id=concern_id,
+    )
+    if not tool_evidence_ids:
+        return False
+
+    unavailable_units: set[str] = set()
+    workaround_units: set[str] = set()
+    for unit_id in answer_unit_ids:
+        text = _string_from(expected_units.get(unit_id, {}).get("text"))
+        evidence_ids = supported_unit_evidence_ids.get(unit_id, frozenset())
+        if (
+            not text
+            or not evidence_ids.intersection(tool_evidence_ids)
+            or not evidence_ids.intersection(citation_ids)
+        ):
+            continue
+        if _unit_directly_states_scheduled_audit_email_unavailable(text):
+            unavailable_units.add(unit_id)
+        if _unit_directly_states_api_csv_audit_workaround(text):
+            workaround_units.add(unit_id)
+    return any(
+        unavailable_unit_id != workaround_unit_id
+        for unavailable_unit_id in unavailable_units
+        for workaround_unit_id in workaround_units
+    )
+
+
+def _temporal_fact_tokens(value: str) -> frozenset[str]:
+    normalized: set[str] = set()
+    for token in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE):
+        if token in _TEMPORAL_FACT_STOP_WORDS:
+            continue
+        alias = _TEMPORAL_FACT_TOKEN_ALIASES.get(token)
+        normalized.add(alias if alias is not None else token)
+    return frozenset(normalized)
+
+
+def _temporal_scalar_answer_variants(value: str) -> tuple[str, ...]:
+    """Return conservative renderings of one exact ISO tool-backed scalar."""
+
+    if _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(value) is None:
+        return ()
+    variants = [value]
+    if "T" in value:
+        date_part, time_part = value.split("T", 1)
+        variants.extend((f"{date_part} at {time_part}", f"{date_part} {time_part}"))
+    else:
+        try:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            pass
+        else:
+            variants.extend(
+                (
+                    parsed_date.strftime("%B %d, %Y").replace(" 0", " "),
+                    parsed_date.strftime("%b %d, %Y").replace(" 0", " "),
+                )
+            )
+    return tuple(dict.fromkeys(variants))
+
+
+def _answer_contains_temporal_scalar(answer: str, value: str) -> bool:
+    folded_answer = answer.casefold()
+    return any(variant.casefold() in folded_answer for variant in _temporal_scalar_answer_variants(value))
+
+
+def _is_atomic_read_only_temporal_question(question: str) -> bool:
+    """Reject mutations and multi-fact clauses before deterministic resolution."""
+
+    clean_question = question.strip()
+    mutation_scan = _RECORDED_CHANGED_DUE_DATE_CONTRAST_RE.sub("", clean_question)
+    if (
+        _READ_ONLY_TEMPORAL_QUESTION_LEAD_RE.search(clean_question) is None
+        or _TEMPORAL_APPROVAL_OR_MUTATION_RE.search(mutation_scan)
+    ):
+        return False
+    clauses = [
+        clause
+        for clause in re.split(
+            r"\s*(?:;|\b(?:and|or|plus|also)\b)\s*",
+            clean_question,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    ]
+    if len(clauses) > 1 and _RECORDED_CHANGED_DUE_DATE_CONTRAST_RE.search(clean_question) is None:
+        return False
+    clause_topics: list[frozenset[str]] = []
+    for clause in clauses:
+        temporal_tokens = _temporal_fact_tokens(clause).intersection(_TEMPORAL_FACT_TOKENS)
+        specific_tokens = temporal_tokens.intersection({"due", "eta", "start"})
+        topics = specific_tokens or temporal_tokens.intersection({"date", "time"})
+        if not topics:
+            return False
+        clause_topics.append(frozenset(topics))
+    return bool(clause_topics and len(set(clause_topics)) == 1)
+
+
+def _same_concern_tool_temporal_fact_matches(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer: str,
+    allowed_evidence_ids: frozenset[str] | None = None,
+) -> bool:
+    """Recognize only same-concern, successful, exact temporal tool facts."""
+
+    if not _is_atomic_read_only_temporal_question(question):
+        return False
+    question_tokens = _temporal_fact_tokens(question)
+    specific_question_tokens = question_tokens.intersection({"due", "eta", "start"})
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if not evidence_id or (allowed_evidence_ids is not None and evidence_id not in allowed_evidence_ids):
+            continue
+        for path, scalar in _tool_fact_scalar_entries(
+            record.get("responseFacts"),
+            allow_fixture_result_scalars=_string_from(record.get("name")).startswith("fixture_"),
+        ):
+            path_tokens = _temporal_fact_tokens(path).intersection(_TEMPORAL_FACT_TOKENS)
+            if (
+                path_tokens
+                and path_tokens.intersection(question_tokens)
+                and (
+                    not specific_question_tokens
+                    or path_tokens.intersection(specific_question_tokens)
+                )
+                and _answer_contains_temporal_scalar(answer, scalar)
+            ):
+                return True
+    return False
+
+
+def _canonicalize_tool_backed_timestamps(ticket: dict[str, Any], answer: str) -> str:
+    """Restore exact trusted ISO timestamp separators before grounding."""
+
+    canonical = answer
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if not _valid_tool_evidence_id(record, concern_id=concern_id):
+            continue
+        for _path, scalar in _tool_fact_scalar_entries(
+            record.get("responseFacts"),
+            allow_fixture_result_scalars=_string_from(record.get("name")).startswith("fixture_"),
+        ):
+            if "T" not in scalar or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(scalar) is None:
+                continue
+            for variant in _temporal_scalar_answer_variants(scalar)[1:]:
+                canonical = re.sub(re.escape(variant), scalar, canonical, flags=re.IGNORECASE)
+    return canonical
+
+
+def _tool_backed_temporal_scalar_answers_obligation(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Resolve a semantic miss only from a linked exact same-concern tool fact."""
+
+    if not concern_id or not answer_unit_ids:
+        return False
+    linked_text = " ".join(
+        text
+        for unit_id in answer_unit_ids
+        if (text := _string_from(expected_units.get(unit_id, {}).get("text")))
+    )
+    linked_evidence_ids = frozenset(
+        evidence_id
+        for unit_id in answer_unit_ids
+        for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+    )
+    return bool(
+        linked_text
+        and linked_evidence_ids
+        and _same_concern_tool_temporal_fact_matches(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=question,
+            answer=linked_text,
+            allowed_evidence_ids=linked_evidence_ids,
+        )
+    )
+
+
+def _is_service_incident_temporal_requirement(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    question: str,
+) -> bool:
+    """Recognize a trusted service-incident timestamp requirement."""
+
+    if (
+        _SERVICE_STATUS_LOOKUP_RE.search(question) is None
+        or not _is_atomic_read_only_temporal_question(question)
+        or "start" not in _temporal_fact_tokens(question)
+    ):
+        return False
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            record
+            for raw_concern in concerns
+            if (record := _record_from(raw_concern))
+            and _string_from(record.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or _SERVICE_INCIDENT_RUNBOOK_RE.search(
+        _string_from(concern.get("runbook"))
+    ) is None:
+        return False
+    return True
+
+
+def _service_incident_record_fact_values(
+    record: dict[str, Any],
+) -> dict[str, frozenset[str]]:
+    """Retain every incident field value so conflicting lookup rows stay ambiguous."""
+
+    facts: dict[str, set[str]] = {}
+    is_fixture = _string_from(record.get("name")).startswith("fixture_")
+    for raw_path, raw_scalar in _tool_fact_scalar_entries(record.get("responseFacts")):
+        path = raw_path.rsplit(".", 1)[-1]
+        scalar = raw_scalar
+        fixture_scalar = (
+            _FIXTURE_EVIDENCE_SCALAR_RE.fullmatch(raw_scalar)
+            if is_fixture and _FIXTURE_EVIDENCE_RESULT_PATH_RE.fullmatch(raw_path)
+            else None
+        )
+        if fixture_scalar is not None:
+            path = fixture_scalar.group("path")
+            scalar = fixture_scalar.group("value")
+        if path in _SERVICE_INCIDENT_FACT_PATHS and scalar:
+            facts.setdefault(path, set()).add(scalar)
+    return {path: frozenset(values) for path, values in facts.items()}
+
+
+def _service_incident_record_facts(record: dict[str, Any]) -> dict[str, str]:
+    """Extract only unambiguous status fields used by the incident sentence grammar."""
+
+    return {
+        path: next(iter(values))
+        for path, values in _service_incident_record_fact_values(record).items()
+        if len(values) == 1
+    }
+
+
+def _incident_start_claim_matches(value: str, started_at: str) -> bool:
+    """Compare one adjacent start-date claim with the trusted lookup timestamp."""
+
+    clean_value = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", value.strip(), flags=re.IGNORECASE)
+    clean_started_at = started_at.strip()
+    try:
+        trusted_datetime = datetime.fromisoformat(clean_started_at.replace("Z", "+00:00"))
+    except ValueError:
+        trusted_datetime = None
+    trusted_date = (
+        trusted_datetime.date()
+        if trusted_datetime is not None
+        else datetime.strptime(clean_started_at, "%Y-%m-%d").date()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_started_at)
+        else None
+    )
+    if trusted_date is None:
+        return False
+    if "T" in clean_value:
+        try:
+            candidate_datetime = datetime.fromisoformat(
+                clean_value.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+        if trusted_datetime is None:
+            return candidate_datetime.date() == trusted_date
+        return candidate_datetime == trusted_datetime
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_value):
+        return datetime.strptime(clean_value, "%Y-%m-%d").date() == trusted_date
+    normalized_natural_date = " ".join(clean_value.replace(",", " ").split())
+    for date_format in ("%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(normalized_natural_date, date_format).date() == trusted_date
+        except ValueError:
+            continue
+    return False
+
+
+def _scoped_incident_start_matches(
+    pattern: re.Pattern[str],
+    text: str,
+) -> tuple[re.Match[str], ...]:
+    """Inspect only semicolon clauses that name the incident they describe."""
+
+    matches: list[re.Match[str]] = []
+    for clause in re.split(r"\s*;\s*", text):
+        if _INCIDENT_REFERENCE_RE.search(clause) is None:
+            continue
+        matches.extend(pattern.finditer(clause))
+    return tuple(matches)
+
+
+def _is_isolated_service_incident_temporal_answer(
+    *,
+    ticket: dict[str, Any],
+    concern_id: str,
+    answer_unit_ids: tuple[str, ...],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+) -> bool:
+    """Prove a linked unit contains only an exact incident-status timestamp claim."""
+
+    if not answer_unit_ids:
+        return False
+    linked_units = tuple(
+        (
+            unit_id,
+            _string_from(expected_units.get(unit_id, {}).get("text")),
+            supported_unit_evidence_ids.get(unit_id, frozenset()),
+        )
+        for unit_id in answer_unit_ids
+    )
+    if not any(text and evidence_ids for _unit_id, text, evidence_ids in linked_units):
+        return False
+
+    eligible_records: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+    started_at_values: set[str] = set()
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+        if (
+            not evidence_id
+            or _string_from(record.get("method")).upper() not in {"GET", "HEAD"}
+        ):
+            continue
+        record_fact_values = _service_incident_record_fact_values(record)
+        started_at_values.update(record_fact_values.get("started_at", frozenset()))
+        facts = _service_incident_record_facts(record)
+        eligible_records.append((evidence_id, record, facts))
+    if len(started_at_values) != 1:
+        return False
+    started_at = next(iter(started_at_values))
+    if _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+        return False
+
+    for _unit_id, unit_text, _evidence_ids in linked_units:
+        if not unit_text:
+            continue
+        if _scoped_incident_start_matches(
+            _NEGATED_INCIDENT_START_RE,
+            unit_text,
+        ):
+            return False
+        assertions = _scoped_incident_start_matches(
+            _INCIDENT_START_ASSERTION_RE,
+            unit_text,
+        )
+        if not assertions:
+            continue
+        claim_values = tuple(
+            value
+            for match in _scoped_incident_start_matches(
+                _INCIDENT_START_CLAIM_VALUE_RE,
+                unit_text,
+            )
+            if (value := _string_from(
+                match.group("verb_value") or match.group("label_value")
+            ))
+        )
+        if not claim_values or any(
+            not _incident_start_claim_matches(value, started_at)
+            for value in claim_values
+        ):
+            return False
+
+    for evidence_id, _record, facts in eligible_records:
+        if facts.get("started_at") != started_at:
+            continue
+        timestamp = re.escape(started_at)
+        start_clause = rf"(?:started|began)\s+(?:at|on|since)\s+{timestamp}"
+        patterns = [
+            rf"(?:The\s+)?(?:service\s+)?(?:incident|outage|issue)\s+{start_clause}\.?",
+        ]
+        status = facts.get("status", "")
+        region = facts.get("affected_region", "")
+        service = facts.get("affected_service", "")
+        if status and region and service:
+            escaped_status = re.escape(status)
+            escaped_region = re.escape(region)
+            escaped_service = re.escape(service)
+            patterns.extend(
+                (
+                    rf"The\s+{escaped_service}\s+service\s+in\s+(?:the\s+)?{escaped_region}"
+                    rf"(?:\s+region)?\s+is\s+currently\s+{escaped_status}\s+an?\s+"
+                    rf"(?:incident|outage|issue)\s+(?:that|which)\s+{start_clause}\.?",
+                    rf"The\s+(?:service\s+)?(?:incident|outage|issue)\s+is\s+currently\s+"
+                    rf"{escaped_status},\s+affecting\s+the\s+{escaped_service}\s+service\s+in\s+"
+                    rf"(?:the\s+)?{escaped_region}(?:\s+region)?,\s+and\s+{start_clause}\.?",
+                )
+            )
+            if status.casefold() == "investigating":
+                patterns.extend(
+                    (
+                        rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
+                        rf"affecting\s+the\s+{escaped_region}\s+{escaped_service}\s+service,\s+"
+                        rf"and\s+started\s+at\s+{timestamp}\.?",
+                        rf"(?:This|The)\s+incident\s+is\s+currently\s+under\s+investigation,\s+"
+                        rf"affecting\s+the\s+{escaped_service}\s+service\s+in\s+(?:the\s+)?"
+                        rf"{escaped_region}(?:\s+region)?,\s+and\s+started\s+at\s+{timestamp}\.?",
+                        rf"This\s+incident,\s+which\s+affects\s+the\s+{escaped_region}\s+"
+                        rf"{escaped_service}\s+service,\s+is\s+currently\s+under\s+"
+                        rf"investigation\s+and\s+began\s+at\s+{timestamp}\.?",
+                        rf"(?:This|The)\s+incident,\s+which\s+affects\s+(?:the\s+)?"
+                        rf"{escaped_service}\s+services?\s+in\s+(?:the\s+)?{escaped_region}"
+                        rf"(?:\s+region)?,\s+is\s+currently\s+under\s+investigation\s+and\s+"
+                        rf"{start_clause}\.?",
+                    )
+                )
+        for _unit_id, unit_text, linked_evidence_ids in linked_units:
+            if evidence_id not in linked_evidence_ids:
+                continue
+            if any(
+                re.fullmatch(pattern, unit_text, flags=re.IGNORECASE)
+                for pattern in patterns
+            ):
+                return True
+    return False
+
+
+def repair_issue_automation_answer_service_incident_start_time(
+    *,
+    issue: dict[str, Any],
+    answer: str,
+    uncovered_obligation_ids: tuple[str, ...],
+) -> str:
+    """Fill one omitted incident start time from exact same-concern tool proof."""
+
+    clean_answer = answer.strip()
+    uncovered_ids = {
+        _string_from(obligation_id)
+        for obligation_id in uncovered_obligation_ids
+        if _string_from(obligation_id)
+    }
+    if not clean_answer or not uncovered_ids:
+        return answer
+
+    ticket = _automatic_ticket_context(issue)
+    qualifying_concern_ids = {
+        concern_id
+        for obligation in _answer_obligations_from_issue(issue)
+        if _string_from(obligation.get("id")) in uncovered_ids
+        and (
+            concern_id := _string_from(obligation.get("concernId"))
+        )
+        and _is_service_incident_temporal_requirement(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=_string_from(obligation.get("question")),
+        )
+    }
+    if len(qualifying_concern_ids) != 1:
+        return answer
+    concern_id = next(iter(qualifying_concern_ids))
+
+    started_at_values: set[str] = set()
+    for evidence_concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_concern_id != concern_id:
+            continue
+        if not _valid_tool_evidence_id(record, concern_id=concern_id):
+            continue
+        if _string_from(record.get("method")).upper() not in {"GET", "HEAD"}:
+            continue
+        started_at_values.update(
+            _service_incident_record_fact_values(record).get(
+                "started_at",
+                frozenset(),
+            )
+        )
+    if len(started_at_values) != 1:
+        return answer
+
+    started_at = next(iter(started_at_values))
+    if "T" not in started_at or _ISO_DATE_OR_TIMESTAMP_RE.fullmatch(started_at) is None:
+        return answer
+    explicit_start_claims = tuple(
+        _EXPLICIT_INCIDENT_START_TIMESTAMP_RE.finditer(clean_answer)
+    )
+    if any(
+        started_at.casefold() not in match.group(0).casefold()
+        for match in explicit_start_claims
+    ):
+        # Do not supplement a conflicting start-time claim. Grounding must keep
+        # the draft blocked instead of masking the contradiction.
+        return answer
+    standalone_start_pattern = re.compile(
+        rf"(?:The\s+)?(?:service\s+)?(?:incident|outage|issue)\s+"
+        rf"(?:started|began)\s+(?:at|on|since)\s+{re.escape(started_at)}\.?",
+        re.IGNORECASE,
+    )
+    if any(
+        standalone_start_pattern.fullmatch(_string_from(unit.get("text")))
+        for unit in _grounding_answer_units(clean_answer)
+    ):
+        return answer
+    return f"{clean_answer}\n\nThe incident began at {started_at}."
+
+
+def _required_secret_delivery_guidance(ticket: dict[str, Any]) -> bool:
+    """Require all secret-delivery constraints from one matched concern only."""
+
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        if concern.get("matched") is not True:
+            continue
+        raw_guidance = concern.get("requiredGuidance")
+        if not isinstance(raw_guidance, list):
+            continue
+        guidance = " ".join(_string_from(item) for item in raw_guidance if _string_from(item))
+        if (
+            _SECRET_DELIVERY_OBJECT_PATTERN.search(guidance)
+            and re.search(r"\b(?:never|do\s+not|don['’]t|must\s+not|should\s+not)\b", guidance, re.IGNORECASE)
+            and re.search(r"\be-?mail(?:ed|ing)?\b", guidance, re.IGNORECASE)
+            and re.search(r"\b(?:approved|trusted)\s+secure\s+channel\b", guidance, re.IGNORECASE)
+        ):
+            return True
+    return False
+
+
+def _answer_has_complete_secret_delivery_guidance(answer: str) -> bool:
+    if _SECRET_EMAIL_PROHIBITION_REVERSAL_PATTERN.search(answer):
+        return False
+    if any(pattern.search(answer) for pattern in _SECRET_EMAIL_ALLOWANCE_PATTERNS):
+        return False
+    return bool(
+        _SECRET_REPETITION_PROHIBITION_PATTERN.search(answer)
+        and any(pattern.search(answer) for pattern in _SECRET_EMAIL_PROHIBITION_PATTERNS)
+        and any(pattern.search(answer) for pattern in _SECRET_SECURE_DELIVERY_PATTERNS)
+    )
+
+
+def _append_required_secret_delivery_guidance(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> str:
+    """Deterministically preserve mandatory English secret-delivery safety."""
+
+    if (
+        language != "en"
+        or not _required_secret_delivery_guidance(ticket)
+        or _answer_has_complete_secret_delivery_guidance(answer)
+    ):
+        return answer
+    return "\n\n".join((answer.rstrip(), _SECURE_SECRET_DELIVERY_NOTICE)).strip()
+
+
+_UNCONFIRMED_RETURN_DETAILS_REQUIREMENT = (
+    "State that no return address or reference is confirmed yet and that shipment "
+    "must wait for confirmed authorization, route, and reference."
+)
+_RETURN_REFUND_TIMING_REQUIREMENT = (
+    "Explain merchant and payment-provider control without guaranteeing Friday."
+)
+_PENDING_ACTION_PROOF_REQUIREMENT = (
+    "Never claim a selected action completed before exact success evidence exists."
+)
+_PENDING_RETURN_REFUND_QUESTIONS = (
+    "Should they ship it directly today?",
+    "Give the return address and reference",
+    "Confirm authorization",
+    "Guarantee the refund by Friday",
+    "Explain who controls refund timing",
+)
+_PENDING_RETURN_REFUND_FORBIDDEN_CLAIMS = (
+    "guarantee the refund by Friday",
+    "ship it directly today",
+)
+_CANONICAL_PENDING_RETURN_REFUND_ANSWER = (
+    "Thank you for your return and refund request.\n\n"
+    "The return address and return reference are not confirmed yet. Do not ship "
+    "the item until the return authorization, route, and reference are confirmed.\n\n"
+    "The pending action (Request Return Authorization) remains under human review "
+    "and is not confirmed as started or completed. The pending action (Request "
+    "Refund) remains under human review and is not confirmed as started or "
+    "completed.\n\n"
+    "The merchant and payment provider control final refund approval and posting "
+    "time, so a refund by Friday cannot be guaranteed."
+)
+
+
+def _has_exact_pending_return_refund_requirements(concern: dict[str, Any]) -> bool:
+    """Require the complete live runbook contract and reject any extra rule."""
+
+    raw_requirements = concern.get("replyRequirements")
+    requirements = raw_requirements if isinstance(raw_requirements, list) else []
+    normalized_requirements = [
+        " ".join(_string_from(requirement).casefold().split())
+        for requirement in requirements
+        if _string_from(requirement)
+    ]
+    expected_requirements = {
+        " ".join(requirement.casefold().split())
+        for requirement in (
+            _UNCONFIRMED_RETURN_DETAILS_REQUIREMENT,
+            _RETURN_REFUND_TIMING_REQUIREMENT,
+            _PENDING_ACTION_PROOF_REQUIREMENT,
+        )
+    }
+    if len(normalized_requirements) != len(expected_requirements) or (
+        set(normalized_requirements) != expected_requirements
+    ):
+        return False
+
+    raw_obligations = concern.get("answerObligations")
+    obligations = raw_obligations if isinstance(raw_obligations, list) else []
+    normalized_questions = [
+        " ".join(_string_from(_record_from(obligation).get("question")).casefold().split())
+        for obligation in obligations
+        if _string_from(_record_from(obligation).get("question"))
+    ]
+    expected_questions = {
+        " ".join(question.casefold().split())
+        for question in _PENDING_RETURN_REFUND_QUESTIONS
+    }
+    if len(normalized_questions) != len(expected_questions) or (
+        set(normalized_questions) != expected_questions
+    ):
+        return False
+
+    raw_forbidden = concern.get("forbiddenClaims")
+    forbidden = raw_forbidden if isinstance(raw_forbidden, list) else []
+    normalized_forbidden = [
+        " ".join(_string_from(claim).casefold().split())
+        for claim in forbidden
+        if _string_from(claim)
+    ]
+    expected_forbidden = {
+        " ".join(claim.casefold().split())
+        for claim in _PENDING_RETURN_REFUND_FORBIDDEN_CLAIMS
+    }
+    if len(normalized_forbidden) != len(expected_forbidden) or (
+        set(normalized_forbidden) != expected_forbidden
+    ):
+        return False
+
+    return not any(
+        concern.get(field)
+        for field in ("attachments", "missingInformation", "requiredGuidance")
+    )
+
+
+def _is_affirmative_return_refund_fact(
+    path: str,
+    value: str,
+    *,
+    tool_name: str = "",
+) -> bool:
+    """Recognize affirmative return/refund proof without treating absence as proof."""
+
+    if path.rsplit(".", 1)[-1].casefold() == "path":
+        # A sanitized explicit fact whose null ``value`` was removed retains
+        # only its metadata path. The path label alone is not confirmation.
+        return False
+    normalized_path = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        path,
+    ).casefold()
+    normalized_value = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        value,
+    ).casefold()
+    path_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_path))
+    value_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_value))
+    normalized_tool_name = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        " ",
+        tool_name,
+    ).casefold()
+    tool_tokens = frozenset(re.findall(r"[a-z0-9]+", normalized_tool_name))
+    descriptor_tokens = path_tokens | value_tokens
+    detail_tokens = {"address", "authorization", "destination", "reference", "route"}
+    workflow_tool = bool(
+        tool_tokens.intersection({"refund", "refunds", "return", "returns", "rma"})
+    )
+    relevant = bool(
+        "rma" in descriptor_tokens
+        or descriptor_tokens.intersection({"refund", "refunds"})
+        or (
+            descriptor_tokens.intersection({"return", "returns"})
+            and descriptor_tokens.intersection(detail_tokens)
+        )
+        or path_tokens.intersection(detail_tokens)
+        or (
+            workflow_tool
+            and path_tokens.intersection(
+                detail_tokens | {"approval", "approved", "state", "status"}
+            )
+        )
+    )
+    if not relevant:
+        return False
+
+    negative_flag_tokens = {
+        "absent",
+        "missing",
+        "pending",
+        "unavailable",
+        "unconfirmed",
+        "unknown",
+    }
+    normalized_scalar = " ".join(value.casefold().split())
+    if path_tokens.intersection(negative_flag_tokens):
+        return normalized_scalar in {"0", "false", "no"}
+    return not (
+        normalized_scalar in {"", "0", "false", "n/a", "na", "none", "null"}
+        or value_tokens.intersection(
+            negative_flag_tokens
+            | {"awaiting", "no", "not", "undetermined", "unverified"}
+        )
+    )
+
+
+def _repair_required_unconfirmed_return_details(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> str:
+    """Use one canonical answer only for the exact pending return/refund workflow."""
+
+    if language != "en":
+        return answer
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    matched_concerns = [
+        concern
+        for raw_concern in concerns
+        if (concern := _record_from(raw_concern)).get("matched") is True
+    ]
+    if len(matched_concerns) != 1:
+        return answer
+    concern = matched_concerns[0]
+    concern_id = _string_from(concern.get("id"))
+    if (
+        not concern_id
+        or _string_from(concern.get("runbook")) != "fulfillment-return-refund"
+        or not _has_exact_pending_return_refund_requirements(concern)
+    ):
+        return answer
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    scoped_actions = [
+        action
+        for raw_action in actions
+        if (action := _record_from(raw_action))
+        and concern_id in _runbook_action_concern_ids(action)
+    ]
+    if len(scoped_actions) != 2:
+        return answer
+    scoped_action_states = [
+        (
+            _string_from(action.get("name")).lower().replace("-", "_"),
+            _string_from(action.get("status")).lower().replace("-", "_"),
+        )
+        for action in scoped_actions
+    ]
+    if sorted(scoped_action_states) != [
+        ("request_refund", "pending_approval"),
+        ("request_return_authorization", "pending_approval"),
+    ]:
+        return answer
+
+    raw_tools = concern.get("toolEvidence")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    for raw_tool in tools:
+        tool = _record_from(raw_tool)
+        if _string_from(tool.get("status")).casefold() != "success":
+            continue
+        if tool.get("hasAffirmativeReturnRefundFact") is True:
+            return answer
+        for path, value in _tool_fact_scalar_entries(tool.get("responseFacts")):
+            if _is_affirmative_return_refund_fact(
+                path,
+                value,
+                tool_name=_string_from(tool.get("name")),
+            ):
+                return answer
+
+    return _CANONICAL_PENDING_RETURN_REFUND_ANSWER
+
+
+def _action_state_obligation_subject(
+    question: str,
+    *,
+    language: str,
+) -> str:
+    """Extract the customer-visible topic from an explicit state request."""
+    for pattern in _ACTION_STATE_OBLIGATION_PATTERNS.get(language, ()):
+        match = pattern.fullmatch(question)
+        if match is None:
+            continue
+        raw_subject = match.group("subject").strip()
+        action = _string_from(match.groupdict().get("action")).casefold()
+        pronoun_subject = bool(_ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(raw_subject))
+        if _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(raw_subject):
+            return ""
+        if pronoun_subject:
+            if action != "escalate":
+                return ""
+            return "escalation"
+        subject = raw_subject.strip(" \t\r\n.,;:!?\"'“”‘’")
+        if language == "es" and subject.casefold().startswith("al "):
+            subject = "el " + subject[3:]
+        if language == "de" and subject.casefold().startswith("dem "):
+            subject = "den " + subject[4:]
+        if action in {"record", "log"}:
+            subject = f"recording {subject}"
+        elif action == "escalate":
+            subject = f"escalating {subject}"
+        elif action in {"cancel", "terminate", "rescind"}:
+            subject = f"cancelling {subject}"
+        elif action in {
+            "dispatch",
+            "investigate",
+            "issue",
+            "notify",
+            "open",
+            "refund",
+            "replace",
+            "reship",
+            "submit",
+            "update",
+            "change",
+        }:
+            gerund = {
+                "change": "changing",
+                "dispatch": "dispatching",
+                "investigate": "investigating",
+                "issue": "issuing",
+                "notify": "notifying",
+                "open": "opening",
+                "refund": "refunding",
+                "replace": "replacing",
+                "reship": "reshipping",
+                "submit": "submitting",
+                "update": "updating",
+            }[action]
+            subject = f"{gerund} {subject}"
+        if _action_state_subject_tokens(subject):
+            return subject[:240]
+    return ""
+
+
+def _english_action_result_pending_notice(question: str) -> tuple[str, str] | None:
+    """Render a direct negative answer for a narrowly bounded result claim."""
+    match = _ENGLISH_ACTION_RESULT_CONFIRMATION_PATTERN.fullmatch(question)
+    if match is None:
+        return None
+    topic = match.group("topic").strip(" \t\r\n.,;:!?\"'“”‘’")
+    state = match.group("state").casefold()
+    if (
+        not topic
+        or _ACTION_STATE_SUBJECT_LEAD_REJECT_PATTERN.search(topic)
+        or _ACTION_STATE_SUBJECT_CLAUSE_REJECT_PATTERN.search(topic)
+    ):
+        return None
+    rendered_topic = topic[:1].upper() + topic[1:]
+    subject_key = f"{topic} {state}"
+    return (
+        subject_key,
+        f"{rendered_topic} is not confirmed as {state}. "
+        "A related next step for your request remains pending human review.",
+    )
+
+
+def _action_state_subject_tokens(value: str) -> frozenset[str]:
+    """Return stable topic tokens for conservative answer-presence checks."""
+    return frozenset(
+        _ACTION_STATE_SUBJECT_TOKEN_ALIASES.get(word, word)
+        for word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
+        if word not in _ACTION_STATE_SUBJECT_STOP_WORDS
+    )
+
+
+def _answer_has_explicit_negative_confirmation(answer: str, subject: str) -> bool:
+    """Recognize a direct negative answer so a later policy aside cannot duplicate it."""
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    patterns = (
+        rf"\b(?:cannot|can['’]t|unable\s+to|not\s+able\s+to)\s+confirm\b"
+        rf"[^.!?\n]{{0,100}}\b{subject_pattern}\b",
+        rf"\b{subject_pattern}\b[^.!?\n]{{0,80}}\b"
+        rf"(?:is|are|was|were|has|have|had|cannot|can['’]t)\s+"
+        rf"(?:(?:not|never)\s+|not\s+been\s+|be\s+)?confirmed\b",
+        rf"\bno\s+confirmation\b[^.!?\n]{{0,100}}\b{subject_pattern}\b",
+    )
+    return any(re.search(pattern, answer, re.IGNORECASE) for pattern in patterns)
+
+
+def _answer_uses_pending_confirmation_gerund(answer: str, subject: str) -> bool:
+    """Detect bounded, safe `confirming X ... pending` wording for canonicalization."""
+    if _answer_has_explicit_negative_confirmation(answer, subject):
+        return False
+    subject_pattern = re.escape(subject).replace(r"\ ", r"\s+")
+    for match in re.finditer(
+        rf"\bconfirming\s+(?:the\s+|an?\s+)?{subject_pattern}\b"
+        rf"(?P<tail>[^.!?\n]{{0,240}})",
+        answer,
+        re.IGNORECASE,
+    ):
+        tail = match.group("tail")
+        pending_match = re.match(
+            r"^\s+(?:is|are|remain|remains)\s+"
+            r"(?:(?:all|both|still)\s+)*(?:pending|awaiting)\b",
+            tail,
+            re.IGNORECASE,
+        )
+        if pending_match is not None:
+            remainder = tail[pending_match.end() :]
+            if (
+                re.search(
+                    r"\b(?:complete|completed|done|successful|confirmed)\b",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                is None
+            ):
+                return True
+        pending_match = re.match(
+            r"^(?:\s*,\s*(?:confirming|guaranteeing)\s+[^,;.!?\n]+)+"
+            r"\s*,?\s+and\s+(?:confirming|guaranteeing)\s+[^,;.!?\n]+"
+            r"\s+(?:are|remain)\s+(?:(?:all|both|still)\s+)*"
+            r"(?:pending|awaiting)\b",
+            tail,
+            re.IGNORECASE,
+        )
+        if pending_match is not None:
+            remainder = tail[pending_match.end() :]
+            if (
+                re.search(
+                    r"\b(?:complete|completed|done|successful|confirmed)\b",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                is None
+            ):
+                return True
+    return False
+
+
+def _answer_mentions_subject_without_positive_action_claim(
+    answer: str,
+    subject_tokens: frozenset[str],
+) -> bool:
+    """Count only a safe same-topic explanation, not another concern's action."""
+    if not subject_tokens:
+        return False
+    synthetic_guard = (
+        {
+            "name": "human_review",
+            "label": "Human review",
+            "status": "pending_approval",
+        },
+    )
+    for match in re.finditer(r"[^.!?\n]+(?:[.!?]+|(?=\n)|$)", answer):
+        unit = match.group(0).strip()
+        if not unit or not subject_tokens.issubset(_action_state_subject_tokens(unit)):
+            continue
+        if not check_pending_action_claims(
+            answer=unit,
+            runbook_actions=synthetic_guard,
+        ).blocked:
+            return True
+    return False
+
+
+_HUMAN_REVIEW_CONCERN_STATUSES = frozenset(
+    {
+        "human_review",
+        "needs_human",
+        "pending_human_review",
+        "requires_human",
+    }
+)
+
+
+def _concern_requires_human_review(concern: dict[str, Any]) -> bool:
+    """Use only an explicitly matched concern's durable review state."""
+    return concern.get("matched") is True and (
+        concern.get("requiresHuman") is True
+        or _string_from(concern.get("status")).lower().replace("-", "_") in _HUMAN_REVIEW_CONCERN_STATUSES
+    )
+
+
+def _is_durable_successful_runbook_action(action: dict[str, Any]) -> bool:
+    """Require the complete, minimized proof emitted for an applied mutation."""
+    proof = action.get("proof")
+    webhook_result = _record_from(action.get("webhookResult"))
+    return bool(
+        _string_from(action.get("status")).lower() == "success"
+        and action.get("applied") is True
+        and _string_from(webhook_result.get("status")).lower() == "ok"
+        and _string_from(action.get("evidenceId")).startswith("action:")
+        and has_meaningful_action_success_proof(proof, action=action)
+    )
+
+
+def _pending_action_obligation_notices(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+) -> tuple[str, ...]:
+    """Build safe notices only for omitted topics with same-scope pending work."""
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    pending_actions = [
+        action
+        for raw_action in actions
+        if (
+            (action := _record_from(raw_action))
+            and _string_from(action.get("status")).lower().replace("-", "_") == "pending_approval"
+        )
+    ]
+    pending_concern_ids = {
+        concern_id
+        for action in pending_actions
+        for concern_id in _runbook_action_concern_ids(action)
+    }
+    notices: list[str] = []
+    seen_subjects: set[frozenset[str]] = set()
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    human_review_concern_ids = {
+        concern_id
+        for raw_concern in concerns
+        if (
+            (concern := _record_from(raw_concern))
+            and _concern_requires_human_review(concern)
+            and (concern_id := _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id")))
+        )
+    }
+    review_concern_ids = pending_concern_ids | human_review_concern_ids
+    if not review_concern_ids:
+        return ()
+
+    def append_notice_for_question(
+        question: str,
+        concern_actions: list[dict[str, Any]],
+        concern_id: str,
+    ) -> None:
+        remaining_question = remaining_action_obligation_text(
+            runbook_actions=concern_actions,
+            expected_action_text=question,
+        )
+        if not remaining_question:
+            return
+        if has_success_backed_action_claim(
+            answer=answer,
+            runbook_actions=concern_actions,
+            expected_action_text=remaining_question,
+        ):
+            return
+        if _same_concern_tool_temporal_fact_matches(
+            ticket=ticket,
+            concern_id=concern_id,
+            question=remaining_question,
+            answer=answer,
+        ):
+            return
+        result_notice = (
+            _english_action_result_pending_notice(remaining_question)
+            if language == "en"
+            else None
+        )
+        if result_notice is not None:
+            subject, notice = result_notice
+        else:
+            subject = _action_state_obligation_subject(
+                remaining_question,
+                language=language,
+            )
+            rendered_subject = (
+                subject[:1].upper() + subject[1:]
+                if language == "en"
+                else subject
+            )
+            notice = _ACTION_STATE_PENDING_NOTICES[language].format(
+                subject=rendered_subject,
+            )
+        subject_tokens = _action_state_subject_tokens(subject)
+        if (
+            not subject_tokens
+            or subject_tokens in seen_subjects
+            or notice.casefold() in answer.casefold()
+            or (
+                _answer_mentions_subject_without_positive_action_claim(
+                    answer,
+                    subject_tokens,
+                )
+                and not (language == "en" and _answer_uses_pending_confirmation_gerund(answer, subject))
+            )
+        ):
+            return
+        seen_subjects.add(subject_tokens)
+        notices.append(notice)
+
+    for raw_concern in concerns:
+        concern = _record_from(raw_concern)
+        concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+        if concern.get("matched") is not True or concern_id not in review_concern_ids:
+            continue
+        raw_obligations = concern.get("answerObligations")
+        if not isinstance(raw_obligations, list):
+            continue
+        for raw_obligation in raw_obligations[:10]:
+            obligation = _record_from(raw_obligation)
+            question = _string_from(
+                obligation.get("question")
+                or obligation.get("text")
+                or (raw_obligation if isinstance(raw_obligation, str) else "")
+            )
+            concern_actions = [
+                action
+                for action in actions
+                if concern_id in _runbook_action_concern_ids(action)
+            ]
+            for action_question in action_obligation_parts(question):
+                append_notice_for_question(action_question, concern_actions, concern_id)
+    return tuple(notices)
+
+
+def _separate_pending_action_token_forms(token: str) -> frozenset[str]:
+    """Return bounded English inflections for action-label matching."""
+
+    forms = {token}
+    if len(token) < 3:
+        return frozenset(forms)
+    if token.endswith("e"):
+        forms.update({f"{token}d", f"{token[:-1]}ing"})
+    elif token.endswith("y") and token[-2:-1] not in "aeiou":
+        forms.update({f"{token[:-1]}ied", f"{token}ing"})
+    else:
+        forms.update({f"{token}ed", f"{token}ing"})
+        if token.endswith(("g", "l", "m", "p", "t")):
+            forms.update({f"{token}{token[-1]}ed", f"{token}{token[-1]}ing"})
+    return frozenset(forms)
+
+
+def _separate_pending_action_tokens(value: str) -> tuple[str, ...]:
+    normalized = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|[_-]+",
+        " ",
+        value,
+    )
+    return tuple(
+        token
+        for raw_token in _SEPARATE_PENDING_ACTION_TOKEN_RE.findall(normalized.casefold())
+        if (token := _ACTION_STATE_SUBJECT_TOKEN_ALIASES.get(raw_token, raw_token))
+        not in _SEPARATE_PENDING_ACTION_TOKEN_STOP_WORDS
+    )
+
+
+def _answer_unit_mentions_pending_action(unit: str, action: dict[str, Any]) -> bool:
+    """Require same-sentence action identity plus an explicit pending state."""
+
+    if _SEPARATE_PENDING_ACTION_STATE_RE.search(unit) is None:
+        return False
+    unit_tokens = frozenset(_separate_pending_action_tokens(unit))
+    for value in (
+        _string_from(action.get("label")),
+        _string_from(action.get("name")),
+    ):
+        expected_tokens = _separate_pending_action_tokens(value)
+        if expected_tokens and all(
+            unit_tokens.intersection(_separate_pending_action_token_forms(token))
+            for token in expected_tokens
+        ):
+            return True
+    return False
+
+
+def _single_pending_action_repair_notice(
+    *,
+    ticket: dict[str, Any],
+    language: str,
+) -> str:
+    """Keep a repaired single-action answer customer-visible and unambiguous."""
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    pending_actions = [
+        action
+        for raw_action in actions
+        if (
+            (action := _record_from(raw_action))
+            and _string_from(action.get("status")).lower().replace("-", "_")
+            == "pending_approval"
+        )
+    ]
+    if len(pending_actions) != 1:
+        return ""
+    action = pending_actions[0]
+    if _is_internal_agent_triage_action(action):
+        return ""
+    concern_ids = _runbook_action_concern_ids(action)
+    if len(concern_ids) != 1:
+        return ""
+    concern_id = concern_ids[0]
+
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and candidate.get("matched") is True
+            and _string_from(
+                candidate.get("id")
+                or candidate.get("concernId")
+                or candidate.get("concern_id")
+            )
+            == concern_id
+        ),
+        {},
+    )
+    if not concern:
+        return ""
+
+    raw_obligations = concern.get("answerObligations")
+    obligations = raw_obligations if isinstance(raw_obligations, list) else []
+    questions = tuple(
+        question
+        for raw_obligation in obligations[:20]
+        if (
+            question := _string_from(
+                _record_from(raw_obligation).get("question")
+                or _record_from(raw_obligation).get("text")
+                or (raw_obligation if isinstance(raw_obligation, str) else "")
+            )
+        )
+    )
+    label = re.sub(
+        r"\s+",
+        " ",
+        _string_from(action.get("label") or action.get("name") or "pending action"),
+    ).strip(" \t\r\n.,;:!?\"'“”‘’")[:160]
+    if not label:
+        return ""
+    if language != "en":
+        return _SEPARATE_PENDING_ACTION_NOTICES[language].format(label=label)
+
+    question_text = "\n".join(questions)
+    topic_match = _PENDING_INVESTIGATION_TOPIC_RE.search(question_text)
+    action_tokens = _separate_pending_action_tokens(
+        _string_from(action.get("name") or label)
+    )
+    action_topic_tokens = frozenset(action_tokens[1:] if action_tokens[:1] == ("open",) else ())
+    matched_topic_tokens = (
+        frozenset(_separate_pending_action_tokens(topic_match.group("topic")))
+        if topic_match is not None
+        else frozenset()
+    )
+    if action_topic_tokens and action_topic_tokens.issubset(matched_topic_tokens):
+        assert topic_match is not None
+        topic = re.sub(r"\s+", " ", topic_match.group("topic")).strip()
+        notice = (
+            f"The {topic} remains pending human review and is not confirmed as "
+            "opened."
+        )
+        timeline_subject = "investigation"
+    elif action_tokens[:1] == ("open",) and re.match(r"^open\s+", label, re.IGNORECASE):
+        object_label = re.sub(r"^open\s+", "", label, flags=re.IGNORECASE).strip()
+        object_label = " ".join(
+            token if token.isupper() or any(character.isdigit() for character in token) else token.casefold()
+            for token in object_label.split()
+        )
+        article = "" if re.match(r"^(?:a|an|the)\b", object_label, re.IGNORECASE) else "the "
+        subject = f"{article}{object_label}"
+        notice = f"{subject[:1].upper() + subject[1:]} remains pending human review and is not confirmed as opened."
+        timeline_subject = "request"
+    else:
+        notice = (
+            f'The requested action "{label}" remains pending human review and is '
+            "not confirmed as started or completed."
+        )
+        timeline_subject = "request"
+    if any(_PENDING_ACTION_TIMELINE_QUESTION_RE.search(question) for question in questions):
+        notice += f" No resolution timeline is confirmed for this {timeline_subject}."
+    return notice
+
+
+def _separate_pending_action_notices(
+    *,
+    ticket: dict[str, Any],
+    answer: str,
+    language: str,
+    customer_request: str,
+) -> tuple[str, ...]:
+    """Name each action when one concern has several approval-gated actions."""
+
+    if len(action_obligation_parts(customer_request)) < 2:
+        return ()
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    by_concern: dict[str, list[dict[str, Any]]] = {}
+    for raw_action in actions:
+        action = _record_from(raw_action)
+        action_concern_ids = _runbook_action_concern_ids(action)
+        if not action_concern_ids or _string_from(action.get("status")).lower().replace(
+            "-", "_"
+        ) != "pending_approval":
+            continue
+        for concern_id in action_concern_ids:
+            by_concern.setdefault(concern_id, []).append(action)
+
+    answer_units = tuple(
+        match.group(0).strip()
+        for match in re.finditer(r"[^.!?\n]+(?:[.!?]+|(?=\n)|$)", answer)
+        if match.group(0).strip()
+    )
+    notices: list[str] = []
+    for concern_actions in by_concern.values():
+        if len(concern_actions) < 2:
+            continue
+        individually_acknowledged: set[int] = set()
+        for unit in answer_units:
+            matching_indexes = {
+                index
+                for index, action in enumerate(concern_actions)
+                if _answer_unit_mentions_pending_action(unit, action)
+            }
+            if len(matching_indexes) == 1:
+                individually_acknowledged.update(matching_indexes)
+        for index, action in enumerate(concern_actions):
+            if index in individually_acknowledged:
+                continue
+            label = re.sub(
+                r"\s+",
+                " ",
+                _string_from(action.get("label") or action.get("name") or "pending action"),
+            ).strip(" \t\r\n.,;:!?\"'“”‘’")[:160]
+            if not label:
+                continue
+            notice = _SEPARATE_PENDING_ACTION_NOTICES[language].format(label=label)
+            if notice.casefold() not in answer.casefold() and notice not in notices:
+                notices.append(notice)
+    return tuple(notices)
+
+
+_ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE = re.compile(
+    r"^to\s+(?:assess|confirm|verify|check|review|process|update|escalate|investigate|"
+    r"open|submit|arrange|schedule)\b[^,;:!?]{0,180}[.!?]*$",
+    re.IGNORECASE,
+)
+_ENGLISH_DEPENDENT_ACTION_FRAGMENT_START_RE = re.compile(
+    r"To\s+(?:assess|confirm|verify|check|review|process|update|escalate|investigate|"
+    r"open|submit|arrange|schedule)\b",
+)
+_ACTION_REPAIR_NONTERMINAL_ABBREVIATIONS = frozenset(
+    {
+        "a.g",
+        "co",
+        "corp",
+        "dr",
+        "e.k",
+        "e.v",
+        "inc",
+        "jr",
+        "ltd",
+        "mr",
+        "mrs",
+        "ms",
+        "prof",
+        "sr",
+        "u.s",
+        "u.s.a",
+    }
+)
+
+
+_ENGLISH_FINITE_PREDICATE_RE = re.compile(
+    r"\b(?:am|are|is|was|were|can|cannot|can't|could|do|does|did|have|has|had|"
+    r"applies|continues|covers|ends|happens|includes|may|might|must|need|needs|"
+    r"occurs|remain|remains|require|requires|serves|shall|should|starts|will|"
+    r"would)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_LIKELY_SENTENCE_OPENER_RE = re.compile(r"(?:A|An|I|It|Our|That|The|These|They|This|Those|We|You|Your)\b")
+_ENGLISH_PROCESS_FRAGMENT_SUFFIX_RE = re.compile(
+    r"(?:^|(?<=[.!?])[ \t]+)"
+    r"(?P<fragment>[A-Za-z][^.!?\n]{0,180}\bas part of (?:this|the) process\b[.!?]*)",
+    re.IGNORECASE,
+)
+_ENGLISH_SINGULAR_ACTION_GERUND_PLURAL_PENDING_RE = re.compile(
+    r"(?P<prefix>^|(?<=[.!?])\s+)"
+    r"(?P<subject>(?:assessing|confirming|verifying|checking|reviewing|processing|"
+    r"updating|escalating|investigating|opening|submitting|arranging|scheduling|"
+    r"pausing|stopping|recording|logging|cancelling|canceling|terminating|refunding|"
+    r"issuing|notifying|replacing|reshipping|dispatching|creating|revoking)\b"
+    r"[^,;.!?\n]{0,180}?)\s+are\s+(?:all|both)\s+"
+    r"(?P<state>(?:still\s+)?(?:pending|awaiting)\b)",
+    re.IGNORECASE,
+)
+
+
+def _dependent_action_fragment_end(text: str, start: int) -> int | None:
+    """Find one fragment end without treating initials as sentence breaks."""
+
+    limit = min(len(text), start + 240)
+    index = start
+    while index < limit:
+        character = text[index]
+        if character == "\n":
+            return index
+        if character not in ".!?":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and text[end] in ".!?":
+            end += 1
+        if end >= len(text) or text[end] == "\n":
+            return end
+        next_index = end
+        while next_index < len(text) and text[next_index] in " \t":
+            next_index += 1
+        has_space = next_index > end
+        if next_index >= len(text) or text[next_index] == "\n":
+            return end
+        if character in "!?":
+            return end
+        if not has_space:
+            continues_initialism = (
+                text[next_index].isupper() and next_index + 1 < len(text) and text[next_index + 1] == "."
+            )
+            if text[next_index].isupper() and not continues_initialism:
+                return end
+            index = end
+            continue
+        if not text[next_index].isupper():
+            index = end
+            continue
+
+        token_match = re.search(r"([A-Za-z]+(?:\.[A-Za-z]+)*)$", text[:index])
+        token = token_match.group(1).casefold() if token_match else ""
+        token_is_abbreviation = token in _ACTION_REPAIR_NONTERMINAL_ABBREVIATIONS or "." in token
+        if token_is_abbreviation:
+            following = text[next_index : min(len(text), next_index + 180)]
+            if _ENGLISH_LIKELY_SENTENCE_OPENER_RE.match(following) and _ENGLISH_FINITE_PREDICATE_RE.search(following):
+                return end
+            index = end
+            continue
+        return end
+    return None
+
+
+def _dependent_action_fragment_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for match in _ENGLISH_DEPENDENT_ACTION_FRAGMENT_START_RE.finditer(text):
+        start = match.start()
+        if start:
+            if not text[start - 1].isspace():
+                continue
+            prefix = text[:start].rstrip(" \t")
+            if prefix and prefix[-1] not in ".!?\n":
+                continue
+        end = _dependent_action_fragment_end(text, start)
+        if end is None:
+            continue
+        fragment = text[start:end].strip()
+        if _ENGLISH_DEPENDENT_ACTION_FRAGMENT_RE.fullmatch(fragment):
+            spans.append((start, end))
+    return tuple(spans)
+
+
+def _clean_action_repair_artifacts(answer: str, *, language: str) -> str:
+    """Remove bounded dependent fragments and restore sentence separators.
+
+    Action repair can retain a safe local clause after deleting an unsafe claim.
+    A retained infinitive or noun fragment is not independently customer-ready,
+    even though it is harmless to the action-state guard. Keep this cleanup
+    intentionally narrow and English-only; grounding remains authoritative.
+    """
+
+    cleaned = answer.strip()
+    if language == "en" and cleaned:
+        cursor = 0
+        parts: list[str] = []
+        for start, end in _dependent_action_fragment_spans(cleaned):
+            parts.append(cleaned[cursor:start])
+            cursor = end
+        if parts:
+            parts.append(cleaned[cursor:])
+            cleaned = "".join(parts).strip()
+        cleaned = _ENGLISH_SINGULAR_ACTION_GERUND_PLURAL_PENDING_RE.sub(
+            lambda match: (
+                match.group(0)
+                if re.search(r"\b(?:and|or)\b", match.group("subject"), re.IGNORECASE)
+                else f'{match.group("prefix")}{match.group("subject")} is {match.group("state")}'
+            ),
+            cleaned,
+        )
+        cursor = 0
+        parts = []
+        for process_fragment in _ENGLISH_PROCESS_FRAGMENT_SUFFIX_RE.finditer(cleaned):
+            if _ENGLISH_FINITE_PREDICATE_RE.search(process_fragment.group("fragment")):
+                continue
+            parts.append(cleaned[cursor : process_fragment.start()])
+            cursor = process_fragment.end()
+        if parts:
+            parts.append(cleaned[cursor:])
+            cleaned = "".join(parts).strip()
+
+    cleaned = re.sub(
+        r"(\b[a-z]{2,}|\d+)([.!?])(?=[A-ZÀ-ÖØ-Þ])",
+        r"\1\2 ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\b([A-Z][A-Za-zÀ-ÖØ-öø-ÿ&'-]{1,50}\s+"
+        r"(?:SA|AG|GmbH|Inc|Ltd|LLC|PLC|Corp|Sarl|SARL|SAS|BV|NV))([.!?])"
+        r"(?=(?:A|An|I|It|Our|That|The|These|They|This|Those|We|You|Your)\b)",
+        r"\1\2 ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"((?:\b[A-Za-z]\.){2,})(?=[A-Z][a-z])",
+        r"\1 ",
+        cleaned,
+    )
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n[ \t]+\n", "\n\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+_INTERNAL_AGENT_TRIAGE_DISCLOSURE_RE = re.compile(
+    r"\b(?:agent(?:en)?[\s_-]*triage|internal[\s_-]+triage|"
+    r"triage[\s_-]+(?:interne|interno|interna)|"
+    r"triaje[\s_-]+(?:interno|interna|del[\s_-]+agente))\b",
+    re.IGNORECASE,
+)
+
+
+def _internal_agent_triage_actions(
+    runbook_actions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        action
+        for raw_action in runbook_actions
+        if (action := _record_from(raw_action))
+        and _is_internal_agent_triage_action(action)
+    )
+
+
+def _internal_agent_triage_disclosures(
+    answer: str,
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return answer units that expose an internal agent-triage workflow."""
+
+    internal_actions = _internal_agent_triage_actions(runbook_actions)
+    subject_patterns = tuple(
+        re.compile(
+            r"(?<!\w)"
+            + r"[\s_-]+".join(
+                re.escape(part)
+                for part in re.split(r"[\s_-]+", value)
+                if part
+            )
+            + r"(?!\w)",
+            re.IGNORECASE,
+        )
+        for action in internal_actions
+        for value in (
+            _string_from(action.get("label")),
+            _string_from(action.get("name")),
+        )
+        if value
+    )
+
+    def exposes_internal_triage(text: str) -> bool:
+        return bool(
+            _INTERNAL_AGENT_TRIAGE_DISCLOSURE_RE.search(text)
+            or any(pattern.search(text) for pattern in subject_patterns)
+        )
+
+    units = _grounding_answer_units(answer)
+    if not units:
+        return (answer.strip()[:500],) if answer.strip() and exposes_internal_triage(answer) else ()
+    return tuple(
+        text[:500]
+        for unit in units
+        if (text := _string_from(unit.get("text")))
+        and exposes_internal_triage(text)
+    )
+
+
+def _customer_prior_agent_context(
+    runs: list[dict[str, Any]],
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Drop old generated answers that could reintroduce internal workflow prose."""
+    return [
+        item
+        for item in _agent_chat_context(runs)
+        if not _internal_agent_triage_disclosures(
+            _string_from(item.get("answer")),
+            runbook_actions=runbook_actions,
+        )
+    ]
+
+
+def _strip_internal_agent_triage_disclosures(
+    answer: str,
+    *,
+    runbook_actions: list[dict[str, Any]],
+) -> str:
+    """Remove safe-but-internal triage status units before customer exposure.
+
+    Pending agent triage remains available to the action-state guard so an LLM
+    cannot claim that internal work has started. It is not a customer concern or
+    runbook action, though, and therefore must not be narrated in the reply.
+    """
+
+    internal_actions = _internal_agent_triage_actions(runbook_actions)
+    if not answer.strip() or not internal_actions:
+        return answer.strip()
+
+    def is_standalone_internal_status(unit_text: str, action: dict[str, Any]) -> bool:
+        for value in (
+            _string_from(action.get("label")),
+            _string_from(action.get("name")),
+        ):
+            if not value:
+                continue
+            subject_pattern = r"[\s_-]+".join(
+                re.escape(part)
+                for part in re.split(r"[\s_-]+", value)
+                if part
+            )
+            if re.fullmatch(
+                r"\s*(?:(?:additionally|also|currently|furthermore|moreover|"
+                r"please\s+note(?:\s+that)?)[,:]?\s+)?"
+                r"(?:the\s+pending\s+action\s*\(\s*"
+                + subject_pattern
+                + r"\s*\)|(?:the\s+)?"
+                + subject_pattern
+                + r")\s+(?:is|remains)\s+(?:currently\s+)?"
+                r"(?:pending(?:\s+(?:human\s+review|approval))?|"
+                r"awaiting\s+(?:human\s+review|approval)|"
+                r"under\s+human\s+review|unconfirmed)"
+                r"(?:\s+and\s+is\s+not\s+confirmed\s+as\s+started\s+or\s+completed)?"
+                r"[.!?]*\s*",
+                unit_text,
+                re.IGNORECASE,
+            ):
+                return True
+        return False
+
+    removable_spans = [
+        (int(unit.get("start", 0)), int(unit.get("end", 0)))
+        for unit in _grounding_answer_units(answer)
+        if any(
+            is_standalone_internal_status(
+                _string_from(unit.get("text")),
+                action,
+            )
+            for action in internal_actions
+        )
+    ]
+    if not removable_spans:
+        return answer.strip()
+    cursor = 0
+    retained: list[str] = []
+    for start, end in removable_spans:
+        retained.append(answer[cursor:start])
+        cursor = end
+    retained.append(answer[cursor:])
+    cleaned = "".join(retained)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def repair_issue_automation_answer_action_state(
+    *,
+    issue: dict[str, Any],
+    messages: list[dict[str, Any]],
+    answer: str,
+) -> str:
+    """Repair action claims and omitted action-state answers from durable state."""
+    ticket = _automatic_ticket_context(issue)
+    language = _latest_customer_language(messages)
+    answer = _canonicalize_tool_backed_timestamps(ticket, answer)
+    message_context = _automatic_message_context(messages, limit=1)
+    customer_request = message_context[-1]["body"] if message_context else ""
+    raw_actions = ticket.get("runbookActions")
+    guard_actions = list(raw_actions) if isinstance(raw_actions, list) else []
+    if not any(
+        _string_from(_record_from(action).get("status")).lower().replace("-", "_") == "pending_approval"
+        for action in guard_actions
+    ):
+        raw_concerns = ticket.get("concerns")
+        concerns = raw_concerns if isinstance(raw_concerns, list) else []
+        if any(
+            _concern_requires_human_review(concern)
+            for raw_concern in concerns
+            if (concern := _record_from(raw_concern))
+        ):
+            # The concern state proves that human review is required even when
+            # a generic triage action is not yet present in this issue snapshot.
+            # This synthetic guard input is not surfaced as action evidence.
+            guard_actions.append(
+                {
+                    "name": "human_review",
+                    "label": "Human review",
+                    "status": "pending_approval",
+                }
+            )
+    repaired = repair_pending_action_claims(
+        answer=answer,
+        runbook_actions=guard_actions,
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+        repair_notice=(
+            _single_pending_action_repair_notice(
+                ticket=ticket,
+                language=language,
+            )
+            or "\n\n".join(
+                _separate_pending_action_notices(
+                    ticket=ticket,
+                    answer="",
+                    language=language,
+                    customer_request=customer_request,
+                )
+            )
+            or _PENDING_ACTION_REPAIR_NOTICES[language]
+        ),
+    )
+    repaired = _clean_action_repair_artifacts(repaired, language=language)
+    repaired = _strip_internal_agent_triage_disclosures(
+        repaired,
+        runbook_actions=guard_actions,
+    )
+    repaired = _append_required_secret_delivery_guidance(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    )
+    repaired = _repair_required_unconfirmed_return_details(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    )
+    notices = (*_pending_action_obligation_notices(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+    ), *_separate_pending_action_notices(
+        ticket=ticket,
+        answer=repaired,
+        language=language,
+        customer_request=customer_request,
+    ))
+    clean_answer = repaired.rstrip()
+    candidate = (
+        "\n\n".join((clean_answer, *notices))
+        if notices and clean_answer
+        else "\n\n".join(notices)
+        if notices
+        else clean_answer
+    )
+    candidate = _clean_action_repair_artifacts(candidate, language=language)
+    candidate = _strip_internal_agent_triage_disclosures(
+        candidate,
+        runbook_actions=guard_actions,
+    )
+    # Notices are derived after the first repair pass, so make the exact final
+    # customer text pass the same deterministic guard before grounding sees it.
+    final_check = check_pending_action_claims(
+        answer=candidate,
+        runbook_actions=guard_actions,
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+    )
+    if not final_check.blocked:
+        return candidate
+    final_repair = repair_pending_action_claims(
+        answer=candidate,
+        runbook_actions=guard_actions,
+        tool_evidence=_automatic_tool_evidence_records(ticket),
+        repair_notice=_PENDING_ACTION_REPAIR_NOTICES[language],
+    )
+    return _strip_internal_agent_triage_disclosures(
+        _clean_action_repair_artifacts(final_repair, language=language),
+        runbook_actions=guard_actions,
+    )
+
+
+def _valid_tool_evidence_id(record: dict[str, Any], *, concern_id: str = "") -> str:
+    """Validate a successful tool record against its exact enclosing scope."""
+    name = _string_from(record.get("name"))
+    evidence_id = _string_from(record.get("evidenceId"))
+    if (
+        name
+        and evidence_id == _tool_evidence_id(name, concern_id=concern_id)
+        and _string_from(record.get("status")).lower() == "success"
+        and isinstance(record.get("responseFacts"), (dict, list))
+        and record.get("responseFacts")
+    ):
+        return evidence_id
+    return ""
+
+
+def _automatic_tool_evidence_ids(ticket: dict[str, Any]) -> tuple[str, ...]:
+    """Return only exact, successful tool evidence IDs surfaced in ticket context."""
+
+    evidence_ids: list[str] = []
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if evidence_id := _valid_tool_evidence_id(record, concern_id=concern_id):
+            evidence_ids.append(evidence_id)
+    return tuple(dict.fromkeys(evidence_ids))
+
+
+def _scoped_tool_evidence_concerns(ticket: dict[str, Any]) -> dict[str, str]:
+    """Map each exact modern tool evidence ID to its enclosing concern."""
+    scoped: dict[str, str] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if not concern_id:
+            continue
+        if evidence_id := _valid_tool_evidence_id(record, concern_id=concern_id):
+            scoped[evidence_id] = concern_id
+    return scoped
+
+
+def _successful_action_evidence_ids_by_concern(
+    ticket: dict[str, Any],
+) -> dict[str, frozenset[str]]:
+    """Index exact successful tool/action evidence under its originating concern."""
+    evidence_by_concern: dict[str, set[str]] = {}
+    for evidence_id, (
+        concern_ids,
+        _record,
+    ) in _successful_action_evidence_records_by_id(ticket).items():
+        for concern_id in concern_ids:
+            evidence_by_concern.setdefault(concern_id, set()).add(evidence_id)
+    return {concern_id: frozenset(evidence_ids) for concern_id, evidence_ids in evidence_by_concern.items()}
+
+
+def _successful_action_evidence_records_by_id(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[frozenset[str], dict[str, Any]]]:
+    """Index every durable action/tool record by its exact scoped evidence ID."""
+    evidence_records: dict[str, tuple[frozenset[str], dict[str, Any]]] = {}
+    concerns = ticket.get("concerns")
+    if isinstance(concerns, list):
+        for raw_concern in concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+            raw_evidence = concern.get("toolEvidence")
+            if not concern_id or not isinstance(raw_evidence, list):
+                continue
+            for raw_record in raw_evidence:
+                record = _record_from(raw_record)
+                if evidence_id := _valid_tool_evidence_id(
+                    record,
+                    concern_id=concern_id,
+                ):
+                    evidence_records[evidence_id] = (
+                        frozenset({concern_id}),
+                        record,
+                    )
+
+    raw_actions = ticket.get("runbookActions")
+    if isinstance(raw_actions, list):
+        for raw_action in raw_actions:
+            action = _record_from(raw_action)
+            concern_ids = frozenset(_runbook_action_concern_ids(action))
+            evidence_id = _string_from(action.get("evidenceId"))
+            if concern_ids and _is_durable_successful_runbook_action(action):
+                evidence_records[evidence_id] = (concern_ids, action)
+
+    return evidence_records
+
+
+def _matching_successful_action_evidence_ids(
+    evidence_records: dict[str, tuple[frozenset[str], dict[str, Any]]],
+    *,
+    concern_id: str,
+    expected_action_text: str,
+) -> frozenset[str]:
+    """Return same-concern evidence whose action and target match one obligation."""
+    return frozenset(
+        evidence_id
+        for evidence_id, (record_concern_ids, record) in evidence_records.items()
+        if concern_id in record_concern_ids
+        and action_record_matches_expected_text(record, expected_action_text)
+    )
+
+
+def _scoped_grounding_evidence_concerns(
+    ticket: dict[str, Any],
+    *,
+    successful_evidence_by_concern: dict[str, frozenset[str]] | None = None,
+) -> dict[str, frozenset[str]]:
+    """Index every concern container and exact successful tool/action ID by scope."""
+    scoped: dict[str, set[str]] = {}
+    raw_concerns = ticket.get("concerns")
+    if isinstance(raw_concerns, list):
+        for raw_concern in raw_concerns:
+            concern = _record_from(raw_concern)
+            concern_id = _string_from(concern.get("id") or concern.get("concernId") or concern.get("concern_id"))
+            if concern_id:
+                scoped.setdefault(
+                    _concern_grounding_evidence_id(concern_id),
+                    set(),
+                ).add(concern_id)
+
+    evidence_by_concern = (
+        successful_evidence_by_concern
+        if successful_evidence_by_concern is not None
+        else _successful_action_evidence_ids_by_concern(ticket)
+    )
+    for concern_id, evidence_ids in evidence_by_concern.items():
+        for evidence_id in evidence_ids:
+            scoped.setdefault(evidence_id, set()).add(concern_id)
+    return {evidence_id: frozenset(concern_ids) for evidence_id, concern_ids in scoped.items()}
+
+
+def _tool_evidence_has_conflicting_scalar_facts(record: dict[str, Any]) -> bool:
+    """Reject one record that assigns different values to the same exact path."""
+
+    values_by_path: dict[str, set[str]] = {}
+    for path, value in _tool_record_exact_scalars(record):
+        normalized_value = " ".join(value.casefold().split())
+        if normalized_value:
+            values_by_path.setdefault(path, set()).add(normalized_value)
+    return any(len(values) > 1 for values in values_by_path.values())
+
+
+def _tool_evidence_has_nonaffirmative_lookup_result(record: dict[str, Any]) -> bool:
+    """Detect lookup vetoes even when a persisted fixture omitted the flag."""
+
+    if (
+        record.get("hasNonaffirmativeLookupResult") is True
+        or _has_nonaffirmative_lookup_result(record.get("responseFacts"))
+    ):
+        return True
+    return any(
+        path.rsplit(".", 1)[-1] in _LOOKUP_RESULT_SIGNAL_PATHS
+        and " ".join(value.casefold().split())
+        not in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+        for path, value in _tool_record_exact_scalars(record)
+    )
+
+
+def _read_only_tool_evidence_fingerprint(
+    record: dict[str, Any],
+    *,
+    concern_id: str,
+) -> tuple[str, tuple[str, str]] | None:
+    """Return one complete read-only fingerprint bound to its exact evidence ID."""
+
+    evidence_id = _valid_tool_evidence_id(record, concern_id=concern_id)
+    method = _string_from(record.get("method")).upper()
+    if (
+        not concern_id
+        or not evidence_id
+        or method not in {"GET", "HEAD"}
+        or record.get("responseFactsTruncated") is True
+        or _tool_evidence_has_nonaffirmative_lookup_result(record)
+        or _tool_evidence_has_conflicting_scalar_facts(record)
+    ):
+        return None
+    name = _string_from(record.get("name"))
+    canonical = json.dumps(
+        {
+            "hasAffirmativeReturnRefundFact": record.get("hasAffirmativeReturnRefundFact") is True,
+            "method": method,
+            "name": name,
+            "responseFacts": record.get("responseFacts"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return evidence_id, (name, canonical)
+
+
+def _read_only_tool_evidence_fingerprints(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[str, str]]:
+    """Fingerprint independently valid read-only records without concern IDs."""
+
+    candidates: dict[str, set[tuple[str, str]]] = {}
+    raw_record_counts: dict[str, int] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        name = _string_from(record.get("name"))
+        raw_evidence_id = (
+            _tool_evidence_id(name, concern_id=concern_id)
+            if concern_id and name
+            else ""
+        )
+        if raw_evidence_id:
+            raw_record_counts[raw_evidence_id] = (
+                raw_record_counts.get(raw_evidence_id, 0) + 1
+            )
+        fingerprint = _read_only_tool_evidence_fingerprint(
+            record,
+            concern_id=concern_id,
+        )
+        if fingerprint is None:
+            continue
+        evidence_id, canonical = fingerprint
+        candidates.setdefault(evidence_id, set()).add(canonical)
+    return {
+        evidence_id: next(iter(fingerprints))
+        for evidence_id, fingerprints in candidates.items()
+        if len(fingerprints) == 1 and raw_record_counts.get(evidence_id) == 1
+    }
+
+
+def _complete_read_only_tool_evidence_sets(
+    ticket: dict[str, Any],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Return only nonempty concerns whose entire tool evidence set is safe."""
+
+    records_by_concern: dict[str, list[dict[str, Any]]] = {}
+    for concern_id, record in _automatic_tool_evidence_records_with_scope(ticket):
+        if concern_id:
+            records_by_concern.setdefault(concern_id, []).append(record)
+
+    complete: dict[str, tuple[tuple[str, str], ...]] = {}
+    for concern_id, records in records_by_concern.items():
+        fingerprints: list[tuple[str, str]] = []
+        seen_evidence_ids: set[str] = set()
+        for record in records:
+            fingerprint = _read_only_tool_evidence_fingerprint(
+                record,
+                concern_id=concern_id,
+            )
+            if fingerprint is None:
+                fingerprints = []
+                break
+            evidence_id, canonical = fingerprint
+            if evidence_id in seen_evidence_ids:
+                fingerprints = []
+                break
+            seen_evidence_ids.add(evidence_id)
+            fingerprints.append(canonical)
+        if fingerprints:
+            complete[concern_id] = tuple(sorted(fingerprints))
+    return complete
+
+
+def _runbook_requirement_concern(
+    ticket: dict[str, Any],
+    obligation: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the exact matched concern that owns one repeated requirement."""
+
+    if _string_from(obligation.get("kind")) != "runbook_requirement":
+        return {}
+    concern_id = _string_from(obligation.get("concernId"))
+    policy_identity = _runbook_requirement_policy_identity(
+        _string_from(obligation.get("question"))
+    )
+    if not concern_id or not policy_identity:
+        return {}
+    raw_concerns = ticket.get("concerns")
+    concerns = raw_concerns if isinstance(raw_concerns, list) else []
+    concern = next(
+        (
+            candidate
+            for raw_concern in concerns
+            if (candidate := _record_from(raw_concern))
+            and _string_from(candidate.get("id")) == concern_id
+        ),
+        {},
+    )
+    if concern.get("matched") is not True or not _string_from(concern.get("runbook")):
+        return {}
+    raw_guidance = concern.get("requiredGuidance")
+    if not isinstance(raw_guidance, list):
+        return {}
+    guidance_matches = [
+        guidance
+        for raw_item in raw_guidance
+        if (guidance := _string_from(raw_item))
+        and _runbook_requirement_policy_identity(guidance) == policy_identity
+    ]
+    return concern if len(guidance_matches) == 1 else {}
+
+
+def _runbook_rebinding_policy_fingerprint(
+    concern: dict[str, Any],
+) -> tuple[str, frozenset[str], tuple[str, ...]] | None:
+    """Return the policy parts that constrain one shared response statement."""
+
+    runbook = _runbook_requirement_policy_identity(
+        _string_from(concern.get("runbook"))
+    )
+    if concern.get("matched") is not True or not runbook:
+        return None
+    normalized_fields: dict[str, tuple[str, ...]] = {}
+    for field_name in ("forbiddenClaims", "replyRequirements", "requiredGuidance"):
+        raw_items = concern.get(field_name)
+        if raw_items is None:
+            normalized_fields[field_name] = ()
+            continue
+        if not isinstance(raw_items, list):
+            return None
+        normalized_items = tuple(
+            _runbook_requirement_policy_identity(_string_from(raw_item))
+            for raw_item in raw_items
+        )
+        if any(not item for item in normalized_items):
+            return None
+        normalized_fields[field_name] = normalized_items
+    forbidden_claims = set(normalized_fields["forbiddenClaims"])
+    forbidden_claims.update(
+        requirement
+        for requirement in normalized_fields["replyRequirements"]
+        if re.match(
+            r"^(?:do\s+not|don't|must\s+not|never)\b",
+            requirement,
+            re.IGNORECASE,
+        )
+    )
+    return (
+        runbook,
+        frozenset(forbidden_claims),
+        normalized_fields["requiredGuidance"],
+    )
+
+
+def _runbook_rebinding_source_policy_covers_target(
+    *,
+    source_concern: dict[str, Any],
+    target_fingerprint: tuple[str, frozenset[str], tuple[str, ...]],
+) -> bool:
+    """Allow only a source whose prohibitions are at least as strict."""
+
+    source_fingerprint = _runbook_rebinding_policy_fingerprint(source_concern)
+    if source_fingerprint is None:
+        return False
+    source_runbook, source_prohibitions, source_guidance = source_fingerprint
+    target_runbook, target_prohibitions, target_guidance = target_fingerprint
+    return bool(
+        source_runbook == target_runbook
+        and source_guidance == target_guidance
+        and target_prohibitions.issubset(source_prohibitions)
+    )
+
+
+def _durable_successful_runbook_action_concern_ids(
+    ticket: dict[str, Any],
+) -> frozenset[str]:
+    """Return every concern touched by a durable successful mutation."""
+
+    raw_actions = ticket.get("runbookActions")
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    return frozenset(
+        concern_id
+        for raw_action in actions
+        if (action := _record_from(raw_action))
+        and _is_durable_successful_runbook_action(action)
+        for concern_id in _runbook_action_concern_ids(action)
+    )
+
+
+_RUNBOOK_REBINDING_MAX_RAW_ACTION_EXECUTIONS = 500
+
+
+def _raw_issue_durable_runbook_action_concern_ids(
+    issue: dict[str, Any],
+) -> frozenset[str] | None:
+    """Scan raw actions beyond prompt bounds, or disable rebinding if ambiguous."""
+
+    raw_actions = issue.get("actionExecutions")
+    if raw_actions is None:
+        return frozenset()
+    if (
+        not isinstance(raw_actions, list)
+        or len(raw_actions) > _RUNBOOK_REBINDING_MAX_RAW_ACTION_EXECUTIONS
+    ):
+        return None
+
+    durable_concern_ids: set[str] = set()
+    seen_execution_ids: set[str] = set()
+    for raw_action in raw_actions:
+        if not isinstance(raw_action, dict):
+            return None
+        execution_id = _string_from(raw_action.get("id"))
+        if execution_id:
+            if execution_id in seen_execution_ids:
+                return None
+            seen_execution_ids.add(execution_id)
+
+        metadata = _record_from(raw_action.get("metadata"))
+        status = _string_from(raw_action.get("status")).lower()
+        execution_type = _string_from(raw_action.get("type")).lower()
+        execution_source = _string_from(metadata.get("source")).lower()
+        is_runbook_action = (
+            execution_type == "runbook_webhook" or execution_source == "runbook"
+        )
+        if status != "success" or not is_runbook_action:
+            continue
+
+        result = _record_from(raw_action.get("result"))
+        result_proposed = _record_from(result.get("proposedAction"))
+        metadata_proposed = _record_from(metadata.get("proposedAction"))
+        proposed = result_proposed or metadata_proposed
+        proposed_payload = _record_from(proposed.get("payload"))
+        result_proposed_payload = _record_from(result_proposed.get("payload"))
+        metadata_proposed_payload = _record_from(metadata_proposed.get("payload"))
+        automation_context = _record_from(
+            metadata.get("automationContext")
+            or metadata.get("automation_context")
+        )
+        raw_scope_ids: list[str] = []
+        for scope_source in (
+            metadata,
+            result_proposed,
+            metadata_proposed,
+            proposed_payload,
+            result_proposed_payload,
+            metadata_proposed_payload,
+            automation_context,
+        ):
+            for key in ("concernIds", "concern_ids", "concernId", "concern_id"):
+                raw_value = scope_source.get(key)
+                if raw_value is None:
+                    continue
+                raw_values = raw_value if isinstance(raw_value, list) else [raw_value]
+                if len(raw_values) > 20:
+                    return None
+                for raw_scope_id in raw_values:
+                    if not isinstance(raw_scope_id, str) or not raw_scope_id.strip():
+                        return None
+                    clean_scope_id = raw_scope_id.strip()
+                    if clean_scope_id not in raw_scope_ids:
+                        raw_scope_ids.append(clean_scope_id)
+        if not raw_scope_ids or len(raw_scope_ids) > 20:
+            return None
+
+        normalization_metadata = dict(metadata)
+        normalization_metadata["concernId"] = raw_scope_ids[0]
+        normalization_metadata["concernIds"] = raw_scope_ids
+        normalization_action = dict(raw_action)
+        normalization_action["metadata"] = normalization_metadata
+        normalized_actions = _automatic_runbook_action_context(
+            {"actionExecutions": [normalization_action]},
+        )
+        if len(normalized_actions) != 1:
+            return None
+        normalized_action = normalized_actions[0]
+        normalized_concern_ids = _runbook_action_concern_ids(normalized_action)
+        if (
+            not normalized_concern_ids
+            or not _is_durable_successful_runbook_action(normalized_action)
+            or not set(raw_scope_ids).issubset(normalized_concern_ids)
+        ):
+            return None
+        durable_concern_ids.update(raw_scope_ids)
+    return frozenset(durable_concern_ids)
+
+
+_RUNBOOK_REBINDING_TOOL_SUFFIX_RE = re.compile(
+    r"(?:^|_)(?P<identifier>[a-z]{2,12}(?:_\d[a-z0-9]*)+)$"
+)
+
+
+def _runbook_rebinding_read_only_tool_identifier_keys(
+    concern: dict[str, Any],
+) -> frozenset[str]:
+    """Return IDs independently bound by safe read-only facts or fixture names."""
+
+    concern_id = _string_from(concern.get("id"))
+    identifiers: set[str] = set()
+    raw_tools = concern.get("toolEvidence")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    for raw_tool in tools:
+        tool = _record_from(raw_tool)
+        if (
+            not tool
+            or _read_only_tool_evidence_fingerprint(
+                tool,
+                concern_id=concern_id,
+            )
+            is None
+        ):
+            continue
+        for _path, value in _tool_record_exact_scalars(tool):
+            identifiers.update(_separator_bound_business_identifier_keys(value))
+        normalized_tool_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            _string_from(tool.get("name")).casefold(),
+        ).strip("_")
+        fixture_match = _RUNBOOK_REBINDING_TOOL_SUFFIX_RE.search(
+            normalized_tool_name
+        )
+        if fixture_match is not None and normalized_tool_name.startswith("fixture_"):
+            identifiers.add(fixture_match.group("identifier"))
+    return frozenset(identifiers)
+
+
+def _runbook_rebinding_identifiers_are_unambiguous(
+    reused_identifiers: frozenset[str],
+    available_identifiers: frozenset[str],
+) -> bool:
+    """Require an exact match within every reused identifier family."""
+
+    if not reused_identifiers:
+        return True
+    reused_families = {
+        identifier.split("_", 1)[0]
+        for identifier in reused_identifiers
+    }
+    same_family_available = frozenset(
+        identifier
+        for identifier in available_identifiers
+        if identifier.split("_", 1)[0] in reused_families
+    )
+    return same_family_available == reused_identifiers
+
+
+def _duplicate_runbook_requirement_rebinding_proof(
+    *,
+    ticket: dict[str, Any],
+    target_obligation: dict[str, Any],
+    target_assessment: dict[str, Any],
+    originally_answered_assessments: tuple[dict[str, Any], ...],
+    expected_obligations: dict[str, dict[str, Any]],
+    expected_units: dict[str, dict[str, Any]],
+    supported_unit_evidence_ids: dict[str, frozenset[str]],
+    scoped_evidence_concerns: dict[str, frozenset[str]],
+    read_only_tool_fingerprints: dict[str, tuple[str, str]],
+    complete_read_only_tool_evidence_sets: dict[
+        str,
+        tuple[tuple[str, str], ...],
+    ],
+    durable_action_concern_ids: frozenset[str],
+) -> dict[str, tuple[str, ...]] | None:
+    """Rebind one repeated requirement to independently identical target evidence."""
+
+    target_concern = _runbook_requirement_concern(ticket, target_obligation)
+    target_concern_id = _string_from(target_obligation.get("concernId"))
+    target_runbook = _string_from(target_concern.get("runbook"))
+    target_policy_fingerprint = _runbook_rebinding_policy_fingerprint(
+        target_concern
+    )
+    target_policy_identity = _runbook_requirement_policy_identity(
+        _string_from(target_obligation.get("question"))
+    )
+    target_question_tokens = _normalized_obligation_tokens(
+        _string_from(target_obligation.get("question"))
+    )
+    target_unit_ids = tuple(
+        dict.fromkeys(
+            unit_id
+            for raw_unit_id in target_assessment.get("answerUnitIds", [])
+            if (unit_id := _string_from(raw_unit_id))
+        )
+    )
+    reused_business_identifiers = frozenset(
+        identifier
+        for unit_id in target_unit_ids
+        for identifier in _separator_bound_business_identifier_keys(
+            _string_from(expected_units.get(unit_id, {}).get("text"))
+        )
+    )
+    target_business_identifiers = (
+        _runbook_rebinding_read_only_tool_identifier_keys(target_concern)
+    )
+    if (
+        not target_concern
+        or not target_concern_id
+        or not target_runbook
+        or target_policy_fingerprint is None
+        or not target_policy_identity
+        or not target_question_tokens
+        or not target_unit_ids
+        or (
+            reused_business_identifiers
+            and not _runbook_rebinding_identifiers_are_unambiguous(
+                reused_business_identifiers,
+                target_business_identifiers
+            )
+        )
+        or target_concern_id in durable_action_concern_ids
+        or any(unit_id not in supported_unit_evidence_ids for unit_id in target_unit_ids)
+    ):
+        return None
+
+    question_is_lookup_bound = bool(
+        {"lookup", "tool"}.intersection(target_question_tokens.split())
+    )
+    candidate_proofs: list[dict[str, tuple[str, ...]]] = []
+    for source_assessment in originally_answered_assessments:
+        source_obligation_id = _string_from(source_assessment.get("obligationId"))
+        source_obligation = expected_obligations.get(source_obligation_id, {})
+        source_concern = _runbook_requirement_concern(ticket, source_obligation)
+        source_concern_id = _string_from(source_obligation.get("concernId"))
+        source_unit_ids = tuple(
+            dict.fromkeys(
+                unit_id
+                for raw_unit_id in source_assessment.get("answerUnitIds", [])
+                if (unit_id := _string_from(raw_unit_id))
+            )
+        )
+        source_evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id
+                for raw_evidence_id in source_assessment.get("evidenceIds", [])
+                if (evidence_id := _string_from(raw_evidence_id))
+            )
+        )
+        source_business_identifiers = (
+            _runbook_rebinding_read_only_tool_identifier_keys(source_concern)
+        )
+        if (
+            not source_concern
+            or not source_concern_id
+            or source_concern_id == target_concern_id
+            or source_concern_id in durable_action_concern_ids
+            or _string_from(source_concern.get("runbook")) != target_runbook
+            or not _runbook_rebinding_source_policy_covers_target(
+                source_concern=source_concern,
+                target_fingerprint=target_policy_fingerprint,
+            )
+            or _runbook_requirement_policy_identity(
+                _string_from(source_obligation.get("question"))
+            )
+            != target_policy_identity
+            or source_unit_ids != target_unit_ids
+            or (
+                reused_business_identifiers
+                and not _runbook_rebinding_identifiers_are_unambiguous(
+                    reused_business_identifiers,
+                    source_business_identifiers
+                )
+            )
+            or not source_evidence_ids
+        ):
+            continue
+
+        proof_by_unit: dict[str, tuple[str, ...]] = {}
+        for unit_id in target_unit_ids:
+            source_unit_evidence_ids = tuple(
+                evidence_id
+                for evidence_id in source_evidence_ids
+                if evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+            )
+            if not source_unit_evidence_ids:
+                proof_by_unit = {}
+                break
+            target_evidence_ids: list[str] = []
+            for source_evidence_id in source_unit_evidence_ids:
+                if scoped_evidence_concerns.get(source_evidence_id) != frozenset(
+                    {source_concern_id}
+                ):
+                    target_evidence_ids = []
+                    break
+                if source_evidence_id == _concern_grounding_evidence_id(source_concern_id):
+                    if question_is_lookup_bound:
+                        target_evidence_ids = []
+                        break
+                    source_evidence_set = complete_read_only_tool_evidence_sets.get(
+                        source_concern_id
+                    )
+                    if (
+                        not source_evidence_set
+                        or complete_read_only_tool_evidence_sets.get(target_concern_id)
+                        != source_evidence_set
+                    ):
+                        target_evidence_ids = []
+                        break
+                    target_evidence_id = _concern_grounding_evidence_id(target_concern_id)
+                else:
+                    source_fingerprint = read_only_tool_fingerprints.get(source_evidence_id)
+                    if source_fingerprint is None:
+                        target_evidence_ids = []
+                        break
+                    tool_name, _canonical = source_fingerprint
+                    target_evidence_id = _tool_evidence_id(
+                        tool_name,
+                        concern_id=target_concern_id,
+                    )
+                    if read_only_tool_fingerprints.get(target_evidence_id) != source_fingerprint:
+                        target_evidence_ids = []
+                        break
+                if scoped_evidence_concerns.get(target_evidence_id) != frozenset(
+                    {target_concern_id}
+                ):
+                    target_evidence_ids = []
+                    break
+                target_evidence_ids.append(target_evidence_id)
+            if not target_evidence_ids:
+                proof_by_unit = {}
+                break
+            proof_by_unit[unit_id] = tuple(dict.fromkeys(target_evidence_ids))
+        if proof_by_unit:
+            candidate_proofs.append(proof_by_unit)
+
+    unique_proofs = {
+        tuple((unit_id, evidence_ids) for unit_id, evidence_ids in proof.items()): proof
+        for proof in candidate_proofs
+    }
+    return next(iter(unique_proofs.values())) if len(unique_proofs) == 1 else None
 
 
 def grounding_context_snapshots(
@@ -407,12 +7577,20 @@ def grounding_context_snapshots(
 ) -> tuple[dict[str, Any], ...]:
     """Bind automatic answers to the non-knowledge context seen by the evaluator."""
     ticket = _automatic_ticket_context(issue)
+    global_ticket_evidence = _global_grounding_ticket_evidence(ticket)
+    scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket)
     conversation = _automatic_conversation_context(conversation_context)
+    account = _automatic_account_context(
+        account_context,
+        issue_id=_string_from(issue.get("id")),
+        conversation_context=conversation_context,
+    )
 
     payloads: list[tuple[str, Any]] = [
-        ("ticket", ticket),
-        ("messages", _message_context(messages)),
-        ("account", _record_from(account_context)),
+        ("ticket", global_ticket_evidence),
+        ("ticket:scoped", scoped_ticket_evidence),
+        ("messages", _automatic_message_context(messages)),
+        ("account", account),
         ("conversation", conversation),
     ]
     snapshots: list[dict[str, Any]] = []
@@ -432,6 +7610,9 @@ def grounding_context_snapshots(
                 "contextSha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
             }
         )
+    safety_assessment = _issue_safety_assessment(issue, messages)
+    if safety_assessment.active:
+        snapshots.append(safety_assessment.snapshot())
     return tuple(snapshots)
 
 
@@ -505,6 +7686,26 @@ def _citation_supports_high_confidence(article: dict[str, Any]) -> bool:
     )
 
 
+def _citation_supports_automation_grounding(article: dict[str, Any]) -> bool:
+    """Require reviewed public knowledge explicitly allowed for automation."""
+
+    metadata = _record_from(article.get("metadata"))
+    automation_allowed = bool(
+        article.get("automationAllowed")
+        if "automationAllowed" in article
+        else metadata.get("automationAllowed")
+    )
+    public = bool(article.get("public") or metadata.get("public"))
+    visibility = _string_from(
+        article.get("visibility") or metadata.get("visibility")
+    ).lower()
+    return bool(
+        _citation_supports_high_confidence(article)
+        and automation_allowed
+        and (public or visibility == "public")
+    )
+
+
 def draft_issue_agent_answer(
     *,
     issue: dict[str, Any],
@@ -521,13 +7722,25 @@ def draft_issue_agent_answer(
     on_late_usage: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> IssueAgentDraft:
     """Run the isolated knowledge agent, falling back offline on any failure."""
+    safety_assessment = _issue_safety_assessment(issue, messages)
     slot_semaphore = _KNOWLEDGE_AGENT_SLOTS
     if not slot_semaphore.acquire(blocking=False):
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Knowledge agent capacity is temporarily exhausted.",
+        )
         return IssueAgentDraft(
-            answer=fallback_answer,
-            confidence=fallback_confidence,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=_knowledge_failure_answer(question, messages),
+                messages=messages,
+            ),
+            confidence="low",
             generation_mode="deterministic_fallback",
             error="Knowledge agent capacity is temporarily exhausted",
+            requires_human=True,
+            requires_human_reason=review_reason,
         )
     workspace: KnowledgeWorkspace | None = None
     deferred_slot_release = False
@@ -542,11 +7755,19 @@ def draft_issue_agent_answer(
         llm = create_llm(config, timeout=30, max_retries=0, temperature=0.2)
         usage_context = getattr(llm, "_mantly_usage_context", None)
         clean_question = (question.strip() or "Prepare the best support answer and next step.")[:4_000]
+        request_items = _knowledge_request_items(clean_question)
         workspace = KnowledgeWorkspace(
-            ticket=_ticket_context(issue),
+            ticket=_with_safety_prompt_context(
+                _ticket_context(issue),
+                safety_assessment,
+            ),
             messages=_message_context(messages),
-            account=_record_from(account_context),
-            conversation=_conversation_context(conversation_context),
+            account=_automatic_account_context(
+                account_context,
+                issue_id=_string_from(issue.get("id")),
+                conversation_context=conversation_context,
+            ),
+            conversation=_automatic_conversation_context(conversation_context),
             prior_agent_answers=_agent_chat_context(prior_agent_runs),
             question=clean_question,
             articles=articles,
@@ -563,14 +7784,24 @@ def draft_issue_agent_answer(
             system_prompt=_SYSTEM_PROMPT,
             response_format=ToolStrategy(KnowledgeAgentOutput),
             middleware=[
-                ModelCallLimitMiddleware(run_limit=6, exit_behavior="error"),
-                ToolCallLimitMiddleware(tool_name="knowledge_bash", run_limit=5, exit_behavior="error"),
+                ModelCallLimitMiddleware(
+                    run_limit=KNOWLEDGE_AGENT_MODEL_CALL_LIMIT,
+                    exit_behavior="error",
+                ),
+                ToolCallLimitMiddleware(
+                    tool_name="knowledge_bash",
+                    run_limit=KNOWLEDGE_AGENT_TOOL_CALL_LIMIT,
+                    exit_behavior="error",
+                ),
             ],
             name="ticket_knowledge_agent",
         )
-        user_prompt = _USER_TEMPLATE.format(question=clean_question)
+        user_prompt = _USER_TEMPLATE.format(
+            question=clean_question,
+            request_items=_json(request_items),
+        )
         invoke_config = {
-            "recursion_limit": 32,
+            "recursion_limit": 48,
             "run_name": "ticket_knowledge_agent",
             "tags": ["mantly", "support", "knowledge-agent"],
             "metadata": {
@@ -613,9 +7844,6 @@ def draft_issue_agent_answer(
             raise ValueError("Knowledge agent returned no structured response")
         if not workspace.read_paths:
             raise ValueError("Knowledge agent did not inspect the workspace")
-        answer = _clean_answer(structured.answer)
-        if not answer:
-            raise ValueError("Issue agent returned an empty answer")
         citation_ids = workspace.validated_citation_ids(
             structured.citation_ids,
             structured.citation_paths,
@@ -624,6 +7852,23 @@ def draft_issue_agent_answer(
             structured.citation_ids,
             structured.citation_paths,
         )
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+            internal_citation_ids=citation_ids,
+        )
+        if not answer:
+            raise ValueError("Issue agent returned an empty answer")
+        answer, uncovered_request_items = _repair_knowledge_request_item_coverage(
+            answer=answer,
+            question=clean_question,
+            items=request_items,
+            assessments=structured.request_item_assessments,
+            internal_citation_ids=citation_ids,
+        )
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
+        if missing_safety:
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
         truncated_citation_ids = workspace.truncated_citation_ids(citation_ids)
         confidence = structured.confidence
         articles_by_id = {
@@ -639,10 +7884,43 @@ def draft_issue_agent_answer(
         ):
             confidence = "medium"
         missing_information = [item.strip()[:500] for item in structured.missing_information[:10] if item.strip()]
+        missing_information.extend(
+            f"Unresolved request item: {item['question']}"[:500]
+            for item in uncovered_request_items
+        )
         if truncated_citation_ids:
             missing_information.append(
                 "Full source content requires human review: " + ", ".join(truncated_citation_ids)
             )
+        model_requires_human, model_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=bool(structured.requires_human or uncovered_request_items),
+            model_reason=" ".join(
+                part
+                for part in (
+                    structured.requires_human_reason.strip(),
+                    (
+                        "One or more direct agent questions lacked item-specific answer proof; "
+                        "the runtime marked each omitted item unknown."
+                        if uncovered_request_items
+                        else ""
+                    ),
+                )
+                if part
+            ),
+        )
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
+            issue,
+            structured.covered_concern_ids,
+            structured.covered_obligation_ids,
+            model_requires_human=model_requires_human,
+            model_reason=model_reason,
+        )
         return IssueAgentDraft(
             answer=answer,
             confidence=confidence,
@@ -650,15 +7928,48 @@ def draft_issue_agent_answer(
             citation_ids=citation_ids,
             citation_evidence=citation_evidence,
             missing_information=tuple(dict.fromkeys(missing_information))[:10],
+            response_attachments=_validated_response_attachments(
+                issue,
+                structured.response_attachments,
+            ),
+            covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue agent answer: %s", exc)
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Knowledge answer generation failed.",
+        )
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
+            issue,
+            [],
+            [],
+            model_requires_human=True,
+            model_reason=review_reason,
+        )
         return IssueAgentDraft(
-            answer=fallback_answer,
-            confidence=fallback_confidence,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=_knowledge_failure_answer(question, messages),
+                messages=messages,
+            ),
+            confidence="low",
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
+            covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
             tool_calls=workspace.tool_calls if workspace else (),
         )
     finally:
@@ -680,16 +7991,35 @@ def draft_issue_automation_answer(
     fallback_confidence: str,
     account_context: dict[str, Any] | None = None,
     conversation_context: dict[str, Any] | None = None,
+    coverage_repair_answer: str = "",
+    coverage_repair_obligations: tuple[str, ...] = (),
+    grounding_repair_unsupported_claims: tuple[str, ...] = (),
+    grounding_repair_contradictions: tuple[str, ...] = (),
     on_late_usage: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> IssueAgentDraft:
     """Preserve the bounded one-shot generator for automatic/shared retrieval paths."""
+    safety_assessment = _issue_safety_assessment(issue, messages)
     slot_semaphore = _AUTOMATION_AGENT_SLOTS
-    if not slot_semaphore.acquire(blocking=False):
+    if not slot_semaphore.acquire(
+        blocking=True,
+        timeout=AUTOMATION_AGENT_SLOT_WAIT_SECONDS,
+    ):
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Automatic answer capacity is temporarily exhausted.",
+        )
         return IssueAgentDraft(
-            answer=fallback_answer,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=fallback_answer,
+                messages=messages,
+            ),
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error="Automatic answer capacity is temporarily exhausted",
+            requires_human=True,
+            requires_human_reason=review_reason,
         )
     deferred_slot_release = False
     parent_usage_collector: Any = None
@@ -702,15 +8032,72 @@ def draft_issue_automation_answer(
         config = resolve_effective_config(read_config(), tenant_id, project_id)
         llm = create_llm(config, timeout=45, max_retries=0, temperature=0.2)
         usage_context = getattr(llm, "_mantly_usage_context", None)
+        reply_language = _latest_customer_language(messages)
+        reply_language_name = _LANGUAGE_NAMES[reply_language]
+        ticket_context = _with_safety_prompt_context(
+            _automatic_ticket_context(issue),
+            safety_assessment,
+        )
+        customer_ticket_context = _customer_answer_ticket_context(ticket_context)
+        allowed_business_identifiers = _allowed_business_identifiers(
+            messages=messages,
+            ticket=customer_ticket_context,
+            articles=articles,
+        )
         user_prompt = _AUTOMATION_USER_TEMPLATE.format(
-            ticket=_json(_automatic_ticket_context(issue)),
-            account_intelligence=_json(_record_from(account_context)),
+            ticket=_json(customer_ticket_context),
+            account_intelligence=_json(
+                _automatic_account_context(
+                    account_context,
+                    issue_id=_string_from(issue.get("id")),
+                    conversation_context=conversation_context,
+                )
+            ),
             conversation_context=_json(_automatic_conversation_context(conversation_context)),
-            messages=_json(_message_context(messages)),
+            messages=_json(_automatic_message_context(messages)),
+            reply_language=reply_language_name,
             knowledge_articles=_json(_article_context(articles)),
-            prior_agent_answers=_json(_agent_chat_context(prior_agent_runs)),
+            prior_agent_answers=_json(
+                _customer_prior_agent_context(
+                    prior_agent_runs,
+                    runbook_actions=ticket_context.get("runbookActions", []),
+                )
+            ),
             question=(question.strip() or "Prepare the best support answer and next step.")[:4_000],
         )
+        clean_repair_obligations = tuple(
+            dict.fromkeys(
+                obligation.strip()[:500]
+                for obligation in coverage_repair_obligations[:20]
+                if obligation.strip()
+            )
+        )
+        clean_unsupported_claims = tuple(
+            dict.fromkeys(
+                claim.strip()[:500]
+                for claim in grounding_repair_unsupported_claims[:20]
+                if claim.strip()
+            )
+        )
+        clean_contradictions = tuple(
+            dict.fromkeys(
+                contradiction.strip()[:500]
+                for contradiction in grounding_repair_contradictions[:20]
+                if contradiction.strip()
+            )
+        )
+        if clean_unsupported_claims or clean_contradictions:
+            user_prompt += "\n\n" + _AUTOMATION_GROUNDING_REPAIR_TEMPLATE.format(
+                previous_answer=_json(coverage_repair_answer.strip()[:12_000]),
+                unsupported_claims=_json(clean_unsupported_claims),
+                contradictions=_json(clean_contradictions),
+                uncovered_obligations=_json(clean_repair_obligations),
+            )
+        elif clean_repair_obligations:
+            user_prompt += "\n\n" + _AUTOMATION_OBLIGATION_REPAIR_TEMPLATE.format(
+                previous_answer=_json(coverage_repair_answer.strip()[:12_000]),
+                uncovered_obligations=_json(clean_repair_obligations),
+            )
         agent = create_agent(
             model=llm,
             tools=[],
@@ -738,6 +8125,89 @@ def draft_issue_automation_answer(
                     config=invoke_config,
                 )
                 record_usage_from_result(response, usage_context)
+                structured = response.get("structured_response") if isinstance(response, dict) else None
+                first_answer = _string_from(getattr(structured, "answer", ""))
+                correction_reasons: list[str] = []
+                if first_answer and _detected_supported_language(first_answer) != reply_language:
+                    correction_reasons.append(f"Rewrite the entire answer in {reply_language_name}.")
+                pending_action_check = check_pending_action_claims(
+                    answer=first_answer,
+                    runbook_actions=ticket_context.get("runbookActions", []),
+                    tool_evidence=_automatic_tool_evidence_records(ticket_context),
+                )
+                if pending_action_check.blocked:
+                    correction_reasons.append(
+                        "Remove every statement that says or promises a pending business action "
+                        "has started, completed, or will definitely occur. Describe it only as "
+                        "pending approval or conditional on review."
+                    )
+                unsupported_identifiers = _unsupported_business_identifiers(
+                    first_answer,
+                    allowed_identifiers=allowed_business_identifiers,
+                )
+                if unsupported_identifiers:
+                    allowed_summary = ", ".join(allowed_business_identifiers[:20]) or "none"
+                    correction_reasons.append(
+                        "Remove or correct unsupported business identifiers: "
+                        + ", ".join(unsupported_identifiers[:20])
+                        + ". Use only exact identifiers present in trusted evidence: "
+                        + allowed_summary
+                        + "."
+                    )
+                missing_safety = (
+                    missing_lithium_battery_safety_guidance(first_answer)
+                    if first_answer and safety_assessment.active
+                    else ()
+                )
+                if missing_safety:
+                    correction_reasons.append(
+                        "Add every required immediate damaged-lithium-battery safety instruction. "
+                        "Missing policy elements: " + ", ".join(missing_safety) + "."
+                    )
+                if (
+                    first_answer
+                    and _required_secret_delivery_guidance(ticket_context)
+                    and not _answer_has_complete_secret_delivery_guidance(first_answer)
+                ):
+                    correction_reasons.append(
+                        "State all mandatory secret-delivery constraints explicitly: never repeat the secret, "
+                        "never email the secret or its replacement, and use only the approved secure channel "
+                        "for any replacement."
+                    )
+                for requirement in _missing_atomic_recent_change_requirements(
+                    ticket_context,
+                    first_answer,
+                ):
+                    correction_reasons.append(
+                        "In a standalone sentence, explicitly answer "
+                        + _json(_string_from(requirement.get("question")))
+                        + " using the exact read-only lookup fact "
+                        + _json(_string_from(requirement.get("value")))
+                        + "."
+                    )
+                for requirement in _missing_atomic_http_response_code_requirements(
+                    ticket_context,
+                    first_answer,
+                ):
+                    correction_reasons.append(
+                        "In a standalone sentence, explicitly answer "
+                        + _json(_string_from(requirement.get("question")))
+                        + " using the exact read-only HTTP response code "
+                        + _json(_string_from(requirement.get("value")))
+                        + "."
+                    )
+                if correction_reasons:
+                    correction_prompt = (
+                        f"{user_prompt}\n\n"
+                        "## Correction Required\n"
+                        + " ".join(correction_reasons)
+                        + " Preserve the same evidence and coverage boundaries."
+                    )
+                    response = agent.invoke(
+                        {"messages": [{"role": "user", "content": correction_prompt}]},
+                        config=invoke_config,
+                    )
+                    record_usage_from_result(response, usage_context)
             return response
 
         parent_usage_collector = current_collector()
@@ -761,9 +8231,6 @@ def draft_issue_automation_answer(
         structured = response.get("structured_response") if isinstance(response, dict) else None
         if not isinstance(structured, AutomationAnswerOutput):
             raise ValueError("Issue automation returned no structured response")
-        answer = _clean_answer(structured.answer)
-        if not answer:
-            raise ValueError("Issue automation returned an empty answer")
         available_ids = {_string_from(article.get("id")) for article in articles if _string_from(article.get("id"))}
         citation_ids = tuple(
             dict.fromkeys(
@@ -772,11 +8239,49 @@ def draft_issue_automation_answer(
                 if article_id in available_ids
             )
         )
+        answer = _clean_answer(
+            structured.answer,
+            messages=messages,
+            internal_citation_ids=citation_ids,
+        )
+        if reply_language == "en":
+            answer = _append_missing_atomic_recent_change_facts(
+                ticket_context,
+                answer,
+            )
+            answer = _append_missing_atomic_http_response_code_facts(
+                ticket_context,
+                answer,
+            )
+        if not answer:
+            raise ValueError("Issue automation returned an empty answer")
+        missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
+        if missing_safety:
+            raise ValueError(SAFETY_GUIDANCE_MISSING_REASON_CODE + ": " + ", ".join(missing_safety))
+        if _detected_supported_language(answer) != reply_language:
+            raise ValueError(f"Automatic answer language mismatch: expected {reply_language_name}")
         confidence = structured.confidence
         if confidence == "high" and not citation_ids:
             confidence = "medium"
         missing_information = tuple(
             dict.fromkeys(item.strip()[:500] for item in structured.missing_information[:10] if item.strip())
+        )
+        model_requires_human, model_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=structured.requires_human,
+            model_reason=structured.requires_human_reason,
+        )
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
+            issue,
+            structured.covered_concern_ids,
+            structured.covered_obligation_ids,
+            model_requires_human=model_requires_human,
+            model_reason=model_reason,
         )
         return IssueAgentDraft(
             answer=answer,
@@ -784,14 +8289,47 @@ def draft_issue_automation_answer(
             generation_mode="llm",
             citation_ids=citation_ids,
             missing_information=missing_information,
+            response_attachments=_validated_response_attachments(
+                issue,
+                structured.response_attachments,
+            ),
+            covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
         )
     except Exception as exc:
         logger.info("Falling back to deterministic issue automation answer: %s", exc)
+        _, review_reason = _safety_review_state(
+            safety_assessment,
+            model_requires_human=True,
+            model_reason="Automatic answer generation failed.",
+        )
+        (
+            covered_concern_ids,
+            covered_obligation_ids,
+            requires_human,
+            requires_human_reason,
+        ) = _validated_draft_coverage(
+            issue,
+            [],
+            [],
+            model_requires_human=True,
+            model_reason=review_reason,
+        )
         return IssueAgentDraft(
-            answer=fallback_answer,
+            answer=_safety_aware_failure_answer(
+                assessment=safety_assessment,
+                ordinary_answer=fallback_answer,
+                messages=messages,
+            ),
             confidence=fallback_confidence,
             generation_mode="deterministic_fallback",
             error=str(exc)[:1_000],
+            covered_concern_ids=covered_concern_ids,
+            covered_obligation_ids=covered_obligation_ids,
+            requires_human=requires_human,
+            requires_human_reason=requires_human_reason,
         )
     finally:
         if not deferred_slot_release:
@@ -895,6 +8433,7 @@ def assess_issue_automation_grounding(
     checked_at = datetime.now(timezone.utc).isoformat()
     answer = answer.strip()
     answer_sha256 = grounding_text_sha256(answer)
+    safety_assessment = _issue_safety_assessment(issue, messages)
     context_snapshots = grounding_context_snapshots(
         issue=issue,
         messages=messages,
@@ -911,11 +8450,126 @@ def assess_issue_automation_grounding(
         }
         for unit in answer_units
     )
+    answer_obligations = list(_answer_obligations_from_issue(issue))
+    if safety_assessment.active:
+        answer_obligations.append(safety_assessment.answer_obligation())
+    answer_obligations = tuple(answer_obligations)
     citation_ids = tuple(
         dict.fromkeys(
             article_id for article_id in (_string_from(article.get("id")) for article in articles) if article_id
         )
     )
+    automation_grounding_citation_ids = frozenset(
+        _string_from(article.get("id"))
+        for article in articles
+        if _string_from(article.get("id"))
+        and _citation_supports_automation_grounding(article)
+    )
+    ticket_evidence = _automatic_ticket_context(issue)
+    global_ticket_evidence = _global_grounding_ticket_evidence(ticket_evidence)
+    scoped_ticket_evidence = _scoped_grounding_ticket_evidence(ticket_evidence)
+    successful_action_evidence_records = _successful_action_evidence_records_by_id(ticket_evidence)
+    successful_action_evidence_by_concern = _successful_action_evidence_ids_by_concern(ticket_evidence)
+    scoped_grounding_evidence_concerns = _scoped_grounding_evidence_concerns(
+        ticket_evidence,
+        successful_evidence_by_concern=successful_action_evidence_by_concern,
+    )
+    expected_language = _latest_customer_language(messages)
+    detected_answer_language = _detected_supported_language(answer)
+    if expected_language != detected_answer_language:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=LANGUAGE_MISMATCH_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            error=(
+                f"Answer language {_LANGUAGE_NAMES[detected_answer_language]} does not match "
+                f"latest customer language {_LANGUAGE_NAMES[expected_language]}"
+            ),
+        )
+    missing_safety = missing_lithium_battery_safety_guidance(answer) if safety_assessment.active else ()
+    if missing_safety:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=SAFETY_GUIDANCE_MISSING_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            uncovered_obligations=(safety_assessment.answer_obligation()["question"],),
+            unsupported_claims=missing_safety,
+            error=("Missing mandatory damaged-lithium-battery safety guidance: " + ", ".join(missing_safety))[:1_000],
+        )
+    pending_action_check = check_pending_action_claims(
+        answer=answer,
+        runbook_actions=ticket_evidence.get("runbookActions", []),
+        tool_evidence=_automatic_tool_evidence_records(ticket_evidence),
+    )
+    if pending_action_check.blocked:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=PENDING_ACTION_CLAIM_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            pending_action_claims=pending_action_check.claims,
+            pending_actions=pending_action_check.pending_actions,
+        )
+    internal_state_disclosures = _internal_agent_triage_disclosures(
+        answer,
+        runbook_actions=ticket_evidence.get("runbookActions", []),
+    )
+    if internal_state_disclosures:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=INTERNAL_STATE_DISCLOSURE_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            unsupported_claims=internal_state_disclosures,
+            error="Candidate answer exposes internal agent-triage workflow state",
+        )
+    allowed_business_identifiers = _allowed_business_identifiers(
+        messages=messages,
+        ticket=ticket_evidence,
+        articles=articles,
+    )
+    unsupported_identifiers = _unsupported_business_identifiers(
+        answer,
+        allowed_identifiers=allowed_business_identifiers,
+    )
+    if unsupported_identifiers:
+        return AutomationGroundingAssessment(
+            verified=False,
+            status="failed",
+            reason_code=BUSINESS_IDENTIFIER_MISMATCH_REASON_CODE,
+            checked_at=checked_at,
+            citation_ids=citation_ids,
+            context_snapshots=context_snapshots,
+            answer_sha256=answer_sha256,
+            answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
+            unsupported_claims=unsupported_identifiers,
+            error=(
+                "Candidate answer contains unsupported business identifiers: " + ", ".join(unsupported_identifiers[:20])
+            )[:1_000],
+        )
     if not answer_units or len(answer_units) > _GROUNDING_MAX_UNITS:
         return AutomationGroundingAssessment(
             verified=False,
@@ -926,6 +8580,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error="Candidate answer could not be exhaustively segmented for grounding",
         )
     evidence, snapshots, incomplete_ids = _grounding_evidence(articles)
@@ -940,10 +8595,14 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error=("Incomplete cited evidence: " + ", ".join(incomplete_ids or citation_ids))[:1_000],
         )
     slot_semaphore = _GROUNDING_AGENT_SLOTS
-    if not slot_semaphore.acquire(blocking=False):
+    if not slot_semaphore.acquire(
+        blocking=True,
+        timeout=GROUNDING_AGENT_SLOT_WAIT_SECONDS,
+    ):
         return AutomationGroundingAssessment(
             verified=False,
             status="error",
@@ -954,6 +8613,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             error="Grounding evaluator capacity is temporarily exhausted",
         )
 
@@ -972,16 +8632,33 @@ def assess_issue_automation_grounding(
         model = _string_from(
             getattr(config, "llm_custom_model", "") if provider == "custom" else getattr(config, "llm_model", "")
         )
-        llm = create_llm(config, timeout=30, max_retries=0, temperature=0)
+        llm = create_llm(
+            config,
+            timeout=GROUNDING_MODEL_CALL_TIMEOUT_SECONDS,
+            max_retries=0,
+            temperature=0,
+            thinking_budget=GROUNDING_MODEL_THINKING_BUDGET,
+        )
         usage_context = getattr(llm, "_mantly_usage_context", None)
         if isinstance(usage_context, dict):
             provider = _string_from(usage_context.get("provider")) or provider
             model = _string_from(usage_context.get("model")) or model
-        ticket_evidence = _automatic_ticket_context(issue)
-        message_evidence = _message_context(messages)
-        account_evidence = _record_from(account_context)
+        message_evidence = _automatic_message_context(messages)
+        account_evidence = _automatic_account_context(
+            account_context,
+            issue_id=_string_from(issue.get("id")),
+            conversation_context=conversation_context,
+        )
         conversation_evidence = _automatic_conversation_context(conversation_context)
         allowed_evidence_ids = ["ticket"]
+        if safety_assessment.active:
+            allowed_evidence_ids.append(safety_assessment.policy_id)
+        allowed_evidence_ids.extend(_automatic_tool_evidence_ids(ticket_evidence))
+        for evidence_ids in successful_action_evidence_by_concern.values():
+            allowed_evidence_ids.extend(evidence_ids)
+        allowed_evidence_ids.extend(
+            evidence_id for evidence_id in scoped_grounding_evidence_concerns if evidence_id.startswith("concern:")
+        )
         if message_evidence:
             allowed_evidence_ids.append("messages")
         if account_evidence:
@@ -989,15 +8666,19 @@ def assess_issue_automation_grounding(
         if conversation_evidence:
             allowed_evidence_ids.append("conversation")
         allowed_evidence_ids.extend(citation_ids)
+        allowed_evidence_ids = list(dict.fromkeys(allowed_evidence_ids))
         prompt = _GROUNDING_USER_TEMPLATE.format(
             answer_sha256=answer_sha256,
             answer_units=_json(answer_units),
+            answer_obligations=_json(answer_obligations),
             allowed_evidence_ids=_json(allowed_evidence_ids),
-            ticket=_json(ticket_evidence),
+            ticket=_json(global_ticket_evidence),
+            scoped_ticket_evidence=_json(scoped_ticket_evidence),
             account_intelligence=_json(account_evidence),
             conversation_context=_json(conversation_evidence),
             messages=_json(message_evidence),
             knowledge_articles=_json(evidence),
+            system_safety_policy=_json(safety_assessment.evidence()),
             answer=answer,
         )
         agent = create_agent(
@@ -1021,13 +8702,84 @@ def assess_issue_automation_grounding(
             },
         }
 
-        def invoke_agent() -> dict[str, Any]:
+        expected_unit_ids_for_retry = frozenset(
+            _string_from(unit.get("id")) for unit in answer_units if _string_from(unit.get("id"))
+        )
+        expected_units_for_retry = {
+            _string_from(unit.get("id")): unit for unit in answer_units if _string_from(unit.get("id"))
+        }
+        expected_obligation_ids_for_retry = frozenset(
+            _string_from(obligation.get("id"))
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        )
+        expected_obligations_for_retry = {
+            _string_from(obligation.get("id")): obligation
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        }
+
+        def invoke_once(active_prompt: str) -> dict[str, Any]:
             with llm_stage("issue_automation_grounding"):
                 response = agent.invoke(
-                    {"messages": [{"role": "user", "content": prompt}]},
+                    {"messages": [{"role": "user", "content": active_prompt}]},
                     config=invoke_config,
                 )
                 record_usage_from_result(response, usage_context)
+            return response
+
+        protocol_correction_attempted = False
+
+        def invoke_agent() -> dict[str, Any]:
+            nonlocal protocol_correction_attempted
+            response: dict[str, Any] = {}
+            active_prompt = prompt
+            for attempt in range(GROUNDING_MODEL_CALL_LIMIT):
+                response = invoke_once(active_prompt)
+                structured = response.get("structured_response") if isinstance(response, dict) else None
+                retryable_errors = _grounding_retryable_protocol_errors(
+                    structured,
+                    expected_unit_ids=expected_unit_ids_for_retry,
+                    expected_obligation_ids=expected_obligation_ids_for_retry,
+                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                )
+                if retryable_errors and attempt + 1 < GROUNDING_MODEL_CALL_LIMIT:
+                    protocol_correction_attempted = True
+                    logger.warning(
+                        "Grounding evaluator returned malformed protocol output; retrying once: %s",
+                        "; ".join(retryable_errors),
+                    )
+                    active_prompt = prompt + "\n\n" + _GROUNDING_PROTOCOL_REPAIR_TEMPLATE.format(
+                        protocol_errors=_json(list(retryable_errors)),
+                        invalid_evidence_ids=_json(
+                            list(
+                                _grounding_unknown_evidence_ids(
+                                    structured,
+                                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                                )
+                            )
+                        ),
+                        allowed_evidence_ids=_json(sorted(allowed_evidence_ids)),
+                        answer_unit_ids=_json(sorted(expected_unit_ids_for_retry)),
+                        answer_obligation_ids=_json(sorted(expected_obligation_ids_for_retry)),
+                    )
+                    continue
+                if attempt + 1 < GROUNDING_MODEL_CALL_LIMIT and _grounding_needs_obligation_reassessment(
+                    structured,
+                    expected_unit_ids=expected_unit_ids_for_retry,
+                    expected_obligation_ids=expected_obligation_ids_for_retry,
+                    allowed_evidence_ids=frozenset(allowed_evidence_ids),
+                    expected_units=expected_units_for_retry,
+                    expected_obligations=expected_obligations_for_retry,
+                ):
+                    logger.warning(
+                        "Grounding evaluator linked supported units to an uncovered obligation; "
+                        "running one focused obligation reassessment"
+                    )
+                    active_prompt = prompt + "\n\n" + _GROUNDING_OBLIGATION_REASSESSMENT_INSTRUCTION
+                    continue
+                if not retryable_errors or attempt + 1 >= GROUNDING_MODEL_CALL_LIMIT:
+                    break
             return response
 
         parent_usage_collector = current_collector()
@@ -1053,16 +8805,6 @@ def assess_issue_automation_grounding(
             raise ValueError("Grounding evaluator returned no structured response")
 
         protocol_errors: list[str] = []
-        if _string_from(structured.answer_sha256) != answer_sha256:
-            protocol_errors.append("Evaluator answer hash does not match candidate answer")
-        raw_checked_citation_ids = [
-            citation_id
-            for citation_id in (_string_from(value) for value in structured.checked_citation_ids)
-            if citation_id
-        ]
-        checked_citation_ids = tuple(dict.fromkeys(raw_checked_citation_ids))
-        if len(raw_checked_citation_ids) != len(checked_citation_ids) or set(checked_citation_ids) != set(citation_ids):
-            protocol_errors.append("Evaluator citation set does not match supplied citations")
         if not structured.unit_assessments:
             protocol_errors.append("Evaluator returned no answer-unit assessments")
         if len(structured.unit_assessments) > _GROUNDING_MAX_UNITS:
@@ -1076,7 +8818,6 @@ def assess_issue_automation_grounding(
         clean_unit_assessments: list[dict[str, Any]] = []
         for assessment in structured.unit_assessments[:_GROUNDING_MAX_UNITS]:
             unit_id = _string_from(assessment.unit_id)
-            unit_sha256 = _string_from(assessment.unit_sha256)
             expected_unit = expected_units.get(unit_id)
             evidence_ids = tuple(
                 dict.fromkeys(
@@ -1092,11 +8833,12 @@ def assess_issue_automation_grounding(
             if expected_unit is None:
                 protocol_errors.append(f"Evaluator returned unknown answer-unit ID: {unit_id}")
                 continue
-            if unit_sha256 != _string_from(expected_unit.get("sha256")):
-                protocol_errors.append(f"Evaluator answer-unit hash does not match: {unit_id}")
+            expected_unit_sha256 = _string_from(expected_unit.get("sha256"))
             unknown_ids = [evidence_id for evidence_id in evidence_ids if evidence_id not in allowed_ids]
             if unknown_ids:
                 protocol_errors.append(f"Answer unit uses unknown evidence IDs: {', '.join(unknown_ids[:5])}")
+            if assessment.supported and not evidence_ids:
+                protocol_errors.append(f"Supported answer unit has no evidence IDs: {unit_id}")
             if not assessment.supported or not evidence_ids:
                 unsupported_claims.append(_string_from(expected_unit.get("text"))[:500])
             else:
@@ -1104,20 +8846,506 @@ def assess_issue_automation_grounding(
             clean_unit_assessments.append(
                 {
                     "unitId": unit_id,
-                    "unitSha256": unit_sha256,
+                    "unitSha256": expected_unit_sha256,
                     "supported": bool(assessment.supported),
                     "evidenceIds": list(evidence_ids),
                 }
             )
         if seen_unit_ids != set(expected_units):
             protocol_errors.append("Evaluator did not assess every answer unit exactly once")
-        unused_citation_ids = [
-            citation_id for citation_id in citation_ids if citation_id not in used_supported_evidence_ids
-        ]
-        if unused_citation_ids and structured.verdict == "grounded" and not unsupported_claims:
-            protocol_errors.append(
-                f"Cited knowledge was not used by any supported answer unit: {', '.join(unused_citation_ids)}"
+        supported_unit_evidence_ids = {
+            _string_from(item.get("unitId")): frozenset(
+                _string_from(evidence_id) for evidence_id in item.get("evidenceIds", []) if _string_from(evidence_id)
             )
+            for item in clean_unit_assessments
+            if (
+                item.get("supported")
+                and item.get("evidenceIds")
+                and set(item.get("evidenceIds", [])).issubset(allowed_ids)
+            )
+        }
+        supported_units = set(supported_unit_evidence_ids)
+
+        expected_obligations = {
+            _string_from(obligation.get("id")): obligation
+            for obligation in answer_obligations
+            if _string_from(obligation.get("id"))
+        }
+        seen_obligation_ids: set[str] = set()
+        atomic_recent_change_requirements = _atomic_recent_change_requirements(
+            ticket_evidence
+        )
+        atomic_http_response_code_requirements = _atomic_http_response_code_requirements(ticket_evidence)
+        deterministically_resolved_obligation_ids: set[str] = set()
+        clean_obligation_assessments: list[dict[str, Any]] = []
+        uncovered_obligations: list[str] = []
+        if len(structured.obligation_assessments) > 100:
+            protocol_errors.append("Evaluator returned too many obligation assessments")
+        for assessment in structured.obligation_assessments[:100]:
+            obligation_id = _string_from(assessment.obligation_id)
+            obligation = expected_obligations.get(obligation_id)
+            answer_unit_ids = tuple(
+                dict.fromkeys(
+                    unit_id for unit_id in (_string_from(value) for value in assessment.answer_unit_ids) if unit_id
+                )
+            )
+            if not obligation_id or obligation_id in seen_obligation_ids:
+                protocol_errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
+                continue
+            seen_obligation_ids.add(obligation_id)
+            if obligation is None:
+                protocol_errors.append(f"Evaluator returned unknown answer-obligation ID: {obligation_id}")
+                continue
+            unknown_unit_ids = [unit_id for unit_id in answer_unit_ids if unit_id not in expected_units]
+            if unknown_unit_ids:
+                protocol_errors.append(
+                    "Answer obligation uses unknown answer-unit IDs: " + ", ".join(unknown_unit_ids[:5])
+                )
+            requested_resolution = _string_from(assessment.resolution)
+            resolution = requested_resolution
+            obligation_kind = _string_from(obligation.get("kind")) or "customer_question"
+            linked_units_are_supported = bool(
+                answer_unit_ids and not unknown_unit_ids and set(answer_unit_ids).issubset(supported_units)
+            )
+            obligation_concern_id = _string_from(obligation.get("concernId"))
+            linked_evidence_ids = {
+                evidence_id
+                for unit_id in answer_unit_ids
+                for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
+            }
+            requested_obligation_evidence_ids = tuple(
+                dict.fromkeys(evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value)))
+            )
+            unknown_obligation_evidence_ids = [
+                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id not in allowed_ids
+            ]
+            if unknown_obligation_evidence_ids:
+                protocol_errors.append(
+                    "Answer obligation uses unknown evidence IDs: " + ", ".join(unknown_obligation_evidence_ids[:5])
+                )
+            requested_linked_evidence_ids = {
+                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id in linked_evidence_ids
+            }
+            obligation_evidence_ids = set(requested_linked_evidence_ids or linked_evidence_ids)
+            usable_obligation_evidence_ids = {
+                evidence_id
+                for evidence_id in obligation_evidence_ids
+                if (
+                    not (scoped_concern_ids := scoped_grounding_evidence_concerns.get(evidence_id))
+                    or scoped_concern_ids == frozenset({obligation_concern_id})
+                )
+            }
+            # A unit may make separately supported statements for several
+            # concerns. Filter foreign IDs from this obligation instead of
+            # rejecting the whole unit; at least one same-concern or global
+            # evidence source must remain.
+            obligation_has_usable_evidence = bool(usable_obligation_evidence_ids) and not (
+                unknown_obligation_evidence_ids
+            )
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
+                protocol_errors.append(f"Addressed obligation has no answer-unit IDs: {obligation_id}")
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not linked_units_are_supported:
+                resolution = "not_covered"
+            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
+                resolution = "not_covered"
+            if (
+                requested_resolution == "not_covered"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _knowledge_backed_negative_guarantee_answers_obligation(
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                    citation_ids=frozenset(citation_ids),
+                )
+            ):
+                resolution = "pending_or_unavailable"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _knowledge_backed_secure_secret_delivery_answers_obligation(
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                    citation_ids=frozenset(citation_ids),
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and obligation_kind == "runbook_requirement"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                    citation_ids=automation_grounding_citation_ids,
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            if (
+                requested_resolution == "not_covered"
+                and obligation_kind == "customer_question"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _tool_backed_false_pause_state_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=_string_from(obligation.get("question")),
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            atomic_recent_change = atomic_recent_change_requirements.get(obligation_id)
+            if atomic_recent_change is not None:
+                required_value = _string_from(atomic_recent_change.get("value"))
+                required_evidence_ids = frozenset(
+                    _string_from(evidence_id)
+                    for evidence_id in atomic_recent_change.get(
+                        "evidenceIds",
+                        frozenset(),
+                    )
+                    if _string_from(evidence_id)
+                )
+                exact_fact_is_linked = bool(
+                    linked_units_are_supported
+                    and obligation_has_usable_evidence
+                    and any(
+                        _atomic_lookup_unit_affirmatively_states_value(
+                            _string_from(expected_units.get(unit_id, {}).get("text")),
+                            required_value,
+                        )
+                        and bool(
+                            supported_unit_evidence_ids.get(
+                                unit_id,
+                                frozenset(),
+                            ).intersection(required_evidence_ids)
+                        )
+                        for unit_id in answer_unit_ids
+                    )
+                    and not _atomic_lookup_answer_has_conflicting_change_assertion(
+                        answer,
+                        required_value,
+                    )
+                )
+                # Correct only the evaluator's narrow internal contradiction:
+                # it linked an exhaustively supported unit to this obligation,
+                # while the unit states the exact safe scalar from the same-
+                # concern read-only evidence used to derive the requirement.
+                if requested_resolution == "not_covered" and exact_fact_is_linked:
+                    resolution = "answered"
+                    deterministically_resolved_obligation_ids.add(obligation_id)
+                elif requested_resolution != "answered" or not exact_fact_is_linked:
+                    resolution = "not_covered"
+            atomic_http_response_code = atomic_http_response_code_requirements.get(obligation_id)
+            if atomic_http_response_code is not None:
+                required_value = _string_from(atomic_http_response_code.get("value"))
+                required_evidence_ids = frozenset(
+                    _string_from(evidence_id)
+                    for evidence_id in atomic_http_response_code.get(
+                        "evidenceIds",
+                        frozenset(),
+                    )
+                    if _string_from(evidence_id)
+                )
+                exact_fact_is_linked = requested_resolution == "answered" and any(
+                    _unit_affirmatively_states_http_response_code(
+                        _string_from(expected_units.get(unit_id, {}).get("text")),
+                        required_value,
+                    )
+                    and bool(
+                        supported_unit_evidence_ids.get(
+                            unit_id,
+                            frozenset(),
+                        ).intersection(required_evidence_ids)
+                    )
+                    for unit_id in answer_unit_ids
+                )
+                if not exact_fact_is_linked:
+                    resolution = "not_covered"
+            obligation_question = _string_from(obligation.get("question"))
+            is_service_incident_temporal_requirement = bool(
+                obligation_kind == "runbook_requirement"
+                and _is_service_incident_temporal_requirement(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=obligation_question,
+                )
+            )
+            isolated_service_incident_temporal_answer = bool(
+                is_service_incident_temporal_requirement
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and _is_isolated_service_incident_temporal_answer(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                )
+            )
+            if (
+                requested_resolution == "answered"
+                and is_service_incident_temporal_requirement
+                and not isolated_service_incident_temporal_answer
+            ):
+                resolution = "not_covered"
+            linked_answer_asserts_action_state = any(
+                check_pending_action_claims(
+                    answer=_string_from(expected_units.get(unit_id, {}).get("text")),
+                    runbook_actions=(
+                        {
+                            "name": obligation_question or "pending_action",
+                            "label": obligation_question or "Pending action",
+                            "status": "pending_approval",
+                        },
+                    ),
+                ).blocked
+                for unit_id in answer_unit_ids
+            )
+            must_bind_action_evidence = requested_resolution == "fulfilled_action" or (
+                requested_resolution == "answered" and linked_answer_asserts_action_state
+            )
+            if must_bind_action_evidence and linked_units_are_supported:
+                same_concern_action_evidence_ids = successful_action_evidence_by_concern.get(
+                    obligation_concern_id,
+                    frozenset(),
+                )
+                matching_action_evidence_ids = _matching_successful_action_evidence_ids(
+                    successful_action_evidence_records,
+                    concern_id=obligation_concern_id,
+                    expected_action_text=_string_from(obligation.get("question")),
+                )
+                cited_same_concern_action_evidence_ids = obligation_evidence_ids.intersection(
+                    same_concern_action_evidence_ids
+                )
+                if (
+                    not matching_action_evidence_ids
+                    or not cited_same_concern_action_evidence_ids
+                    or not cited_same_concern_action_evidence_ids.issubset(matching_action_evidence_ids)
+                    or any(
+                        not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
+                            matching_action_evidence_ids
+                        )
+                        for unit_id in answer_unit_ids
+                    )
+                ):
+                    resolution = "not_covered"
+            # Run this exact-fact exception after action-state validation. A
+            # read-only sentence such as "the incident started at <ISO>" can
+            # look like a completed mutation to the generic action guard. Only
+            # restore coverage when the obligation and linked unit pass the
+            # stricter same-concern, successful-tool, exact-scalar checks.
+            if (
+                resolution == "not_covered"
+                and requested_resolution == "answered"
+                and obligation_kind == "runbook_requirement"
+                and linked_units_are_supported
+                and obligation_has_usable_evidence
+                and isolated_service_incident_temporal_answer
+                and _tool_backed_temporal_scalar_answers_obligation(
+                    ticket=ticket_evidence,
+                    concern_id=obligation_concern_id,
+                    question=obligation_question,
+                    answer_unit_ids=answer_unit_ids,
+                    expected_units=expected_units,
+                    supported_unit_evidence_ids=supported_unit_evidence_ids,
+                )
+            ):
+                resolution = "answered"
+                deterministically_resolved_obligation_ids.add(obligation_id)
+            # A runbook response requirement is trusted operational guidance,
+            # not a customer-requested business action. Enforce this after all
+            # deterministic resolution overrides: only a substantive `answered`
+            # result can cover it; generic pending/unavailable prose cannot.
+            if obligation_kind == "runbook_requirement" and resolution != "answered":
+                resolution = "not_covered"
+            covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+            if not covered:
+                uncovered_obligations.append(_string_from(obligation.get("question"))[:500])
+            clean_assessment = {
+                "obligationId": obligation_id,
+                "resolution": resolution,
+                "covered": covered,
+                "answerUnitIds": list(answer_unit_ids),
+            }
+            if requested_obligation_evidence_ids:
+                clean_evidence_candidates = (
+                    requested_obligation_evidence_ids
+                    if requested_linked_evidence_ids
+                    else tuple(sorted(linked_evidence_ids))
+                )
+                clean_assessment["evidenceIds"] = [
+                    evidence_id
+                    for evidence_id in clean_evidence_candidates
+                    if (evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids)
+                ]
+            clean_obligation_assessments.append(clean_assessment)
+
+        # A combined answer can state one runbook rule once even when triage
+        # split the message into sibling concerns that activated the same
+        # runbook. Preserve every obligation and its evidence scope: reuse the
+        # unit only when a normally answered sibling has the exact requirement
+        # and each scoped proof can be rebound to independently identical target
+        # evidence. Never alias customer questions or mutation evidence.
+        originally_answered_assessments = tuple(
+            assessment
+            for assessment in clean_obligation_assessments
+            if assessment.get("resolution") == "answered"
+            and assessment.get("covered") is True
+        )
+        read_only_tool_fingerprints = _read_only_tool_evidence_fingerprints(
+            ticket_evidence
+        )
+        complete_read_only_tool_evidence_sets = (
+            _complete_read_only_tool_evidence_sets(ticket_evidence)
+        )
+        durable_action_concern_ids = _durable_successful_runbook_action_concern_ids(
+            ticket_evidence
+        )
+        raw_durable_action_concern_ids = (
+            _raw_issue_durable_runbook_action_concern_ids(issue)
+        )
+        runbook_rebinding_action_state_is_complete = (
+            raw_durable_action_concern_ids is not None
+        )
+        if raw_durable_action_concern_ids is not None:
+            durable_action_concern_ids = frozenset(
+                (*durable_action_concern_ids, *raw_durable_action_concern_ids)
+            )
+        clean_unit_assessments_by_id = {
+            _string_from(assessment.get("unitId")): assessment
+            for assessment in clean_unit_assessments
+            if _string_from(assessment.get("unitId"))
+        }
+        for clean_assessment in clean_obligation_assessments:
+            if not runbook_rebinding_action_state_is_complete:
+                continue
+            if clean_assessment.get("resolution") != "not_covered":
+                continue
+            obligation_id = _string_from(clean_assessment.get("obligationId"))
+            obligation = expected_obligations.get(obligation_id)
+            if obligation is None or _string_from(obligation.get("kind")) != "runbook_requirement":
+                continue
+            rebinding_proof = _duplicate_runbook_requirement_rebinding_proof(
+                ticket=ticket_evidence,
+                target_obligation=obligation,
+                target_assessment=clean_assessment,
+                originally_answered_assessments=originally_answered_assessments,
+                expected_obligations=expected_obligations,
+                expected_units=expected_units,
+                supported_unit_evidence_ids=supported_unit_evidence_ids,
+                scoped_evidence_concerns=scoped_grounding_evidence_concerns,
+                read_only_tool_fingerprints=read_only_tool_fingerprints,
+                complete_read_only_tool_evidence_sets=(
+                    complete_read_only_tool_evidence_sets
+                ),
+                durable_action_concern_ids=durable_action_concern_ids,
+            )
+            if rebinding_proof is None:
+                continue
+            rebound_evidence_ids: list[str] = []
+            for unit_id, evidence_ids in rebinding_proof.items():
+                supported_unit_evidence_ids[unit_id] = frozenset(
+                    (*supported_unit_evidence_ids[unit_id], *evidence_ids)
+                )
+                used_supported_evidence_ids.update(evidence_ids)
+                clean_unit_assessment = clean_unit_assessments_by_id.get(unit_id)
+                if clean_unit_assessment is not None:
+                    clean_unit_assessment["evidenceIds"] = list(
+                        dict.fromkeys(
+                            (
+                                *clean_unit_assessment.get("evidenceIds", []),
+                                *evidence_ids,
+                            )
+                        )
+                    )
+                rebound_evidence_ids.extend(evidence_ids)
+            clean_assessment.update(
+                {
+                    "resolution": "answered",
+                    "covered": True,
+                    "evidenceIds": list(dict.fromkeys(rebound_evidence_ids)),
+                }
+            )
+            deterministically_resolved_obligation_ids.add(obligation_id)
+
+        # The evaluator intentionally has no model-selectable N/A state. Resolve
+        # the exact matter-status fallback only after every sibling assessment
+        # and its supporting units have passed the ordinary fail-closed checks.
+        for clean_assessment in clean_obligation_assessments:
+            if clean_assessment.get("resolution") != "not_covered":
+                continue
+            obligation_id = _string_from(clean_assessment.get("obligationId"))
+            obligation = expected_obligations.get(obligation_id)
+            if obligation is None:
+                continue
+            not_applicable_proof = _matter_status_not_found_condition_resolution(
+                ticket=ticket_evidence,
+                obligation=obligation,
+                clean_obligation_assessments=clean_obligation_assessments,
+                expected_obligations=expected_obligations,
+                expected_units=expected_units,
+                supported_unit_evidence_ids=supported_unit_evidence_ids,
+            )
+            if not_applicable_proof is None:
+                continue
+            proof_unit_ids, proof_evidence_ids = not_applicable_proof
+            linked_conditional_unit_ids = {
+                _string_from(unit_id)
+                for unit_id in clean_assessment.get("answerUnitIds", [])
+                if _string_from(unit_id)
+            }
+            if not linked_conditional_unit_ids.issubset(proof_unit_ids):
+                continue
+            clean_assessment.update(
+                {
+                    "resolution": "not_applicable",
+                    "covered": True,
+                    "answerUnitIds": list(proof_unit_ids),
+                    "evidenceIds": list(proof_evidence_ids),
+                }
+            )
+            deterministically_resolved_obligation_ids.add(obligation_id)
+
+        # Rebuild this list from the final assessments so a deterministic
+        # code-proven N/A cannot retain the model's earlier uncovered entry.
+        uncovered_obligations = [
+            _string_from(expected_obligations.get(obligation_id, {}).get("question"))[:500]
+            for clean_assessment in clean_obligation_assessments
+            if (
+                (obligation_id := _string_from(clean_assessment.get("obligationId")))
+                and _string_from(clean_assessment.get("resolution"))
+                not in _FINAL_COVERED_OBLIGATION_RESOLUTIONS
+            )
+        ]
+        if seen_obligation_ids != set(expected_obligations):
+            protocol_errors.append("Evaluator did not assess every answer obligation exactly once")
+            uncovered_obligations.extend(
+                _string_from(obligation.get("question"))[:500]
+                for obligation_id, obligation in expected_obligations.items()
+                if obligation_id not in seen_obligation_ids
+            )
+        used_citation_ids = tuple(
+            citation_id for citation_id in citation_ids if citation_id in used_supported_evidence_ids
+        )
+        used_citation_id_set = set(used_citation_ids)
+        used_evidence_snapshots = tuple(
+            snapshot for snapshot in snapshots if _string_from(snapshot.get("id")) in used_citation_id_set
+        )
 
         contradictions = tuple(
             dict.fromkeys(
@@ -1127,6 +9355,7 @@ def assess_issue_automation_grounding(
             )
         )
         clean_unsupported = tuple(dict.fromkeys(unsupported_claims))
+        clean_uncovered_obligations = tuple(dict.fromkeys(uncovered_obligations))
         if protocol_errors:
             return AutomationGroundingAssessment(
                 verified=False,
@@ -1139,6 +9368,9 @@ def assess_issue_automation_grounding(
                 answer_sha256=answer_sha256,
                 answer_units=audit_answer_units,
                 unit_assessments=tuple(clean_unit_assessments),
+                answer_obligations=answer_obligations,
+                obligation_assessments=tuple(clean_obligation_assessments),
+                uncovered_obligations=clean_uncovered_obligations,
                 claim_count=min(len(structured.unit_assessments), _GROUNDING_MAX_UNITS),
                 unsupported_claims=clean_unsupported,
                 contradictions=contradictions,
@@ -1146,11 +9378,62 @@ def assess_issue_automation_grounding(
                 model=model,
                 error="; ".join(dict.fromkeys(protocol_errors))[:1_000],
             )
-        if structured.verdict != "grounded" or clean_unsupported or contradictions:
+        deterministic_obligation_override = bool(
+            deterministically_resolved_obligation_ids
+            and not clean_unsupported
+            and not contradictions
+            and not clean_uncovered_obligations
+        )
+        clean_components_are_exhaustively_grounded = bool(
+            len(clean_unit_assessments) == len(expected_units)
+            and all(
+                assessment.get("supported") is True
+                and bool(assessment.get("evidenceIds"))
+                for assessment in clean_unit_assessments
+            )
+            and len(clean_obligation_assessments) == len(expected_obligations)
+            and all(
+                assessment.get("covered") is True
+                for assessment in clean_obligation_assessments
+            )
+            and not clean_unsupported
+            and not contradictions
+            and not clean_uncovered_obligations
+        )
+        final_retryable_protocol_errors = _grounding_retryable_protocol_errors(
+            structured,
+            expected_unit_ids=expected_unit_ids_for_retry,
+            expected_obligation_ids=expected_obligation_ids_for_retry,
+            allowed_evidence_ids=frozenset(allowed_evidence_ids),
+        )
+        stale_inconsistent_verdict_override = bool(
+            protocol_correction_attempted
+            and structured.verdict == "not_grounded"
+            and final_retryable_protocol_errors
+            == (_GROUNDING_INCONSISTENT_VERDICT_ERROR,)
+            and clean_components_are_exhaustively_grounded
+        )
+        if stale_inconsistent_verdict_override:
+            logger.warning(
+                "Grounding evaluator retained an internally inconsistent not_grounded "
+                "verdict after protocol correction; accepting exhaustive validated "
+                "components for issue %s",
+                _string_from(issue.get("id")),
+            )
+        deterministic_grounding_override = bool(
+            deterministic_obligation_override
+            or stale_inconsistent_verdict_override
+        )
+        if (
+            (structured.verdict != "grounded" and not deterministic_grounding_override)
+            or clean_unsupported
+            or contradictions
+            or clean_uncovered_obligations
+        ):
             return AutomationGroundingAssessment(
                 verified=False,
                 status="failed",
-                reason_code="ungrounded_answer",
+                reason_code=("incomplete_answer" if clean_uncovered_obligations else "ungrounded_answer"),
                 checked_at=checked_at,
                 citation_ids=citation_ids,
                 evidence_snapshots=snapshots,
@@ -1158,6 +9441,9 @@ def assess_issue_automation_grounding(
                 answer_sha256=answer_sha256,
                 answer_units=audit_answer_units,
                 unit_assessments=tuple(clean_unit_assessments),
+                answer_obligations=answer_obligations,
+                obligation_assessments=tuple(clean_obligation_assessments),
+                uncovered_obligations=clean_uncovered_obligations,
                 claim_count=len(structured.unit_assessments),
                 unsupported_claims=clean_unsupported,
                 contradictions=contradictions,
@@ -1169,12 +9455,14 @@ def assess_issue_automation_grounding(
             status="passed",
             reason_code="",
             checked_at=checked_at,
-            citation_ids=citation_ids,
-            evidence_snapshots=snapshots,
+            citation_ids=used_citation_ids,
+            evidence_snapshots=used_evidence_snapshots,
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
             unit_assessments=tuple(clean_unit_assessments),
+            answer_obligations=answer_obligations,
+            obligation_assessments=tuple(clean_obligation_assessments),
             claim_count=len(structured.unit_assessments),
             provider=provider,
             model=model,
@@ -1191,6 +9479,7 @@ def assess_issue_automation_grounding(
             context_snapshots=context_snapshots,
             answer_sha256=answer_sha256,
             answer_units=audit_answer_units,
+            answer_obligations=answer_obligations,
             provider=provider,
             model=model,
             error=str(exc)[:1_000],

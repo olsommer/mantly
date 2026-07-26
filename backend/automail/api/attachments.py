@@ -10,6 +10,10 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from automail.db.pocketbase.client import _get_binary, _list_all
+from automail.pipeline.intent.consumers import (
+    attachment_intent_names,
+    attachment_intent_sources,
+)
 
 try:
     from docling.document_converter import DocumentConverter  # pyright: ignore[reportMissingImports]
@@ -103,7 +107,13 @@ def _stored_pb_filename(record: dict) -> str:
     return str(stored or "")
 
 
-def load_attachment_files(agent_response: Any, intents_dir: Any = None) -> Optional[list[dict[str, Any]]]:
+def load_attachment_files(
+    agent_response: Any,
+    intents_dir: Any = None,
+    *,
+    intent_result: Any = None,
+    strict_intent_ownership: bool = False,
+) -> Optional[list[dict[str, Any]]]:
     """
     Load attachment files from filenames and convert to base64.
 
@@ -147,24 +157,49 @@ def load_attachment_files(agent_response: Any, intents_dir: Any = None) -> Optio
 
             if project_id:
                 try:
-                    filters = [
-                        f"project='{_escape_pb(project_id)}'",
-                        f"filename='{_escape_pb(filename)}'",
+                    preferred = []
+                    intent_sources = attachment_intent_sources(intent_result, filename)
+                    if strict_intent_ownership and len(intent_sources) > 1:
+                        raise ValueError(
+                            f"Attachment alias '{filename}' has multiple runbook owners"
+                        )
+                    intent_names = attachment_intent_names(intent_result, filename)
+                    activated_intent = str(getattr(agent_response, "activated_intent", None) or "").strip()
+                    if (
+                        not strict_intent_ownership
+                        and activated_intent
+                        and activated_intent not in intent_names
+                    ):
+                        intent_names.append(activated_intent)
+                    candidates = intent_sources or [
+                        (intent_name, filename)
+                        for intent_name in (
+                            [] if strict_intent_ownership else intent_names
+                        )
                     ]
-                    activated_intent = getattr(agent_response, "activated_intent", None)
-                    if activated_intent:
+                    for intent_name, source_filename in candidates:
+                        filters = [
+                            f"project='{_escape_pb(project_id)}'",
+                            f"filename='{_escape_pb(source_filename)}'",
+                        ]
                         preferred = _list_all(
                             "intent_attachments",
-                            " && ".join([*filters, f"intent='{_escape_pb(str(activated_intent))}'"]),
+                            " && ".join([*filters, f"intent='{_escape_pb(intent_name)}'"]),
                             per_page=1,
                         )
-                    else:
-                        preferred = []
-                    records = preferred or _list_all(
-                        "intent_attachments",
-                        " && ".join(filters),
-                        per_page=1,
-                    )
+                        if preferred:
+                            break
+                    records = preferred
+                    if not records and not strict_intent_ownership:
+                        filters = [
+                            f"project='{_escape_pb(project_id)}'",
+                            f"filename='{_escape_pb(filename)}'",
+                        ]
+                        records = _list_all(
+                            "intent_attachments",
+                            " && ".join(filters),
+                            per_page=1,
+                        )
                     if records:
                         record = records[0]
                         stored_name = _stored_pb_filename(record)
@@ -181,6 +216,8 @@ def load_attachment_files(agent_response: Any, intents_dir: Any = None) -> Optio
                                 "size": len(content),
                             })
                             continue
+                except ValueError:
+                    raise
                 except Exception:
                     logger.warning(
                         "Failed to load PocketBase intent attachment %s",

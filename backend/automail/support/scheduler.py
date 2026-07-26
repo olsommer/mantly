@@ -122,16 +122,17 @@ def _run_observed(
         raise
 
     failures = sum(int(result.get(key) or 0) for key in failure_keys)
+    status = str(result.get("status") or "ok").strip().lower()
+    reported_failure = status in {"error", "failed"}
     details = _numeric_details(result)
-    if failures > 0:
+    if failures > 0 or reported_failure:
         runtime_observability.mark_failure(
             component,
-            f"run reported {failures} failed or blocked item(s)",
+            "reported_failure",
             started_monotonic=started,
             details=details,
         )
     else:
-        status = str(result.get("status") or "ok")
         runtime_observability.mark_success(
             component,
             started_monotonic=started,
@@ -272,15 +273,38 @@ def run_scheduled_support_processing_expiry(
     limit: int = 200,
     source: str = "scheduler",
 ) -> dict[str, Any]:
-    return _run_observed(
-        "support.processing_expiry",
-        lambda: expire_stale_direct_channel_processing_runs_for_scope(
-            tenant_id=tenant_id,
-            project_id=project_id,
-            limit=max(1, min(limit, 500)),
-            source=source,
-        ),
+    operation_started = time.monotonic()
+    try:
+        result = _run_observed(
+            "support.processing_expiry",
+            lambda: expire_stale_direct_channel_processing_runs_for_scope(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                limit=max(1, min(limit, 500)),
+                source=source,
+            ),
+        )
+    except Exception as exc:
+        runtime_observability.record_operation(
+            "support.processing_expiry_impact",
+            succeeded=False,
+            status="failed",
+            started_monotonic=operation_started,
+            error=exc,
+        )
+        raise
+
+    failed = int(result.get("failed") or 0)
+    expired = int(result.get("expired") or 0)
+    runtime_observability.record_operation(
+        "support.processing_expiry_impact",
+        succeeded=failed == 0 and expired == 0,
+        status="failed" if failed else "attention" if expired else "ok",
+        started_monotonic=operation_started,
+        error="reported_failure" if failed or expired else None,
+        details=_numeric_details(result),
     )
+    return result
 
 
 def run_scheduled_channel_test_jobs(
@@ -388,7 +412,7 @@ def _loop_sla(interval_seconds: int, tenant_id: str | None, project_id: str | No
 
 def _configure_component(name: str, interval_seconds: int, project_id: str | None) -> None:
     if interval_seconds <= 0:
-        runtime_observability.mark_disabled(name, reason="interval not configured")
+        runtime_observability.mark_disabled(name, reason="interval_not_configured")
         return
     runtime_observability.mark_started(
         name,

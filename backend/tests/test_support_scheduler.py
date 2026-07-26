@@ -7,7 +7,8 @@ import pytest
 
 from automail.api.admin import channels as admin_channels
 from automail.api.admin import issues as admin_issue_api
-from automail.support import channel_test_jobs, scheduler
+from automail.core.observability import runtime_observability
+from automail.support import channel_test_jobs, ingestion, scheduler
 
 
 def _provider_delivery_proof(provider: str = "slack", channel_id: str = "C_LIVE") -> dict:
@@ -94,7 +95,75 @@ def test_run_scheduled_support_sync_delegates_scope(monkeypatch):
     assert seen["source"] == "cron"
 
 
+def test_run_scheduled_support_sync_treats_failed_status_as_failure(monkeypatch):
+    runtime_observability.reset_for_tests()
+    monkeypatch.setattr(
+        scheduler,
+        "sync_support_channels_for_scope",
+        lambda **_kwargs: {
+            "status": "failed",
+            "channels": 1,
+            "processed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "items": [],
+        },
+    )
+
+    scheduler.run_scheduled_support_sync()
+
+    state = runtime_observability.snapshot()["components"]["support.sync"]
+    assert state["status"] == "failed"
+    assert state["total_failures"] == 1
+    assert state["last_error"] == "reported_failure"
+
+
+def test_sync_support_channel_counts_adapter_load_failure(monkeypatch):
+    cursors: list[dict] = []
+    runs: list[dict] = []
+    monkeypatch.setattr(
+        ingestion,
+        "get_channel",
+        lambda *_args, **_kwargs: {
+            "id": "channel-1",
+            "channelKey": "email-main",
+            "type": "email",
+            "status": "active",
+            "config": {"adapter": "buffer"},
+        },
+    )
+    monkeypatch.setattr(ingestion, "get_channel_cursor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ingestion,
+        "_load_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("adapter unavailable")),
+    )
+    monkeypatch.setattr(
+        ingestion,
+        "upsert_channel_cursor",
+        lambda *_args, **kwargs: cursors.append(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        ingestion,
+        "_record_sync_run",
+        lambda **kwargs: runs.append(kwargs),
+    )
+
+    result = ingestion.sync_support_channel(
+        "channel-1",
+        tenant_id="tenant-1",
+        project_id="project-1",
+        actor_email="support-sync",
+    )
+
+    assert result["status"] == "failed"
+    assert result["failed"] == 1
+    assert cursors[0]["status"] == "failed"
+    assert runs[0]["result"]["failed"] == 1
+
+
 def test_run_scheduled_support_processing_expiry_delegates_scope(monkeypatch):
+    runtime_observability.reset_for_tests()
     seen: dict = {}
 
     def fake_expiry(**kwargs):
@@ -121,6 +190,46 @@ def test_run_scheduled_support_processing_expiry_delegates_scope(monkeypatch):
         "limit": 12,
         "source": "cron",
     }
+    component = runtime_observability.snapshot()["components"]["support.processing_expiry"]
+    operation = runtime_observability.snapshot()["operations"]["support.processing_expiry_impact"]
+    assert component["status"] == "ok"
+    assert component["last_success_at"] is not None
+    assert operation["status"] == "attention"
+    assert operation["total_failures"] == 1
+    assert operation["details"] == {"expired": 1, "failed": 0, "inspected": 2}
+
+
+def test_channel_test_execution_records_terminal_failure(monkeypatch):
+    runtime_observability.reset_for_tests()
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "process_channel_test_job",
+        lambda **_kwargs: {
+            "status": "failed",
+            "processed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "error": "private provider response",
+        },
+    )
+    with channel_test_jobs._active_job_lock:
+        channel_test_jobs._active_job_ids.add("job-1")
+
+    channel_test_jobs._run_and_release(job_id="job-1")
+
+    operation = runtime_observability.snapshot()["operations"]["support.channel_test_job_execution"]
+    assert operation["status"] == "failed"
+    assert operation["total_failures"] == 1
+    assert operation["last_error"] == "reported_failure"
+    assert operation["details"] == {
+        "status": "failed",
+        "processed": 0,
+        "failed": 1,
+        "skipped": 0,
+    }
+    assert "private provider response" not in json.dumps(operation)
+    with channel_test_jobs._active_job_lock:
+        assert "job-1" not in channel_test_jobs._active_job_ids
 
 
 def test_support_processing_expiry_scheduler_starts_by_default(monkeypatch):

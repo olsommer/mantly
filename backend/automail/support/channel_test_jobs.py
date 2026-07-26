@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from automail.core.observability import runtime_observability
 from automail.db.pocketbase.client import (
     _list_all,
     get_channel_webhook_event,
@@ -399,8 +401,34 @@ def process_channel_test_job(
 
 def _run_and_release(**kwargs: Any) -> None:
     job_id = _string(kwargs.get("job_id"))
+    started = time.monotonic()
     try:
-        process_channel_test_job(**kwargs)
+        result = process_channel_test_job(**kwargs)
+    except Exception as exc:
+        runtime_observability.record_operation(
+            "support.channel_test_job_execution",
+            succeeded=False,
+            status="failed",
+            started_monotonic=started,
+            error=exc,
+        )
+        raise
+    else:
+        status = _string(result.get("status") or "ok").lower()
+        failed = int(result.get("failed") or 0)
+        succeeded = failed == 0 and status not in {"error", "failed", "missing"}
+        runtime_observability.record_operation(
+            "support.channel_test_job_execution",
+            succeeded=succeeded,
+            status=status,
+            started_monotonic=started,
+            error="reported_failure" if not succeeded else None,
+            details={
+                key: result.get(key)
+                for key in ("status", "processed", "failed", "skipped", "unmatched")
+                if key in result
+            },
+        )
     finally:
         with _active_job_lock:
             _active_job_ids.discard(job_id)

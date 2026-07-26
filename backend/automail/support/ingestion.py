@@ -631,7 +631,7 @@ def sync_support_channel(
             "cursorKey": cursor_key,
             "status": "failed",
             "processed": 0,
-            "failed": 0,
+            "failed": 1,
             "skipped": skipped,
             "cursorValue": _string(cursor_value),
             "items": [],

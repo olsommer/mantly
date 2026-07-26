@@ -6,7 +6,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Generator
 
 from automail.db.pocketbase.base import _escape_pb, _first, _list_all, _patch, _post, generate_id
 
@@ -360,7 +360,7 @@ def serialize_learning_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
 
 
 @contextmanager
-def learning_proposal_evaluation_override(proposal: dict[str, Any]) -> Iterator[None]:
+def learning_proposal_evaluation_override(proposal: dict[str, Any]) -> Generator[None, None, None]:
     """Apply one candidate only inside the current eval execution context."""
     token = _evaluation_override.set(dict(proposal))
     try:

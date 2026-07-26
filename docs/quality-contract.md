@@ -15,8 +15,13 @@ one focused test passes.
 - Strict Pyright across the production package.
 - Full pytest discovery and execution under `backend/tests`.
 - Branch coverage of at least 60% across `automail`.
+- Separate line-plus-branch floors for authorization (70%), Inbox support
+  (60%), delivery (60%), and automation (60%).
 - Support package readiness gate.
 - Clean PocketBase bootstrap and second-run idempotency.
+- Bootstrap against a representative existing schema/data snapshot, proving
+  missing-field upgrades preserve records and deployment-specific extension
+  fields.
 - Tenant-isolation and delivery claim/fencing integration tests.
 
 ### Frontends
@@ -32,6 +37,8 @@ For `admin`, `addin`, and `landing`:
 - real PocketBase, FastAPI, admin, and add-in auth lifecycle in Chromium;
 - first-user provisioning and forced password change;
 - deletion prevents subsequent authentication;
+- Admin Inbox ticket creation, unassign/claim, approval-required draft editing,
+  human approval, deterministic webhook delivery, and closure;
 - production combined image, SaaS API image, and PocketBase image build.
 
 ### Security and repository policy
@@ -42,18 +49,25 @@ For `admin`, `addin`, and `landing`:
 - required security, scope, pilot, and merge-order assets;
 - machine-readable pilot metric schema validation.
 
+Node audits parse the advisory graph rather than trusting only the npm process
+exit code. A high or critical finding fails unless an exact advisory, package,
+and application entry exists in `docs/security/npm-audit-exceptions.json`, has
+not expired, and contains a substantive justification. Review policy lives in
+`docs/security/dependency-exceptions.md`.
+
 ## Local usage
 
-Full core contract without browser E2E:
+Full merge contract:
 
 ```bash
 ./scripts/check-quality.sh
 ```
 
-Include the auth lifecycle E2E:
+Explicit fast-iteration example:
 
 ```bash
-SKIP_E2E=false ./scripts/check-quality.sh
+SKIP_E2E=true SKIP_INTEGRATION=true SKIP_IMAGES=true SKIP_SECURITY=true \
+  SKIP_INSTALL=true ./scripts/check-quality.sh
 ```
 
 Reuse already installed dependencies:
@@ -62,14 +76,20 @@ Reuse already installed dependencies:
 SKIP_INSTALL=true ./scripts/check-quality.sh
 ```
 
-Skipping installation or E2E is a local iteration convenience. It does not
-remove the corresponding pull-request requirement.
+Every skip is opt-in. Skipping installation, integration, E2E, image builds, or
+security scans is a local iteration convenience. It does not remove the
+corresponding pull-request requirement. GitHub jobs invoke phases of the same
+canonical command so parallel CI and local full execution share commands.
 
 ## Coverage policy
 
-The 60% repository threshold is a minimum floor, not a target. New or changed
-security-critical code should have focused tests for its decision and failure
-paths even when total coverage is already above the threshold.
+The 60% repository threshold is a minimum floor, not a target. Authorization is
+held to 70% because its compact decision surface should be exhaustively tested.
+Support Inbox, delivery, and automation each retain a 60% line-plus-branch floor
+because their provider/state matrices are large; this prevents unrelated,
+well-covered utility files from hiding regressions in critical runtime code.
+New or changed security-critical code still needs focused decision and failure
+tests when aggregate floors pass.
 
 Critical paths include:
 
@@ -127,10 +147,9 @@ A quarantined check requires:
 - Release rollback must use an already verified artifact rather than rebuilding
   an old commit with a changed dependency environment.
 
-## Known boundary
+## Browser boundary
 
-The auth lifecycle E2E is a real multi-service browser journey. The complete
-Inbox ticket-to-delivery journey continues to be covered by the backend support
-suite and PocketBase delivery integration until a deterministic browser fixture
-for ticket ingestion and outbound delivery is added. A future change must not
-claim broader UI E2E coverage without an executable test.
+The browser merge gate uses local PocketBase, FastAPI, admin, add-in, and a
+deterministic outbound webhook adapter. Paid provider credentials remain
+opt-in. The Admin Inbox journey verifies persisted state and adapter evidence,
+not only visible success notifications.

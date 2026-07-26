@@ -74,6 +74,8 @@ frontend_quality() {
 
 repository_contract() {
   run "Pilot metric JSON syntax" python -m json.tool "$ROOT/docs/pilot-metrics-schema.json"
+  run "Canonical Mantly naming" python "$ROOT/scripts/check_branding.py"
+  run "Naming migration script syntax" bash -n "$ROOT/scripts/migrate-compose-volumes.sh"
   if [[ -f "$ROOT/scripts/validate-pilot-metrics.py" ]]; then
     run "Pilot metric schema contract" python "$ROOT/scripts/validate-pilot-metrics.py"
   fi
@@ -99,10 +101,6 @@ repository_contract() {
       exit 1
     fi
   done
-  if grep -R --line-number --exclude-dir=.git --exclude='merge-order.md' 'isarai-test' "$ROOT"; then
-    echo "Legacy isarai-test image name is forbidden." >&2
-    exit 1
-  fi
 }
 
 pocketbase_integration() {

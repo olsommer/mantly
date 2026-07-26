@@ -2,12 +2,12 @@
 # release-onprem.sh — Build and push multi-arch on-prem images to GHCR.
 #
 # Usage:
-#   ./scripts/release-onprem.sh 1.0.0          # tagged release
+#   ./scripts/release-onprem.sh 0.1.0          # tagged release
 #   ./scripts/release-onprem.sh                 # :latest only
 #
 # Prerequisites:
 #   - docker buildx (included in Docker Desktop)
-#   - ghcr.io login: echo $GITHUB_TOKEN | docker login ghcr.io -u isarai-de --password-stdin
+#   - ghcr.io login: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
 set -euo pipefail
 
@@ -56,8 +56,8 @@ validate_registry
 PYTHON_COMMAND="$(resolve_python)"
 
 # Determine tags
-APP_IMAGE="$REGISTRY/isarai-email-agent"
-PB_IMAGE="$REGISTRY/isarai-pocketbase"
+APP_IMAGE="$REGISTRY/mantly-api"
+PB_IMAGE="$REGISTRY/mantly-pocketbase"
 
 TAGS=("--tag" "$APP_IMAGE:latest")
 PB_TAGS=("--tag" "$PB_IMAGE:latest")
@@ -85,7 +85,7 @@ else
 fi
 
 # Ensure buildx builder exists
-BUILDER_NAME="isarai-multiarch"
+BUILDER_NAME="mantly-multiarch"
 if ! docker buildx inspect "$BUILDER_NAME" > /dev/null 2>&1; then
     echo "Creating buildx builder: $BUILDER_NAME"
     docker buildx create --name "$BUILDER_NAME" --use --bootstrap

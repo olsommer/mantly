@@ -1,7 +1,7 @@
 [project]
-name = "backend"
+name = "mantly-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Agentic email-first customer support runtime and API"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

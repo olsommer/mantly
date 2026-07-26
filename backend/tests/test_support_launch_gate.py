@@ -1049,8 +1049,8 @@ def test_package_gate_covers_pylon_release_invariants():
         "SUPPORT_CHANNEL_ACTIVATION_WRITE_SECRETS",
     }.issubset(requirements["deploy/.env.example"])
     assert {
-        "${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent",
-        "${REGISTRY:-ghcr.io/isarlabs}/isarai-pocketbase",
+        "${REGISTRY:-ghcr.io/isarlabs}/mantly-api",
+        "${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase",
     }.issubset(requirements["deploy/docker-compose.yml"])
     assert {
         "release-manifest.json",

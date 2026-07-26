@@ -111,8 +111,8 @@ cat > "$STAGING/release-manifest.json" <<EOF
   "imageTag": "$IMAGE_TAG",
   "generatedAt": "$GENERATED_AT",
   "images": {
-    "app": "$REGISTRY/isarai-email-agent:$IMAGE_TAG",
-    "pocketbase": "$REGISTRY/isarai-pocketbase:$IMAGE_TAG"
+    "app": "$REGISTRY/mantly-api:$IMAGE_TAG",
+    "pocketbase": "$REGISTRY/mantly-pocketbase:$IMAGE_TAG"
   },
   "supportScripts": [
     "support-launch-gate.sh",

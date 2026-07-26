@@ -29,7 +29,7 @@ services:
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
       PB_CORS_ORIGINS: "${PB_CORS_ORIGINS:-}"
     volumes:
-      - isarai_pb_data:/pb/pb_data
+      - mantly_pb_data:/pb/pb_data
     expose:
       - "8090"
     restart: unless-stopped
@@ -132,7 +132,7 @@ services:
     expose:
       - "8080"
     volumes:
-      - isarai_app_data:/app/data
+      - mantly_app_data:/app/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -150,5 +150,5 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-  isarai_pb_data:
-  isarai_app_data:
+  mantly_pb_data:
+  mantly_app_data:

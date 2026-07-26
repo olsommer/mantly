@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from automail.monitoring.sanitize import clip, safe_dict
+from automail.pipeline.intent.consumers import scoped_intent_actions
 
 
 def _model_dump(value: Any) -> dict[str, Any]:
@@ -76,12 +77,17 @@ def pipeline_output_summary(pipeline_result: Any) -> dict[str, Any]:
 
 def actions_from_intent(intent_result: Any) -> list[dict[str, Any]]:
     actions = []
-    for action in getattr(intent_result, "actions", []) or []:
+    for concern_id, runbook, action in scoped_intent_actions(intent_result):
         action_data = _model_dump(action)
-        actions.append({
+        summary = {
             "type": action_data.get("type", ""),
             "label": action_data.get("label", ""),
             "method": action_data.get("method", ""),
             "status": "available",
-        })
+        }
+        if concern_id:
+            summary["concernId"] = concern_id
+        if runbook:
+            summary["runbook"] = runbook
+        actions.append(summary)
     return actions

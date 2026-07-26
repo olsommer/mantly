@@ -41,7 +41,7 @@ jobs:
 
       - name: Ruff
         working-directory: backend
-        run: uv run ruff check automail tests
+        run: uv run ruff check automail tests ../e2e
 
       - name: Strict Pyright
         working-directory: backend

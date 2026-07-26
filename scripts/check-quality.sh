@@ -24,7 +24,7 @@ if [[ "$SKIP_INSTALL" != "true" ]]; then
   done
 fi
 
-run "Backend Ruff" bash -lc "cd '$ROOT/backend' && uv run ruff check automail tests"
+run "Backend Ruff" bash -lc "cd '$ROOT/backend' && uv run ruff check automail tests ../e2e"
 run "Backend strict Pyright" bash -lc "cd '$ROOT/backend' && uv run pyright"
 run "Backend full tests and coverage" bash -lc \
   "cd '$ROOT/backend' && uv run pytest tests --cov=automail --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=60 -ra"

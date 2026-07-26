@@ -1,6 +1,14 @@
-# Deploy Mantly — On-Premises
+# Deploy Mantly — Commercial On-Premises
 
-Deployment guide for customers running their own Mantly instance. The application ships as pre-built Docker images with compiled Python (no source code). A license key validates against the Mantly SaaS server.
+This guide covers Mantly's separately licensed commercial distribution. It
+ships as pre-built Docker images with compiled Python and validates a commercial
+license against the Mantly SaaS server. Contract terms govern that distribution.
+
+For the AGPL-3.0 Community edition, build from source using
+[`docker-compose.community.yml`](https://github.com/olsommer/mantly/blob/main/docker-compose.community.yml)
+and follow the
+[Community deployment guide](https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md).
+Community self-hosting uses no Mantly license key or license-server check.
 
 ## Prerequisites
 

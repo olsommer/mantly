@@ -11,9 +11,11 @@ from typing import Any
 
 from automail.db.pocketbase.client import (
     deliver_queued_issue_replies_for_scope,
+    expire_stale_direct_channel_processing_runs_for_scope,
     record_delivery_run,
     run_sla_breach_escalations_for_scope,
 )
+from automail.support.channel_test_jobs import run_queued_channel_test_jobs
 from automail.support.crm import sync_support_crm_connectors_for_scope
 from automail.support.ingestion import sync_support_channels_for_scope
 
@@ -23,10 +25,14 @@ _started = False
 _delivery_started = False
 _crm_started = False
 _sla_started = False
+_processing_expiry_started = False
+_channel_test_jobs_started = False
 _lock = threading.Lock()
 _delivery_lock = threading.Lock()
 _crm_lock = threading.Lock()
 _sla_lock = threading.Lock()
+_processing_expiry_lock = threading.Lock()
+_channel_test_jobs_lock = threading.Lock()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -175,6 +181,32 @@ def run_scheduled_support_sla_escalations(
     )
 
 
+def run_scheduled_support_processing_expiry(
+    *,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    limit: int = 200,
+    source: str = "scheduler",
+) -> dict[str, Any]:
+    return expire_stale_direct_channel_processing_runs_for_scope(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        limit=max(1, min(limit, 500)),
+        source=source,
+    )
+
+
+def run_scheduled_channel_test_jobs(
+    *,
+    limit: int = 25,
+    stale_minutes: int = 16,
+) -> dict[str, Any]:
+    return run_queued_channel_test_jobs(
+        limit=max(1, min(limit, 200)),
+        stale_minutes=max(1, stale_minutes),
+    )
+
+
 def _loop_sync(interval_seconds: int, tenant_id: str | None, project_id: str | None, limit: int) -> None:
     while True:
         started = time.monotonic()
@@ -259,6 +291,54 @@ def _loop_sla(interval_seconds: int, tenant_id: str | None, project_id: str | No
             )
         except Exception:
             logger.warning("Support SLA scheduler run failed", exc_info=True)
+        elapsed = time.monotonic() - started
+        time.sleep(max(1, interval_seconds - int(elapsed)))
+
+
+def _loop_processing_expiry(
+    interval_seconds: int,
+    tenant_id: str | None,
+    project_id: str | None,
+    limit: int,
+) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            result = run_scheduled_support_processing_expiry(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                limit=limit,
+                source="scheduler",
+            )
+            logger.info(
+                "Support processing expiry run: inspected=%s expired=%s failed=%s",
+                result.get("inspected"),
+                result.get("expired"),
+                result.get("failed"),
+            )
+        except Exception:
+            logger.warning("Support processing expiry run failed", exc_info=True)
+        elapsed = time.monotonic() - started
+        time.sleep(max(1, interval_seconds - int(elapsed)))
+
+
+def _loop_channel_test_jobs(interval_seconds: int, limit: int, stale_minutes: int) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            result = run_scheduled_channel_test_jobs(
+                limit=limit,
+                stale_minutes=stale_minutes,
+            )
+            if result.get("inspected"):
+                logger.info(
+                    "Admin channel test job recovery: inspected=%s started=%s skipped=%s",
+                    result.get("inspected"),
+                    result.get("started"),
+                    result.get("skipped"),
+                )
+        except Exception:
+            logger.warning("Admin channel test job recovery failed", exc_info=True)
         elapsed = time.monotonic() - started
         time.sleep(max(1, interval_seconds - int(elapsed)))
 
@@ -372,4 +452,56 @@ def start_support_sla_scheduler() -> bool:
         thread.start()
         _sla_started = True
     logger.info("Support SLA scheduler started interval=%ss project=%s", interval_seconds, project_id or "*")
+    return True
+
+
+def start_support_processing_expiry_scheduler() -> bool:
+    """Start the default-on abandoned-processing expiry sweep."""
+    global _processing_expiry_started
+    interval_seconds = _int_env("SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS", 60)
+    if interval_seconds <= 0:
+        return False
+    tenant_id = os.getenv("SUPPORT_PROCESSING_EXPIRY_TENANT_ID", "").strip() or None
+    project_id = os.getenv("SUPPORT_PROCESSING_EXPIRY_PROJECT_ID", "").strip() or None
+    limit = _int_env("SUPPORT_PROCESSING_EXPIRY_LIMIT", 200)
+    with _processing_expiry_lock:
+        if _processing_expiry_started:
+            return True
+        thread = threading.Thread(
+            target=_loop_processing_expiry,
+            args=(interval_seconds, tenant_id, project_id, limit),
+            daemon=True,
+            name="support-processing-expiry-scheduler",
+        )
+        thread.start()
+        _processing_expiry_started = True
+    logger.info(
+        "Support processing expiry scheduler started interval=%ss project=%s",
+        interval_seconds,
+        project_id or "*",
+    )
+    return True
+
+
+def start_channel_test_job_scheduler() -> bool:
+    """Start default-on recovery for durably queued admin test messages."""
+
+    global _channel_test_jobs_started
+    interval_seconds = _int_env("SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS", 5)
+    if interval_seconds <= 0:
+        return False
+    limit = _int_env("SUPPORT_CHANNEL_TEST_JOB_LIMIT", 25)
+    stale_minutes = _int_env("SUPPORT_CHANNEL_TEST_JOB_STALE_MINUTES", 16)
+    with _channel_test_jobs_lock:
+        if _channel_test_jobs_started:
+            return True
+        thread = threading.Thread(
+            target=_loop_channel_test_jobs,
+            args=(interval_seconds, limit, stale_minutes),
+            daemon=True,
+            name="channel-test-job-scheduler",
+        )
+        thread.start()
+        _channel_test_jobs_started = True
+    logger.info("Admin channel test job scheduler started interval=%ss", interval_seconds)
     return True

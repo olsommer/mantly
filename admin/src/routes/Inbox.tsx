@@ -1,14 +1,19 @@
-import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type DragEvent, type SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { AlertCircle, AlertTriangle, Bell, BookOpen, Building2, CheckCircle2, Clock, Columns3, Copy, Database, ExternalLink, Inbox as InboxIcon, Link, List, Loader, Mail, Pencil, Plus, RefreshCw, Save, Scissors, Search, Send, Sparkles, Star, Tag, Trash2, UserCheck, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { api } from '@/api/endpoints';
-import type { KnowledgeArticle, KnowledgeGap, ProjectMember, SupportAccount, SupportAccountInsight, SupportAccountInsightSummary, SupportActionExecution, SupportAgentAnswer, SupportAgentMessage, SupportAiRun, SupportAnalytics, SupportChannelActivationBacklog, SupportChannelWebhookEvent, SupportCustomFieldDefinition, SupportCustomFieldType, SupportExternalObject, SupportExternalSyncRun, SupportFieldPreparation, SupportInboxView, SupportIssue, SupportIssueActivityEvent, SupportIssueAnswerWorkspace, SupportIssueBoard, SupportIssueBoardAction, SupportIssueDuplicateSuggestion, SupportIssueListFilters, SupportIssueMessage, SupportIssuePriority, SupportIssueStatus, SupportNotification, SupportOutboundMessage, SupportQueue, SupportQueueOwnerWorkload, SupportReplyMacro, SupportSlaEvent, SupportTriagePreparation, SupportWatcher } from '@/api/endpoints';
+import type { KnowledgeArticle, KnowledgeGap, ProjectMember, SupportAccount, SupportAccountInsight, SupportAccountInsightSummary, SupportActionExecution, SupportAgentAnswer, SupportAgentMessage, SupportAiRun, SupportAnalytics, SupportChannelActivationBacklog, SupportChannelWebhookEvent, SupportCustomFieldDefinition, SupportCustomFieldType, SupportExternalObject, SupportExternalSyncRun, SupportFieldPreparation, SupportInboxView, SupportIssue, SupportIssueActivityEvent, SupportIssueAnswerWorkspace, SupportIssueBoard, SupportIssueBoardAction, SupportIssueDuplicateSuggestion, SupportIssueListFilters, SupportIssueMessage, SupportIssuePriority, SupportIssueStatus, SupportNotification, SupportOutboundMessage, SupportQueue, SupportQueueOwnerWorkload, SupportReplyMacro, SupportRunbookConcern, SupportSlaEvent, SupportTriagePreparation, SupportWatcher } from '@/api/endpoints';
 import { InboxAgentPanel } from './InboxAgentPanel';
 import type { AgentArticleSource } from './InboxAgentPanel';
 import { InboxAttachments } from './InboxAttachments';
 import { InboxMessageTimeline } from './InboxMessageTimeline';
+import {
+    shouldApplyIssueMutation,
+    shouldApplyIssueRequest,
+    type IssueRequestToken,
+} from './inbox-request-guard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -31,6 +36,8 @@ type InboxView = 'list' | 'board';
 type InboxStatusFilter = 'all' | 'needs-response' | 'approvals' | 'reply-approvals' | 'action-approvals' | 'unassigned' | 'failed-delivery' | 'low-csat' | 'due-soon-sla' | 'overdue-sla' | WorkflowLane;
 type IssuePatch = Partial<Pick<SupportIssue, 'status' | 'priority' | 'assigneeEmail' | 'queueKey' | 'queueName' | 'tags' | 'customFields'>> & {
     workflowSource?: string;
+    resolveWithoutReply?: boolean;
+    resolutionNote?: string;
 };
 type TranslateFn = (key: string, params?: Record<string, string | number>) => string;
 type SupportReplyReadiness = SupportIssueAnswerWorkspace['replyReadiness'];
@@ -140,6 +147,21 @@ type SupportViewPreset = {
     description: string;
     filters: SavedInboxFilters;
 };
+type TicketProcessingStage = {
+    key: string;
+    label: string;
+    status: string;
+    detail: string;
+};
+type TicketProcessingProgress = {
+    runId: string;
+    stage: string;
+    label: string;
+    detail: string;
+    status: 'processing' | 'stalled';
+    updatedAt: string;
+    stages: TicketProcessingStage[];
+};
 
 const UNASSIGNED_VALUE = '__unassigned__';
 const ALL_ASSIGNEES_VALUE = '__all_assignees__';
@@ -159,6 +181,8 @@ const inboxStatusFilters = new Set<InboxStatusFilter>(['all', 'needs-response', 
 const inboxFilterQueryKeys = ['filter', 'queue', 'account', 'channel', 'assignee', 'label', 'q', 'view'];
 const SLA_DUE_SOON_WINDOW_MS = 60 * 60 * 1000;
 const INBOX_REFRESH_INTERVAL_MS = 15_000;
+const ACTIVE_PROCESSING_REFRESH_INTERVAL_MS = 2_000;
+const PROCESSING_PROGRESS_STALE_MS = 3 * 60 * 1000;
 const REPLY_MACRO_TOKEN_PATTERN = /\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g;
 
 function defaultSavedInboxFilters(viewMode: InboxView = 'board'): SavedInboxFilters {
@@ -584,11 +608,7 @@ function messageText(message: SupportIssueMessage): string {
         const body = textFrom(message.content.emailBody) || textFrom(message.content.email_body);
         if (body) return body;
     }
-    try {
-        return JSON.stringify(message.content ?? message, null, 2);
-    } catch {
-        return '';
-    }
+    return '';
 }
 
 function messageLabel(message: SupportIssueMessage) {
@@ -1003,6 +1023,25 @@ function isWorkflowProofEvent(event: SupportIssueActivityEvent): boolean {
 
 function activityEventTitle(event: SupportIssueActivityEvent): string {
     if (isWorkflowProofEvent(event)) return 'Lifecycle proof';
+    if (event.eventType === 'channel_agent_autopilot') {
+        const metadata = event.metadata ?? {};
+        const rawActions: unknown[] = Array.isArray(metadata.actions)
+            ? metadata.actions as unknown[]
+            : [];
+        const replyAction: unknown = rawActions
+            .find(action => isRecord(action)
+                && textFrom(action.type).toLowerCase() === 'prepare_agent_reply');
+        const replyId = textFrom(metadata.replyId ?? metadata.reply_id)
+            || (isRecord(replyAction) ? textFrom(replyAction.replyId ?? replyAction.reply_id) : '');
+        const draftBlockedReason = textFrom(
+            metadata.draftBlockedReason ?? metadata.draft_blocked_reason,
+        );
+        const replyActionClaimedPrepared = isRecord(replyAction)
+            && textFrom(replyAction.status).toLowerCase() === 'prepared';
+        if (!replyId && (draftBlockedReason || replyActionClaimedPrepared)) {
+            return 'Channel autopilot reply withheld';
+        }
+    }
     return event.title || event.eventType;
 }
 
@@ -1136,8 +1175,184 @@ function tokenTotal(value: Record<string, unknown>): number {
     return typeof raw === 'number' ? raw : 0;
 }
 
+function processingProgressFromRun(run: SupportAiRun): TicketProcessingProgress | null {
+    const raw = isRecord(run.metadata.processingProgress)
+        ? run.metadata.processingProgress
+        : isRecord(run.metadata.processing_progress)
+            ? run.metadata.processing_progress
+            : null;
+    const progressStatus = textFrom(raw?.status).toLowerCase();
+    if (run.status.toLowerCase() !== 'processing' && progressStatus !== 'processing') return null;
+    const updatedAt = textFrom(raw?.updatedAt ?? raw?.updated_at) || run.updated || run.startedAt;
+    const updatedMs = Date.parse(updatedAt);
+    const stalled = !Number.isFinite(updatedMs) || Date.now() - updatedMs > PROCESSING_PROGRESS_STALE_MS;
+    const stages = Array.isArray(raw?.stages)
+        ? raw.stages.filter(isRecord).map(stage => ({
+            key: textFrom(stage.key),
+            label: textFrom(stage.label),
+            status: textFrom(stage.status),
+            detail: textFrom(stage.detail),
+        })).filter(stage => stage.key || stage.label)
+        : [];
+    return {
+        runId: run.id,
+        stage: textFrom(raw?.stage) || 'processing',
+        label: textFrom(raw?.label) || 'Processing ticket',
+        detail: textFrom(raw?.detail),
+        status: stalled ? 'stalled' : 'processing',
+        updatedAt,
+        stages,
+    };
+}
+
+function latestTicketProcessingProgress(runs: SupportAiRun[]): TicketProcessingProgress | null {
+    return runs
+        .map(processingProgressFromRun)
+        .filter((progress): progress is TicketProcessingProgress => progress !== null)
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] ?? null;
+}
+
+function TicketProcessingProgressPanel({
+    progress,
+    t,
+}: {
+    progress: TicketProcessingProgress;
+    t: TranslateFn;
+}) {
+    const completedCount = progress.stages.filter(stage => stage.status === 'completed').length;
+    return (
+        <section
+            className={`rounded-md border p-3 ${progress.status === 'stalled' ? 'border-destructive/40 bg-destructive/5' : 'border-primary/30 bg-primary/5'}`}
+            data-ticket-processing-progress
+            data-ticket-processing-run={progress.runId}
+            data-ticket-processing-stage={progress.stage}
+            data-ticket-processing-status={progress.status}
+        >
+            <div className="flex items-start gap-3">
+                {progress.status === 'stalled'
+                    ? <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+                    : <Loader className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />}
+                <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm font-medium">
+                            {progress.status === 'stalled' ? t('Processing may be stalled') : t(progress.label)}
+                        </div>
+                        {progress.stages.length > 0 && (
+                            <Badge variant="outline" className="font-normal">
+                                {completedCount}/{progress.stages.length} {t('stages')}
+                            </Badge>
+                        )}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                        {progress.status === 'stalled'
+                            ? t('No progress update arrived recently. Refresh or retry if this persists.')
+                            : progress.detail || t('Working in the background. Approval and send rules stay unchanged.')}
+                    </div>
+                    {progress.stages.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5" data-ticket-processing-stages>
+                            {progress.stages.map(stage => (
+                                <Badge
+                                    key={stage.key || stage.label}
+                                    variant={stage.status === 'completed' ? 'secondary' : 'outline'}
+                                    className="gap-1 font-normal"
+                                    data-ticket-processing-stage-item={stage.key}
+                                    data-ticket-processing-stage-status={stage.status}
+                                >
+                                    {stage.status === 'completed'
+                                        ? <CheckCircle2 className="size-3" />
+                                        : stage.status === 'processing'
+                                            ? <Loader className="size-3 animate-spin" />
+                                            : null}
+                                    {t(stage.label || stage.key)}
+                                </Badge>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </section>
+    );
+}
+
 function isAgentChatRun(run: SupportAiRun): boolean {
     return run.source === 'agent_answer' || run.metadata.kind === 'agent_answer';
+}
+
+function latestRunbookConcerns(runs: SupportAiRun[]): SupportRunbookConcern[] {
+    for (const run of runs) {
+        const concerns = run.intentResult.concerns;
+        if (!Array.isArray(concerns)) continue;
+        const validConcerns = concerns.filter(isRecord) as SupportRunbookConcern[];
+        if (validConcerns.length > 0) return validConcerns;
+    }
+    return [];
+}
+
+function runbookConcernStatus(concern: SupportRunbookConcern): string {
+    const status = textFrom(concern.status).toLowerCase();
+    if (status) return status;
+    if (concern.requiresHuman === true) return 'requires_human';
+    if (concern.matched === true) return 'ready';
+    return 'unmatched';
+}
+
+function runbookConcernStatusLabel(status: string): string {
+    if (status === 'ready') return 'Ready';
+    if (status === 'requires_human') return 'Human review';
+    if (status === 'failed') return 'Failed';
+    return 'No match';
+}
+
+function RunbookAudit({
+    primaryIntent,
+    concerns,
+    t,
+}: {
+    primaryIntent: string;
+    concerns: SupportRunbookConcern[];
+    t: TranslateFn;
+}) {
+    return (
+        <div className="space-y-2" data-ticket-runbook-audit data-ticket-runbook-concern-count={concerns.length}>
+            <div>
+                <div className="text-xs font-medium uppercase text-muted-foreground">{t('Runbook')}</div>
+                <div className="mt-1 text-sm" data-ticket-runbook-primary>{primaryIntent || t('No match')}</div>
+            </div>
+            {concerns.length > 0 && (
+                <div className="space-y-2" data-ticket-runbook-concerns>
+                    <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
+                        <span>{t('Concerns')}</span>
+                        <Badge variant="outline" className="font-normal">{concerns.length}</Badge>
+                    </div>
+                    {concerns.map((concern, index) => {
+                        const concernId = textFrom(concern.concernId) || `concern-${index + 1}`;
+                        const intentName = textFrom(concern.intentName);
+                        const summary = textFrom(concern.concernSummary)
+                            || textFrom(concern.summary)
+                            || `${t('Concern')} ${index + 1}`;
+                        const status = runbookConcernStatus(concern);
+                        return (
+                            <div
+                                key={`${concernId}-${index}`}
+                                className="rounded-md border bg-muted/20 p-2 text-sm"
+                                data-ticket-runbook-concern={concernId}
+                                data-ticket-runbook-concern-intent={intentName}
+                                data-ticket-runbook-concern-status={status}
+                            >
+                                <div className="flex items-start justify-between gap-2">
+                                    <span className="min-w-0 text-xs text-muted-foreground">{summary}</span>
+                                    <Badge variant={intentName ? 'secondary' : 'outline'} className="max-w-[55%] shrink-0 truncate font-normal">
+                                        {intentName || t('No match')}
+                                    </Badge>
+                                </div>
+                                <div className="mt-1 text-xs text-muted-foreground">{t(runbookConcernStatusLabel(status))}</div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
 }
 
 function agentRunQuestion(run: SupportAiRun): string {
@@ -1240,6 +1455,19 @@ function autopilotActionStatus(actions: AutopilotActionProof[], type: string): s
     return actions.find(action => action.type === type)?.status ?? '';
 }
 
+function autopilotDraftWithheldReason(reason: string): string {
+    if (reason === 'ungrounded_answer') {
+        return 'The answer was not sufficiently grounded, so no reply was created.';
+    }
+    if (reason === 'grounding_evidence_incomplete') {
+        return 'Grounding evidence was incomplete, so no reply was created.';
+    }
+    if (reason === 'grounding_check_failed') {
+        return 'Grounding verification did not pass, so no reply was created.';
+    }
+    return reason || 'No reply was created.';
+}
+
 function autopilotPackageGaps(actions: AutopilotActionProof[]): string[] {
     const gaps: string[] = [];
     if (autopilotActionStatus(actions, 'prepare_triage') !== 'prepared') gaps.push('Triage');
@@ -1263,10 +1491,25 @@ function latestAutopilotProof(issue: SupportIssue): AutopilotProof | null {
         : isRecord(metadata.automation_context)
             ? metadata.automation_context
             : {};
+    const replyId = textFrom(metadata.replyId ?? metadata.reply_id);
+    const draftBlockedReason = textFrom(
+        metadata.draftBlockedReason ?? metadata.draft_blocked_reason,
+    ).toLowerCase();
     const actions = (Array.isArray(metadata.actions) ? metadata.actions : [])
         .map(autopilotActionProof)
-        .filter((action): action is AutopilotActionProof => Boolean(action));
-    const replyId = textFrom(metadata.replyId ?? metadata.reply_id);
+        .filter((action): action is AutopilotActionProof => Boolean(action))
+        .map(action => {
+            if (action.type !== 'prepare_agent_reply') return action;
+            const provenReplyId = action.replyId || replyId;
+            if (action.status === 'prepared' && !provenReplyId) {
+                return {
+                    ...action,
+                    status: 'withheld',
+                    reason: action.reason || autopilotDraftWithheldReason(draftBlockedReason),
+                };
+            }
+            return provenReplyId === action.replyId ? action : { ...action, replyId: provenReplyId };
+        });
     const aiRunId = textFrom(metadata.aiRunId ?? metadata.ai_run_id);
     const gaps = autopilotPackageGaps(actions);
     const failed = event.eventType === 'channel_agent_autopilot_failed';
@@ -1593,7 +1836,7 @@ function issueHasPendingDelivery(issue: SupportIssue): boolean {
     return issue.hasPendingDelivery || (issue.outboundMessages ?? []).some(replyPendingDelivery);
 }
 
-function issueDoneBlockers(issue: SupportIssue): string[] {
+function issueOperationalDoneBlockers(issue: SupportIssue): string[] {
     const blockers: string[] = [];
     const replyDrafts = pendingReplyApprovalCount(issue);
     const actionProposals = pendingActionApprovalCount(issue);
@@ -1604,6 +1847,24 @@ function issueDoneBlockers(issue: SupportIssue): string[] {
     if (issueHasPendingDelivery(issue)) blockers.push('queued replies');
     if (issueHasFailedDelivery(issue)) blockers.push('failed deliveries');
     return blockers;
+}
+
+function issueResponseDoneBlockers(issue: SupportIssue): string[] {
+    const blockers: string[] = [];
+    if (issueNeedsResponse(issue)) blockers.push('customer response required');
+    if ((issue.outboundMessages ?? []).some(replyChangesRequested)) {
+        blockers.push('reply changes requested');
+    }
+    return blockers;
+}
+
+function issueDoneBlockers(issue: SupportIssue): string[] {
+    return [...issueOperationalDoneBlockers(issue), ...issueResponseDoneBlockers(issue)];
+}
+
+function issueCanResolveWithoutReply(issue: SupportIssue): boolean {
+    return issueOperationalDoneBlockers(issue).length === 0
+        && issueResponseDoneBlockers(issue).length > 0;
 }
 
 function issueDoneBlockerText(issue: SupportIssue): string {
@@ -2973,6 +3234,15 @@ export function Inbox({ projectId }: InboxProps) {
     const navigate = useNavigate();
     const location = useLocation();
     const { t } = useI18n();
+    const activeIssueIdRef = useRef(issueId ?? '');
+    const issueDataRequestEpochRef = useRef(0);
+    const loadingDetailOwnerRef = useRef({ issueId: '', generation: 0 });
+    const issueMutationGenerationRef = useRef(0);
+    const issueMutationOwnersRef = useRef(new Map<string, number>());
+    useLayoutEffect(() => {
+        activeIssueIdRef.current = issueId ?? '';
+        issueDataRequestEpochRef.current += 1;
+    }, [issueId]);
     const initialInboxFilters = inboxFiltersFromSearch(location.search);
     const [viewMode, setViewMode] = useState<InboxView>(initialInboxFilters.viewMode);
     const [statusFilter, setStatusFilter] = useState<InboxStatusFilter>(initialInboxFilters.statusFilter);
@@ -2990,9 +3260,55 @@ export function Inbox({ projectId }: InboxProps) {
     const [loadingChannelCoverage, setLoadingChannelCoverage] = useState(false);
     const [supportAnalytics, setSupportAnalytics] = useState<SupportAnalytics | null>(null);
     const [loadingSupportAnalytics, setLoadingSupportAnalytics] = useState(false);
-    const [selectedIssue, setSelectedIssue] = useState<SupportIssue | null>(null);
+    const [selectedIssue, setSelectedIssueState] = useState<SupportIssue | null>(null);
     const [issueBoard, setIssueBoard] = useState<SupportIssueBoard | null>(null);
-    const [answerWorkspace, setAnswerWorkspace] = useState<SupportIssueAnswerWorkspace | null>(null);
+    const [answerWorkspace, setAnswerWorkspaceState] = useState<SupportIssueAnswerWorkspace | null>(null);
+    const setSelectedIssue = useCallback((update: SetStateAction<SupportIssue | null>) => {
+        issueDataRequestEpochRef.current += 1;
+        setSelectedIssueState(update);
+    }, []);
+    const setAnswerWorkspace = useCallback((update: SetStateAction<SupportIssueAnswerWorkspace | null>) => {
+        issueDataRequestEpochRef.current += 1;
+        setAnswerWorkspaceState(update);
+    }, []);
+    type IssueMutationScope = IssueRequestToken & {
+        ownerKey: string;
+        ownerGeneration: number;
+    };
+    const beginIssueMutation = useCallback((requestedIssueId: string, ownerKey: string): IssueMutationScope => {
+        const ownerGeneration = issueMutationGenerationRef.current + 1;
+        issueMutationGenerationRef.current = ownerGeneration;
+        issueMutationOwnersRef.current.set(ownerKey, ownerGeneration);
+        return {
+            requestedIssueId,
+            requestEpoch: ++issueDataRequestEpochRef.current,
+            ownerKey,
+            ownerGeneration,
+        };
+    }, []);
+    const isIssueMutationCurrent = useCallback((scope: IssueMutationScope) => shouldApplyIssueMutation({
+        requestedIssueId: scope.requestedIssueId,
+        activeIssueId: activeIssueIdRef.current,
+        ownerGeneration: scope.ownerGeneration,
+        activeOwnerGeneration: issueMutationOwnersRef.current.get(scope.ownerKey),
+    }), []);
+    const commitIssueMutation = useCallback((scope: IssueMutationScope, commit: () => void) => {
+        if (!isIssueMutationCurrent(scope)) return false;
+        issueDataRequestEpochRef.current += 1;
+        commit();
+        return true;
+    }, [isIssueMutationCurrent]);
+    const commitActiveIssueMutation = useCallback((requestedIssueId: string, commit: () => void) => {
+        if (!requestedIssueId || requestedIssueId !== activeIssueIdRef.current) return false;
+        issueDataRequestEpochRef.current += 1;
+        commit();
+        return true;
+    }, []);
+    const finishIssueMutation = useCallback((scope: IssueMutationScope, finish: () => void) => {
+        if (issueMutationOwnersRef.current.get(scope.ownerKey) !== scope.ownerGeneration) return false;
+        finish();
+        return true;
+    }, []);
     const [ticketAccount, setTicketAccount] = useState<SupportAccount | null>(null);
     const [loadingList, setLoadingList] = useState(false);
     const [loadingViews, setLoadingViews] = useState(false);
@@ -3102,6 +3418,9 @@ export function Inbox({ projectId }: InboxProps) {
     const [mergeTargetIssueId, setMergeTargetIssueId] = useState('');
     const [mergeNote, setMergeNote] = useState('');
     const [mergingIssue, setMergingIssue] = useState(false);
+    const [closeWithoutReplyOpen, setCloseWithoutReplyOpen] = useState(false);
+    const [closeWithoutReplyNote, setCloseWithoutReplyNote] = useState('');
+    const [closingWithoutReply, setClosingWithoutReply] = useState(false);
     const [duplicateSuggestions, setDuplicateSuggestions] = useState<SupportIssueDuplicateSuggestion[]>([]);
     const [loadingDuplicateSuggestions, setLoadingDuplicateSuggestions] = useState(false);
     const [splitMessageOpen, setSplitMessageOpen] = useState(false);
@@ -3372,12 +3691,29 @@ export function Inbox({ projectId }: InboxProps) {
 
     const loadIssueDetail = useCallback(async (nextIssueId: string, options: { silent?: boolean } = {}) => {
         const silent = options.silent === true;
-        if (!silent) setLoadingDetail(true);
+        const requestEpoch = ++issueDataRequestEpochRef.current;
+        const loadingGeneration = silent
+            ? 0
+            : loadingDetailOwnerRef.current.generation + 1;
+        const isCurrentRequest = () => shouldApplyIssueRequest({
+            requestedIssueId: nextIssueId,
+            activeIssueId: activeIssueIdRef.current,
+            requestEpoch,
+            activeEpoch: issueDataRequestEpochRef.current,
+        });
+        if (!silent) {
+            loadingDetailOwnerRef.current = {
+                issueId: nextIssueId,
+                generation: loadingGeneration,
+            };
+            setLoadingDetail(true);
+        }
         try {
             const [res, workspaceRes] = await Promise.all([
                 api.getIssue(projectId, nextIssueId),
                 api.getIssueAnswerWorkspace(projectId, nextIssueId),
             ]);
+            if (!isCurrentRequest()) return true;
             if (res.error || !res.data) {
                 if (!silent) toast.error(res.error || t('Could not load ticket'));
                 else setRefreshError(t('Could not refresh inbox'));
@@ -3397,35 +3733,57 @@ export function Inbox({ projectId }: InboxProps) {
                 setEditingReplyBody('');
                 setChangeRequestReplyId('');
                 setChangeRequestNote('');
+                setCloseWithoutReplyOpen(false);
+                setCloseWithoutReplyNote('');
             }
             return true;
         } finally {
-            if (!silent) setLoadingDetail(false);
+            const loadingOwner = loadingDetailOwnerRef.current;
+            if (
+                !silent
+                && loadingOwner.issueId === nextIssueId
+                && loadingOwner.generation === loadingGeneration
+                && activeIssueIdRef.current === nextIssueId
+            ) {
+                setLoadingDetail(false);
+            }
         }
-    }, [projectId, t]);
+    }, [projectId, setAnswerWorkspace, setSelectedIssue, t]);
 
     const refreshAnswerWorkspace = useCallback(async (nextIssueId: string) => {
+        const requestEpoch = ++issueDataRequestEpochRef.current;
         const workspaceRes = await api.getIssueAnswerWorkspace(projectId, nextIssueId);
+        if (!shouldApplyIssueRequest({
+            requestedIssueId: nextIssueId,
+            activeIssueId: activeIssueIdRef.current,
+            requestEpoch,
+            activeEpoch: issueDataRequestEpochRef.current,
+        })) return true;
         if (workspaceRes.data) {
             setAnswerWorkspace(workspaceRes.data);
             return true;
         }
         setAnswerWorkspace(prev => prev?.issueId === nextIssueId ? null : prev);
         return false;
-    }, [projectId]);
+    }, [projectId, setAnswerWorkspace]);
 
     useEffect(() => {
         if (!issueId) {
+            loadingDetailOwnerRef.current = {
+                issueId: '',
+                generation: loadingDetailOwnerRef.current.generation + 1,
+            };
             setSelectedIssue(null);
             setAnswerWorkspace(null);
             setTicketAccount(null);
             setTagDraft('');
             setCustomFieldDraft({});
             setDuplicateSuggestions([]);
+            setLoadingDetail(false);
             return;
         }
         void loadIssueDetail(issueId);
-    }, [issueId, loadIssueDetail]);
+    }, [issueId, loadIssueDetail, setAnswerWorkspace, setSelectedIssue]);
 
     useEffect(() => {
         setCustomFieldDraft(selectedIssue?.customFields ?? {});
@@ -3770,7 +4128,7 @@ export function Inbox({ projectId }: InboxProps) {
     );
     const selectedKnowledgeGaps = selectedIssue?.knowledgeGaps ?? [];
     const agentChatRuns = useMemo(
-        () => (selectedIssue?.aiRuns ?? []).filter(isAgentChatRun),
+        () => (selectedIssue?.aiRuns ?? []).filter(run => isAgentChatRun(run) && run.status !== 'processing'),
         [selectedIssue?.aiRuns],
     );
     const agentMessages = useMemo<SupportAgentMessage[]>(
@@ -3780,6 +4138,39 @@ export function Inbox({ projectId }: InboxProps) {
     const auditAiRuns = useMemo(
         () => (selectedIssue?.aiRuns ?? []).filter(run => !isAgentChatRun(run)),
         [selectedIssue?.aiRuns],
+    );
+    const ticketProcessingProgress = useMemo(
+        () => latestTicketProcessingProgress(selectedIssue?.aiRuns ?? []),
+        [selectedIssue?.aiRuns],
+    );
+    const shouldPollActiveProcessing = ticketProcessingProgress?.status === 'processing'
+        || askingAgent
+        || preparingTicketPackage
+        || preparingTriage
+        || preparingCustomFields;
+    useEffect(() => {
+        if (!issueId || !shouldPollActiveProcessing) return;
+        let cancelled = false;
+        let refreshing = false;
+        const refresh = async () => {
+            if (cancelled || refreshing || document.visibilityState === 'hidden') return;
+            refreshing = true;
+            try {
+                await loadIssueDetail(issueId, { silent: true });
+            } finally {
+                refreshing = false;
+            }
+        };
+        void refresh();
+        const timer = window.setInterval(() => void refresh(), ACTIVE_PROCESSING_REFRESH_INTERVAL_MS);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [issueId, loadIssueDetail, shouldPollActiveProcessing]);
+    const auditRunbookConcerns = useMemo(
+        () => latestRunbookConcerns(auditAiRuns),
+        [auditAiRuns],
     );
     const searchedKnowledgeArticles = useMemo(() => {
         const needle = knowledgeQuery.trim().toLowerCase();
@@ -4129,23 +4520,29 @@ export function Inbox({ projectId }: InboxProps) {
             toast.error(t('Select a macro'));
             return;
         }
+        const issueForMacro = selectedIssue;
+        const mutation = issueForMacro
+            ? beginIssueMutation(issueForMacro.id, 'render-reply-macro')
+            : null;
         setRenderingMacroId(selectedReplyMacro.id);
         let renderedBody = '';
         let unresolved: string[] = [];
         try {
-            if (selectedIssue) {
-                const res = await api.renderReplyMacro(projectId, selectedReplyMacro.id, selectedIssue.id);
+            if (issueForMacro) {
+                const res = await api.renderReplyMacro(projectId, selectedReplyMacro.id, issueForMacro.id);
                 if (!res.error && res.data) {
                     renderedBody = res.data.body;
                     unresolved = res.data.unresolvedVariables;
                 }
             }
         } finally {
-            setRenderingMacroId('');
+            if (mutation) finishIssueMutation(mutation, () => setRenderingMacroId(''));
+            else setRenderingMacroId('');
         }
+        if (mutation && !isIssueMutationCurrent(mutation)) return;
         if (!renderedBody) {
             renderedBody = renderReplyMacroBody(selectedReplyMacro.body, {
-                issue: selectedIssue,
+                issue: issueForMacro,
                 account: ticketAccount,
                 currentUserEmail,
             });
@@ -4259,16 +4656,20 @@ export function Inbox({ projectId }: InboxProps) {
 
     const toggleWatching = async () => {
         if (!selectedIssue || !currentUserEmail.trim() || togglingWatcher) return;
+        const issueIdForWatcher = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForWatcher, 'toggle-watcher');
+        const wasWatching = Boolean(currentWatcher);
         setTogglingWatcher(true);
-        const res = currentWatcher
-            ? await api.unwatchIssue(projectId, selectedIssue.id)
-            : await api.watchIssue(projectId, selectedIssue.id);
-        setTogglingWatcher(false);
+        const res = wasWatching
+            ? await api.unwatchIssue(projectId, issueIdForWatcher)
+            : await api.watchIssue(projectId, issueIdForWatcher);
+        finishIssueMutation(mutation, () => setTogglingWatcher(false));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not update watchers'));
             return;
         }
-        mergeWatcher(res.data, !currentWatcher);
+        commitIssueMutation(mutation, () => mergeWatcher(res.data!, !wasWatching));
     };
 
     const openMergeDialog = (targetIssueId = '') => {
@@ -4281,26 +4682,30 @@ export function Inbox({ projectId }: InboxProps) {
     const mergeSelectedIssue = async () => {
         if (!selectedIssue || !mergeTargetIssueId || mergingIssue) return;
         const sourceIssueId = selectedIssue.id;
+        const mutation = beginIssueMutation(sourceIssueId, 'merge-issue');
         setMergingIssue(true);
         const res = await api.mergeIssue(projectId, sourceIssueId, mergeTargetIssueId, mergeNote.trim());
-        setMergingIssue(false);
+        finishIssueMutation(mutation, () => setMergingIssue(false));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not merge tickets'));
             return;
         }
         const target = res.data;
-        setIssues(prev => {
-            const withoutSource = prev.filter(issue => issue.id !== sourceIssueId);
-            return withoutSource.some(issue => issue.id === target.id)
-                ? withoutSource.map(issue => issue.id === target.id ? { ...issue, ...target } : issue)
-                : [target, ...withoutSource];
-        });
-        setSelectedIssue(target);
-        setAssigneeDraft(target.assigneeEmail || '');
-        setTagDraft((target.tags ?? []).join(', '));
-        setReplyDraft(target.draftReply || '');
-        setSelectedIssueIds(prev => prev.filter(id => id !== sourceIssueId));
-        setMergeOpen(false);
+        if (!commitIssueMutation(mutation, () => {
+            setIssues(prev => {
+                const withoutSource = prev.filter(issue => issue.id !== sourceIssueId);
+                return withoutSource.some(issue => issue.id === target.id)
+                    ? withoutSource.map(issue => issue.id === target.id ? { ...issue, ...target } : issue)
+                    : [target, ...withoutSource];
+            });
+            setSelectedIssue(target);
+            setAssigneeDraft(target.assigneeEmail || '');
+            setTagDraft((target.tags ?? []).join(', '));
+            setReplyDraft(target.draftReply || '');
+            setSelectedIssueIds(prev => prev.filter(id => id !== sourceIssueId));
+            setMergeOpen(false);
+        })) return;
         toast.success(t('Tickets merged'));
         navigateToIssue(target.id, { viewMode: 'list' });
     };
@@ -4327,6 +4732,7 @@ export function Inbox({ projectId }: InboxProps) {
         if (!splitId) return;
         const sourceIssue = selectedIssue;
         const sourceIssueId = sourceIssue.id;
+        const mutation = beginIssueMutation(sourceIssueId, 'split-message');
         setSplittingMessageId(splitId);
         const res = await api.splitIssueMessage(projectId, sourceIssueId, {
             messageId: splitId,
@@ -4334,7 +4740,8 @@ export function Inbox({ projectId }: InboxProps) {
             note: splitMessageNote.trim(),
             runAutomations: true,
         });
-        setSplittingMessageId('');
+        finishIssueMutation(mutation, () => setSplittingMessageId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not split message'));
             return;
@@ -4347,20 +4754,22 @@ export function Inbox({ projectId }: InboxProps) {
             messageCount: remainingMessages.length,
             latestMessageAt: latestTimelineMessageAt(remainingMessages) || sourceIssue.latestMessageAt,
         };
-        setIssues(prev => {
-            const withoutNew = prev.filter(issue => issue.id !== newIssue.id);
-            const withSource = withoutNew.map(issue => issue.id === sourceIssueId ? { ...issue, ...updatedSource } : issue);
-            return [newIssue, ...withSource];
-        });
-        setSelectedIssue(newIssue);
-        setAssigneeDraft(newIssue.assigneeEmail || '');
-        setTagDraft((newIssue.tags ?? []).join(', '));
-        setReplyDraft(newIssue.draftReply || '');
-        setSelectedIssueIds(prev => prev.filter(id => id !== sourceIssueId));
-        setSplitMessageOpen(false);
-        setSplitMessageTarget(null);
-        setSplitMessageSubject('');
-        setSplitMessageNote('');
+        if (!commitIssueMutation(mutation, () => {
+            setIssues(prev => {
+                const withoutNew = prev.filter(issue => issue.id !== newIssue.id);
+                const withSource = withoutNew.map(issue => issue.id === sourceIssueId ? { ...issue, ...updatedSource } : issue);
+                return [newIssue, ...withSource];
+            });
+            setSelectedIssue(newIssue);
+            setAssigneeDraft(newIssue.assigneeEmail || '');
+            setTagDraft((newIssue.tags ?? []).join(', '));
+            setReplyDraft(newIssue.draftReply || '');
+            setSelectedIssueIds(prev => prev.filter(id => id !== sourceIssueId));
+            setSplitMessageOpen(false);
+            setSplitMessageTarget(null);
+            setSplitMessageSubject('');
+            setSplitMessageNote('');
+        })) return;
         toast.success(t('Message split to new ticket'));
         navigateToIssue(newIssue.id, { viewMode: 'list' });
     };
@@ -4408,13 +4817,12 @@ export function Inbox({ projectId }: InboxProps) {
             const updated = updatedById.get(issue.id);
             return updated ? { ...issue, ...updated } : issue;
         }));
-        setSelectedIssue(prev => {
-            if (!prev) return prev;
-            const updated = updatedById.get(prev.id);
-            return updated ? { ...prev, ...updated } : prev;
-        });
-        if (selectedIssue && updatedById.has(selectedIssue.id)) {
-            setAssigneeDraft(updatedById.get(selectedIssue.id)?.assigneeEmail || '');
+        const activeIssueUpdate = updatedById.get(activeIssueIdRef.current);
+        if (activeIssueUpdate) {
+            commitActiveIssueMutation(activeIssueUpdate.id, () => {
+                setSelectedIssueState(prev => prev?.id === activeIssueUpdate.id ? { ...prev, ...activeIssueUpdate } : prev);
+                setAssigneeDraft(activeIssueUpdate.assigneeEmail || '');
+            });
         }
         setSelectedIssueIds(prev => prev.filter(id => !updatedById.has(id)));
 
@@ -4431,15 +4839,13 @@ export function Inbox({ projectId }: InboxProps) {
             const updated = updatedById.get(issue.id);
             return updated ? { ...issue, ...updated } : issue;
         }));
-        setSelectedIssue(prev => {
-            if (!prev) return prev;
-            const updated = updatedById.get(prev.id);
-            return updated ? { ...prev, ...updated } : prev;
-        });
-        if (selectedIssue && updatedById.has(selectedIssue.id)) {
-            const updated = updatedById.get(selectedIssue.id);
-            setAssigneeDraft(updated?.assigneeEmail || '');
-            setReplyDraft(updated?.draftReply || '');
+        const activeIssueUpdate = updatedById.get(activeIssueIdRef.current);
+        if (activeIssueUpdate) {
+            commitActiveIssueMutation(activeIssueUpdate.id, () => {
+                setSelectedIssueState(prev => prev?.id === activeIssueUpdate.id ? { ...prev, ...activeIssueUpdate } : prev);
+                setAssigneeDraft(activeIssueUpdate.assigneeEmail || '');
+                setReplyDraft(activeIssueUpdate.draftReply || '');
+            });
         }
     };
 
@@ -4676,15 +5082,13 @@ export function Inbox({ projectId }: InboxProps) {
             const updated = updatedById.get(issue.id);
             return updated ? { ...issue, ...updated } : issue;
         }));
-        setSelectedIssue(prev => {
-            if (!prev) return prev;
-            const updated = updatedById.get(prev.id);
-            return updated ? { ...prev, ...updated } : prev;
-        });
-        if (selectedIssue && updatedById.has(selectedIssue.id)) {
-            const updated = updatedById.get(selectedIssue.id);
-            setAssigneeDraft(updated?.assigneeEmail || '');
-            setReplyDraft(updated?.draftReply || '');
+        const activeIssueUpdate = updatedById.get(activeIssueIdRef.current);
+        if (activeIssueUpdate) {
+            commitActiveIssueMutation(activeIssueUpdate.id, () => {
+                setSelectedIssueState(prev => prev?.id === activeIssueUpdate.id ? { ...prev, ...activeIssueUpdate } : prev);
+                setAssigneeDraft(activeIssueUpdate.assigneeEmail || '');
+                setReplyDraft(activeIssueUpdate.draftReply || '');
+            });
         }
 
         const clearedIds = new Set(res.data.issues.filter(issue => !issueHasFailedDelivery(issue)).map(issue => issue.id));
@@ -4775,10 +5179,12 @@ export function Inbox({ projectId }: InboxProps) {
         const note = await api.createIssueNote(projectId, issue.id, noteBody);
         setTicketNextActionBusy('');
         if (note.data) {
-            setSelectedIssue(prev => prev?.id === issue.id ? {
-                ...prev,
-                notes: [...(prev.notes ?? []), note.data!],
-            } : prev);
+            commitActiveIssueMutation(issue.id, () => {
+                setSelectedIssueState(prev => prev?.id === issue.id ? {
+                    ...prev,
+                    notes: [...(prev.notes ?? []), note.data!],
+                } : prev);
+            });
         }
         if (note.error) {
             toast.error(note.error || t('Could not save note'));
@@ -4827,10 +5233,12 @@ export function Inbox({ projectId }: InboxProps) {
             updatedIssues.push(updated.data);
             const note = await api.createIssueNote(projectId, issue.id, slaWorkNoteBody(mode, 'bulk'));
             if (note.data) {
-                setSelectedIssue(prev => prev?.id === issue.id ? {
-                    ...prev,
-                    notes: [...(prev.notes ?? []), note.data!],
-                } : prev);
+                commitActiveIssueMutation(issue.id, () => {
+                    setSelectedIssueState(prev => prev?.id === issue.id ? {
+                        ...prev,
+                        notes: [...(prev.notes ?? []), note.data!],
+                    } : prev);
+                });
             } else if (note.error) {
                 noteFailures += 1;
             }
@@ -4923,21 +5331,20 @@ export function Inbox({ projectId }: InboxProps) {
                 const answer = answers.get(issue.id);
                 return answer ? issueWithAgentAnswer(issue, answer, 'aggregate') : issue;
             }));
-            setSelectedIssue(prev => {
-                if (!prev) return prev;
-                const answer = answers.get(prev.id);
-                return answer ? issueWithAgentAnswer(prev, answer, 'full') : prev;
-            });
-            if (selectedIssue) {
-                const selectedAnswer = answers.get(selectedIssue.id);
-                if (selectedAnswer) {
+            const activeIssueId = activeIssueIdRef.current;
+            const selectedAnswer = answers.get(activeIssueId);
+            if (selectedAnswer) {
+                commitActiveIssueMutation(activeIssueId, () => {
+                    setSelectedIssueState(prev => prev?.id === activeIssueId
+                        ? issueWithAgentAnswer(prev, selectedAnswer, 'full')
+                        : prev);
                     setAgentAnswer(selectedAnswer);
                     if (selectedAnswer.reply) {
                         setReplyDraft(selectedAnswer.answer);
                         setReplyRequiresApproval(Boolean(selectedAnswer.approvalRequired));
                     }
-                    void refreshAnswerWorkspace(selectedIssue.id);
-                }
+                });
+                void refreshAnswerWorkspace(activeIssueId);
             }
             setSelectedIssueIds(prev => prev.filter(id => !answers.has(id)));
             toast.success(`${answers.size} ${t('reply drafts prepared')}`);
@@ -4985,17 +5392,16 @@ export function Inbox({ projectId }: InboxProps) {
                 const answer = answers.get(issue.id);
                 return answer ? issueWithAgentAnswer(issue, answer, 'aggregate') : issue;
             }));
-            setSelectedIssue(prev => {
-                if (!prev) return prev;
-                const answer = answers.get(prev.id);
-                return answer ? issueWithAgentAnswer(prev, answer, 'full') : prev;
-            });
-            if (selectedIssue) {
-                const selectedAnswer = answers.get(selectedIssue.id);
-                if (selectedAnswer) {
+            const activeIssueId = activeIssueIdRef.current;
+            const selectedAnswer = answers.get(activeIssueId);
+            if (selectedAnswer) {
+                commitActiveIssueMutation(activeIssueId, () => {
+                    setSelectedIssueState(prev => prev?.id === activeIssueId
+                        ? issueWithAgentAnswer(prev, selectedAnswer, 'full')
+                        : prev);
                     setAgentAnswer(selectedAnswer);
-                    void refreshAnswerWorkspace(selectedIssue.id);
-                }
+                });
+                void refreshAnswerWorkspace(activeIssueId);
             }
             setSelectedIssueIds(prev => prev.filter(id => !answers.has(id)));
             toast.success(`${answers.size} ${t('knowledge gaps scanned')}`);
@@ -5005,23 +5411,66 @@ export function Inbox({ projectId }: InboxProps) {
         }
     };
 
+    const openCloseWithoutReplyDialog = () => {
+        if (!selectedIssue || !issueCanResolveWithoutReply(selectedIssue)) return;
+        setCloseWithoutReplyNote('');
+        setCloseWithoutReplyOpen(true);
+    };
+
+    const closeSelectedIssueWithoutReply = async () => {
+        if (!selectedIssue || closingWithoutReply) return;
+        if (!issueCanResolveWithoutReply(selectedIssue)) {
+            toast.error(t('Resolve pending approvals or delivery problems before closing.'));
+            return;
+        }
+        const resolutionNote = closeWithoutReplyNote.trim();
+        if (!resolutionNote) {
+            toast.error(t('Add a resolution note before closing without a reply.'));
+            return;
+        }
+        const issueIdForClose = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForClose, 'close-without-reply');
+        setClosingWithoutReply(true);
+        const res = await api.updateIssue(projectId, issueIdForClose, {
+            status: 'done',
+            workflowSource: 'inbox_close_without_reply',
+            resolveWithoutReply: true,
+            resolutionNote,
+        });
+        finishIssueMutation(mutation, () => setClosingWithoutReply(false));
+        if (!isIssueMutationCurrent(mutation)) return;
+        if (res.error || !res.data) {
+            toast.error(res.error || t('Could not close ticket without a reply'));
+            return;
+        }
+        if (!commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? { ...prev, ...res.data } : res.data);
+            setIssues(prev => prev.map(issue => issue.id === res.data?.id ? { ...issue, ...res.data } : issue));
+            setCloseWithoutReplyOpen(false);
+            setCloseWithoutReplyNote('');
+        })) return;
+        toast.success(t('Ticket closed without a reply'));
+    };
+
     const patchSelectedIssue = async (data: IssuePatch) => {
-        if (!selectedIssue) return;
+        if (!selectedIssue) return false;
+        const issueForPatch = selectedIssue;
+        const mutation = beginIssueMutation(issueForPatch.id, 'patch-selected-issue');
         const updates = { ...data };
-        const nextStatus = data.status ? normalizeWorkflowStatus(data.status) : issueWorkflowStatus(selectedIssue);
+        const nextStatus = data.status ? normalizeWorkflowStatus(data.status) : issueWorkflowStatus(issueForPatch);
         if (nextStatus === 'done') {
-            const blockers = issueDoneBlockerText(selectedIssue);
+            const blockers = issueDoneBlockerText(issueForPatch);
             if (blockers) {
                 toast.error(`${t('Resolve before closing')}: ${blockers}`);
-                return;
+                return false;
             }
         }
-        const nextAssignee = 'assigneeEmail' in data ? data.assigneeEmail : selectedIssue.assigneeEmail;
+        const nextAssignee = 'assigneeEmail' in data ? data.assigneeEmail : issueForPatch.assigneeEmail;
         if (statusNeedsAssignee(nextStatus) && !nextAssignee?.trim()) {
             const claimedAssignee = currentUserEmail.trim();
             if (!claimedAssignee) {
                 toast.error(t('Assign the ticket before changing status.'));
-                return;
+                return false;
             }
             updates.assigneeEmail = claimedAssignee;
             setAssigneeDraft(claimedAssignee);
@@ -5029,13 +5478,16 @@ export function Inbox({ projectId }: InboxProps) {
         if (data.status && !updates.workflowSource) {
             updates.workflowSource = 'inbox_detail';
         }
-        const res = await api.updateIssue(projectId, selectedIssue.id, updates);
+        const res = await api.updateIssue(projectId, issueForPatch.id, updates);
+        if (!isIssueMutationCurrent(mutation)) return false;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not update ticket'));
-            return;
+            return false;
         }
-        setSelectedIssue(prev => prev ? { ...prev, ...res.data } : res.data);
-        setIssues(prev => prev.map(issue => issue.id === res.data?.id ? { ...issue, ...res.data } : issue));
+        return commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? { ...prev, ...res.data } : res.data);
+            setIssues(prev => prev.map(issue => issue.id === res.data?.id ? { ...issue, ...res.data } : issue));
+        });
     };
 
     const moveIssueToLane = async (movingId: string, status: WorkflowLane) => {
@@ -5066,7 +5518,9 @@ export function Inbox({ projectId }: InboxProps) {
         }
         const updated = res.data;
         setIssues(prev => prev.map(issue => issue.id === updated.id ? { ...issue, ...updated } : issue));
-        setSelectedIssue(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
+        commitActiveIssueMutation(updated.id, () => {
+            setSelectedIssueState(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
+        });
     };
 
     const moveIssueGroupToLane = async (sourceIssueId: string, status: WorkflowLane) => {
@@ -5115,14 +5569,12 @@ export function Inbox({ projectId }: InboxProps) {
             const updated = updatedById.get(issue.id);
             return updated ? { ...issue, ...updated } : issue;
         }));
-        setSelectedIssue(prev => {
-            if (!prev) return prev;
-            const updated = updatedById.get(prev.id);
-            return updated ? { ...prev, ...updated } : prev;
-        });
-        if (selectedIssue && updatedById.has(selectedIssue.id)) {
-            const updated = updatedById.get(selectedIssue.id);
-            setAssigneeDraft(updated?.assigneeEmail || '');
+        const activeIssueUpdate = updatedById.get(activeIssueIdRef.current);
+        if (activeIssueUpdate) {
+            commitActiveIssueMutation(activeIssueUpdate.id, () => {
+                setSelectedIssueState(prev => prev?.id === activeIssueUpdate.id ? { ...prev, ...activeIssueUpdate } : prev);
+                setAssigneeDraft(activeIssueUpdate.assigneeEmail || '');
+            });
         }
         setSelectedIssueIds(prev => prev.filter(id => !updatedById.has(id)));
 
@@ -5167,8 +5619,8 @@ export function Inbox({ projectId }: InboxProps) {
         const tags = nextTags ?? parseIssueTags(tagDraft);
         setSavingTags(true);
         try {
-            await patchSelectedIssue({ tags });
-            setTagDraft(tags.join(', '));
+            const applied = await patchSelectedIssue({ tags });
+            if (applied) setTagDraft(tags.join(', '));
         } finally {
             setSavingTags(false);
         }
@@ -5221,21 +5673,25 @@ export function Inbox({ projectId }: InboxProps) {
     const prepareTriage = async () => {
         if (!selectedIssue || preparingTriage) return;
         const issueIdForTriage = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForTriage, 'prepare-triage');
         setPreparingTriage(true);
         const res = await api.prepareIssueTriage(projectId, issueIdForTriage, true);
-        setPreparingTriage(false);
+        finishIssueMutation(mutation, () => setPreparingTriage(false));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not prepare triage'));
             return;
         }
         const preparation = res.data;
-        setSelectedIssue(prev => prev ? mergeTriagePreparation(prev, preparation) : prev);
-        setIssues(prev => prev.map(issue => issue.id === issueIdForTriage ? mergeTriagePreparation(issue, preparation) : issue));
-        if (preparation.issue) {
-            setAssigneeDraft(preparation.issue.assigneeEmail || '');
-            setTagDraft((preparation.issue.tags ?? []).join(', '));
-            setCustomFieldDraft(preparation.issue.customFields ?? {});
-        }
+        if (!commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? mergeTriagePreparation(prev, preparation) : prev);
+            setIssues(prev => prev.map(issue => issue.id === issueIdForTriage ? mergeTriagePreparation(issue, preparation) : issue));
+            if (preparation.issue) {
+                setAssigneeDraft(preparation.issue.assigneeEmail || '');
+                setTagDraft((preparation.issue.tags ?? []).join(', '));
+                setCustomFieldDraft(preparation.issue.customFields ?? {});
+            }
+        })) return;
         const changedCount = Object.keys(preparation.triage ?? {}).filter(key => key !== 'type').length;
         void refreshAnswerWorkspace(issueIdForTriage);
         toast.success(changedCount > 0 ? t('Triage proposed') : t('No triage suggested'));
@@ -5244,19 +5700,23 @@ export function Inbox({ projectId }: InboxProps) {
     const prepareCustomFields = async () => {
         if (!selectedIssue || preparingCustomFields) return;
         const issueIdForFields = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForFields, 'prepare-fields');
         setPreparingCustomFields(true);
         const res = await api.prepareIssueFields(projectId, issueIdForFields, true, true);
-        setPreparingCustomFields(false);
+        finishIssueMutation(mutation, () => setPreparingCustomFields(false));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not prepare fields'));
             return;
         }
         const preparation = res.data;
-        setSelectedIssue(prev => prev ? mergeFieldPreparation(prev, preparation) : prev);
-        setIssues(prev => prev.map(issue => issue.id === issueIdForFields ? mergeFieldPreparation(issue, preparation) : issue));
-        if (preparation.issue) {
-            setCustomFieldDraft(preparation.issue.customFields ?? {});
-        }
+        if (!commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? mergeFieldPreparation(prev, preparation) : prev);
+            setIssues(prev => prev.map(issue => issue.id === issueIdForFields ? mergeFieldPreparation(issue, preparation) : issue));
+            if (preparation.issue) {
+                setCustomFieldDraft(preparation.issue.customFields ?? {});
+            }
+        })) return;
         const fieldCount = Object.keys(preparation.customFields ?? {}).length;
         void refreshAnswerWorkspace(issueIdForFields);
         toast.success(fieldCount > 0 ? t('Fields proposed') : t('No fields suggested'));
@@ -5265,6 +5725,7 @@ export function Inbox({ projectId }: InboxProps) {
     const prepareTicketPackage = async () => {
         if (!selectedIssue || preparingTicketPackage) return;
         const issueIdForPackage = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForPackage, 'prepare-ticket-package');
         const packageQuestion = 'Prepare the complete human-review package for this ticket: propose triage, fill missing custom fields, and draft an approval-ready customer reply using ticket context, account context, and knowledge articles.';
         const packageErrors: string[] = [];
         let preparedTriage = false;
@@ -5277,31 +5738,35 @@ export function Inbox({ projectId }: InboxProps) {
         setRunningAgentActionKey('prepare-package');
         try {
             const triageRes = await api.prepareIssueTriage(projectId, issueIdForPackage, true);
+            if (!isIssueMutationCurrent(mutation)) return;
             if (triageRes.error || !triageRes.data) {
                 packageErrors.push(triageRes.error || t('Could not prepare triage'));
             } else {
                 const preparation = triageRes.data;
-                preparedTriage = true;
-                setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? mergeTriagePreparation(prev, preparation) : prev);
-                setIssues(prev => prev.map(issue => issue.id === issueIdForPackage ? mergeTriagePreparation(issue, preparation) : issue));
-                if (preparation.issue) {
-                    setAssigneeDraft(preparation.issue.assigneeEmail || '');
-                    setTagDraft((preparation.issue.tags ?? []).join(', '));
-                    setCustomFieldDraft(preparation.issue.customFields ?? {});
-                }
+                preparedTriage = commitIssueMutation(mutation, () => {
+                    setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? mergeTriagePreparation(prev, preparation) : prev);
+                    setIssues(prev => prev.map(issue => issue.id === issueIdForPackage ? mergeTriagePreparation(issue, preparation) : issue));
+                    if (preparation.issue) {
+                        setAssigneeDraft(preparation.issue.assigneeEmail || '');
+                        setTagDraft((preparation.issue.tags ?? []).join(', '));
+                        setCustomFieldDraft(preparation.issue.customFields ?? {});
+                    }
+                });
             }
 
             const fieldsRes = await api.prepareIssueFields(projectId, issueIdForPackage, true, true);
+            if (!isIssueMutationCurrent(mutation)) return;
             if (fieldsRes.error || !fieldsRes.data) {
                 packageErrors.push(fieldsRes.error || t('Could not prepare fields'));
             } else {
                 const preparation = fieldsRes.data;
-                preparedFields = true;
-                setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? mergeFieldPreparation(prev, preparation) : prev);
-                setIssues(prev => prev.map(issue => issue.id === issueIdForPackage ? mergeFieldPreparation(issue, preparation) : issue));
-                if (preparation.issue) {
-                    setCustomFieldDraft(preparation.issue.customFields ?? {});
-                }
+                preparedFields = commitIssueMutation(mutation, () => {
+                    setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? mergeFieldPreparation(prev, preparation) : prev);
+                    setIssues(prev => prev.map(issue => issue.id === issueIdForPackage ? mergeFieldPreparation(issue, preparation) : issue));
+                    if (preparation.issue) {
+                        setCustomFieldDraft(preparation.issue.customFields ?? {});
+                    }
+                });
             }
 
             const replyRes = await api.askIssueAgent(
@@ -5313,6 +5778,7 @@ export function Inbox({ projectId }: InboxProps) {
                 true,
                 false,
             );
+            if (!isIssueMutationCurrent(mutation)) return;
             if (replyRes.error || !replyRes.data) {
                 packageErrors.push(replyRes.error || t('Could not ask agent'));
             } else {
@@ -5323,43 +5789,47 @@ export function Inbox({ projectId }: InboxProps) {
                 const responseAgentMessages = answer.agentMessages;
                 const appendedAgentMessages = [answer.userMessage, answer.assistantMessage]
                     .filter((message): message is SupportAgentMessage => Boolean(message));
-                setAgentQuestion(packageQuestion);
-                setAgentAnswer(answer);
-                if (reply && !answer.autoSend) {
-                    setReplyDraft(answer.answer);
-                    setReplyRequiresApproval(Boolean(answer.approvalRequired));
-                }
-                if (reply) {
-                    preparedReply = true;
-                    setSelectedIssue(prev => {
-                        if (!prev || prev.id !== issueIdForPackage) return prev;
-                        const issueWithRun = {
+                commitIssueMutation(mutation, () => {
+                    setAgentQuestion(packageQuestion);
+                    setAgentAnswer(answer);
+                    if (reply && !answer.autoSend) {
+                        setReplyDraft(answer.answer);
+                        setReplyRequiresApproval(Boolean(answer.approvalRequired));
+                    }
+                    if (reply) {
+                        preparedReply = true;
+                        setSelectedIssue(prev => {
+                            if (!prev || prev.id !== issueIdForPackage) return prev;
+                            const issueWithRun = {
+                                ...prev,
+                                aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
+                                agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
+                                knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
+                            };
+                            return mergeOutboundReplyIntoIssue(issueWithRun, reply, { mode: 'full' });
+                        });
+                        setIssues(prev => prev.map(issue => issue.id === issueIdForPackage
+                            ? mergeOutboundReplyIntoIssue(issue, reply, { mode: 'aggregate' })
+                            : issue));
+                    } else {
+                        setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? {
                             ...prev,
                             aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
                             agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
                             knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-                        };
-                        return mergeOutboundReplyIntoIssue(issueWithRun, reply, { mode: 'full' });
-                    });
-                    setIssues(prev => prev.map(issue => issue.id === issueIdForPackage
-                        ? mergeOutboundReplyIntoIssue(issue, reply, { mode: 'aggregate' })
-                        : issue));
-                } else {
-                    setSelectedIssue(prev => prev && prev.id === issueIdForPackage ? {
-                        ...prev,
-                        aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
-                        agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
-                        knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-                    } : prev);
-                }
+                        } : prev);
+                    }
+                });
             }
         } finally {
-            setPreparingTicketPackage(false);
-            setPreparingTriage(false);
-            setPreparingCustomFields(false);
-            setAskingAgent(false);
-            setRunningAgentActionKey('');
-            void refreshAnswerWorkspace(issueIdForPackage);
+            finishIssueMutation(mutation, () => {
+                setPreparingTicketPackage(false);
+                setPreparingTriage(false);
+                setPreparingCustomFields(false);
+                setAskingAgent(false);
+                setRunningAgentActionKey('');
+            });
+            if (isIssueMutationCurrent(mutation)) void refreshAnswerWorkspace(issueIdForPackage);
         }
         if (packageErrors.length > 0) {
             toast.error(packageErrors[0]);
@@ -5385,8 +5855,10 @@ export function Inbox({ projectId }: InboxProps) {
             }
             const updated = res.data;
             setIssues(prev => prev.map(item => item.id === updated.id ? { ...item, ...updated } : item));
-            setSelectedIssue(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
-            if (issueId === updated.id) setAssigneeDraft(updated.assigneeEmail || claimedAssignee);
+            commitActiveIssueMutation(updated.id, () => {
+                setSelectedIssueState(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
+                setAssigneeDraft(updated.assigneeEmail || claimedAssignee);
+            });
             toast.success(t('Assigned'));
         } finally {
             setClaimingIssueId('');
@@ -5492,33 +5964,39 @@ export function Inbox({ projectId }: InboxProps) {
     const updateOutboundReply = (
         reply: SupportOutboundMessage,
         options: { issuePatch?: Partial<SupportIssue>; appendSentTimeline?: boolean } = {},
+        mutation?: IssueMutationScope,
     ) => {
-        const targetIssueId = reply.issueId || selectedIssue?.id;
+        const targetIssueId = reply.issueId || mutation?.requestedIssueId || selectedIssue?.id;
         const selectedPreviousReply = selectedIssue?.outboundMessages?.find(item => item.id === reply.id) ?? null;
-        if (targetIssueId && selectedIssue?.id === targetIssueId && options.issuePatch?.assigneeEmail !== undefined) {
-            setAssigneeDraft(options.issuePatch.assigneeEmail || '');
-        }
-        setSelectedIssue(prev => {
-            if (!prev || (targetIssueId && prev.id !== targetIssueId)) return prev;
-            const previousReply = prev.outboundMessages?.find(item => item.id === reply.id) ?? selectedPreviousReply;
-            return mergeOutboundReplyIntoIssue(prev, reply, {
-                mode: 'full',
-                previousReply,
-                issuePatch: options.issuePatch,
-                appendSentTimeline: options.appendSentTimeline,
-            });
-        });
-        if (targetIssueId) {
-            setIssues(prev => prev.map(issue => {
-                if (issue.id !== targetIssueId) return issue;
-                const previousReply = issue.outboundMessages?.find(item => item.id === reply.id) ?? selectedPreviousReply;
-                return mergeOutboundReplyIntoIssue(issue, reply, {
-                    mode: 'aggregate',
+        const apply = () => {
+            if (targetIssueId && selectedIssue?.id === targetIssueId && options.issuePatch?.assigneeEmail !== undefined) {
+                setAssigneeDraft(options.issuePatch.assigneeEmail || '');
+            }
+            setSelectedIssue(prev => {
+                if (!prev || (targetIssueId && prev.id !== targetIssueId)) return prev;
+                const previousReply = prev.outboundMessages?.find(item => item.id === reply.id) ?? selectedPreviousReply;
+                return mergeOutboundReplyIntoIssue(prev, reply, {
+                    mode: 'full',
                     previousReply,
                     issuePatch: options.issuePatch,
+                    appendSentTimeline: options.appendSentTimeline,
                 });
-            }));
-        }
+            });
+            if (targetIssueId) {
+                setIssues(prev => prev.map(issue => {
+                    if (issue.id !== targetIssueId) return issue;
+                    const previousReply = issue.outboundMessages?.find(item => item.id === reply.id) ?? selectedPreviousReply;
+                    return mergeOutboundReplyIntoIssue(issue, reply, {
+                        mode: 'aggregate',
+                        previousReply,
+                        issuePatch: options.issuePatch,
+                    });
+                }));
+            }
+        };
+        if (mutation) return commitIssueMutation(mutation, apply);
+        apply();
+        return true;
     };
 
     const startEditingReply = (reply: SupportOutboundMessage) => {
@@ -5535,38 +6013,52 @@ export function Inbox({ projectId }: InboxProps) {
 
     const saveEditedReply = async (reply: SupportOutboundMessage) => {
         if (!selectedIssue || !editingReplyBody.trim()) return;
+        const issueIdForReply = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForReply, 'save-reply-edit');
         setSavingReplyEditId(reply.id);
-        const res = await api.updateIssueReply(projectId, selectedIssue.id, reply.id, {
+        const res = await api.updateIssueReply(projectId, issueIdForReply, reply.id, {
             body: editingReplyBody.trim(),
             status: reply.status,
         });
-        setSavingReplyEditId('');
+        finishIssueMutation(mutation, () => setSavingReplyEditId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not save reply'));
             return;
         }
-        updateOutboundReply(res.data);
-        cancelEditingReply();
+        if (!updateOutboundReply(res.data, {}, mutation)) return;
+        commitIssueMutation(mutation, cancelEditingReply);
         toast.success(t('Saved'));
     };
 
     const addNote = async () => {
         if (!selectedIssue || !noteDraft.trim()) return;
+        const issueIdForNote = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForNote, 'add-note');
         setSavingNote(true);
-        const res = await api.createIssueNote(projectId, selectedIssue.id, noteDraft.trim());
-        setSavingNote(false);
+        const res = await api.createIssueNote(projectId, issueIdForNote, noteDraft.trim());
+        if (!isIssueMutationCurrent(mutation)) {
+            finishIssueMutation(mutation, () => setSavingNote(false));
+            return;
+        }
         if (res.error || !res.data) {
+            finishIssueMutation(mutation, () => setSavingNote(false));
             toast.error(res.error || t('Could not save note'));
             return;
         }
-        setSelectedIssue(prev => prev ? { ...prev, notes: [...(prev.notes ?? []), res.data!] } : prev);
-        setNoteDraft('');
-        void api.getIssue(projectId, selectedIssue.id).then((detail) => {
-            if (detail.data) {
-                setSelectedIssue(detail.data);
-                setAssigneeDraft(detail.data.assigneeEmail || '');
-            }
+        commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? { ...prev, notes: [...(prev.notes ?? []), res.data!] } : prev);
+            setNoteDraft('');
         });
+        const detail = await api.getIssue(projectId, issueIdForNote);
+        finishIssueMutation(mutation, () => setSavingNote(false));
+        const issueDetail = detail.data;
+        if (issueDetail) {
+            commitIssueMutation(mutation, () => {
+                setSelectedIssue(issueDetail);
+                setAssigneeDraft(issueDetail.assigneeEmail || '');
+            });
+        }
     };
 
     const saveReply = async (status: 'draft' | 'queued') => {
@@ -5575,44 +6067,49 @@ export function Inbox({ projectId }: InboxProps) {
             toast.error(selectedReplySendBlockDetail || t('Reply channel is blocked'));
             return;
         }
+        const issueForReply = selectedIssue;
+        const mutation = beginIssueMutation(issueForReply.id, 'save-reply');
         setSavingReplyStatus(status);
         const res = await api.createIssueReply(
             projectId,
-            selectedIssue.id,
+            issueForReply.id,
             replyDraft.trim(),
             status,
             replyRequiresApproval,
             replyIncludeFeedbackLink,
         );
-        setSavingReplyStatus('');
+        finishIssueMutation(mutation, () => setSavingReplyStatus(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not save reply'));
             return;
         }
-        const claimedAssigneeEmail = selectedIssue.assigneeEmail || currentUserEmail;
+        const claimedAssigneeEmail = issueForReply.assigneeEmail || currentUserEmail;
         const issuePatch: Partial<SupportIssue> = {
-            assigneeEmail: claimedAssigneeEmail || selectedIssue.assigneeEmail,
+            assigneeEmail: claimedAssigneeEmail || issueForReply.assigneeEmail,
         };
         if (status === 'queued') {
             issuePatch.status = 'ongoing';
             issuePatch.workflowStatus = 'ongoing';
         }
-        setSelectedIssue(prev => prev ? mergeOutboundReplyIntoIssue(prev, res.data!, {
-            mode: 'full',
-            issuePatch,
-        }) : prev);
-        setIssues(prev => prev.map(issue => issue.id === selectedIssue.id
-            ? mergeOutboundReplyIntoIssue(issue, res.data!, {
-                mode: 'aggregate',
+        if (!commitIssueMutation(mutation, () => {
+            setSelectedIssue(prev => prev ? mergeOutboundReplyIntoIssue(prev, res.data!, {
+                mode: 'full',
                 issuePatch,
-            })
-            : issue));
+            }) : prev);
+            setIssues(prev => prev.map(issue => issue.id === issueForReply.id
+                ? mergeOutboundReplyIntoIssue(issue, res.data!, {
+                    mode: 'aggregate',
+                    issuePatch,
+                })
+                : issue));
+            if (status === 'queued') {
+                setReplyDraft('');
+                setReplyRequiresApproval(false);
+            }
+        })) return;
         toast.success(status === 'queued' ? t('Queued') : t('Saved'));
-        if (status === 'queued') {
-            setReplyDraft('');
-            setReplyRequiresApproval(false);
-        }
-        void refreshAnswerWorkspace(selectedIssue.id);
+        void refreshAnswerWorkspace(issueForReply.id);
     };
 
     const sendReplyDraftNow = async () => {
@@ -5625,7 +6122,9 @@ export function Inbox({ projectId }: InboxProps) {
             toast.error(selectedReplySendBlockDetail || t('Reply channel is blocked'));
             return;
         }
-        const issueId = selectedIssue.id;
+        const issueForReply = selectedIssue;
+        const issueId = issueForReply.id;
+        const mutation = beginIssueMutation(issueId, 'send-reply-draft');
         const body = replyDraft.trim();
         setSavingReplyStatus('send-now');
         try {
@@ -5637,32 +6136,36 @@ export function Inbox({ projectId }: InboxProps) {
                 false,
                 replyIncludeFeedbackLink,
             );
+            if (!isIssueMutationCurrent(mutation)) return;
             if (created.error || !created.data) {
                 toast.error(created.error || t('Could not save reply'));
                 return;
             }
-            const claimedAssigneeEmail = selectedIssue.assigneeEmail || currentUserEmail;
+            const claimedAssigneeEmail = issueForReply.assigneeEmail || currentUserEmail;
             const queuedIssuePatch: Partial<SupportIssue> = {
-                assigneeEmail: claimedAssigneeEmail || selectedIssue.assigneeEmail,
+                assigneeEmail: claimedAssigneeEmail || issueForReply.assigneeEmail,
                 status: 'ongoing',
                 workflowStatus: 'ongoing',
             };
-            updateOutboundReply(created.data, { issuePatch: queuedIssuePatch });
-            setReplyDraft('');
-            setReplyRequiresApproval(false);
+            if (!updateOutboundReply(created.data, { issuePatch: queuedIssuePatch }, mutation)) return;
+            commitIssueMutation(mutation, () => {
+                setReplyDraft('');
+                setReplyRequiresApproval(false);
+            });
 
             const sent = await api.sendIssueReply(projectId, issueId, created.data.id);
+            if (!isIssueMutationCurrent(mutation)) return;
             if (sent.error || !sent.data) {
                 toast.error(sent.error || t('Could not send reply'));
                 void refreshAnswerWorkspace(issueId);
                 return;
             }
-            updateOutboundReply(sent.data, {
+            if (!updateOutboundReply(sent.data, {
                 issuePatch: sent.data.status === 'sent'
                     ? sentReplyIssuePatch(sent.data, currentUserEmail)
                     : queuedIssuePatch,
                 appendSentTimeline: sent.data.status === 'sent',
-            });
+            }, mutation)) return;
             void refreshAnswerWorkspace(issueId);
             if (sent.data.status === 'sent') {
                 toast.success(t('Sent'));
@@ -5670,7 +6173,7 @@ export function Inbox({ projectId }: InboxProps) {
                 toast.error(sent.data.error || t('Delivery failed'));
             }
         } finally {
-            setSavingReplyStatus('');
+            finishIssueMutation(mutation, () => setSavingReplyStatus(''));
         }
     };
 
@@ -5680,85 +6183,108 @@ export function Inbox({ projectId }: InboxProps) {
         status: 'running' | 'success' | 'failed',
     ) => {
         if (!selectedIssue) return;
+        const issueIdForAction = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForAction, 'record-action');
         const key = `${action.type || 'action'}:${action.label || index}`;
         setSavingActionKey(`${key}:${status}`);
-        const res = await api.createIssueActionExecution(projectId, selectedIssue.id, {
+        const res = await api.createIssueActionExecution(projectId, issueIdForAction, {
             actionKey: key,
             label: action.label || t('Action'),
             type: action.type || 'manual',
             status,
         });
-        setSavingActionKey('');
+        finishIssueMutation(mutation, () => setSavingActionKey(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not record action'));
             return;
         }
-        setSelectedIssue(prev => prev ? {
+        if (!commitIssueMutation(mutation, () => setSelectedIssue(prev => prev ? {
             ...prev,
             actionExecutions: [res.data!, ...(prev.actionExecutions ?? [])],
-        } : prev);
+        } : prev))) return;
         toast.success(t('Saved'));
     };
 
-    const updateActionExecution = (execution: SupportActionExecution, issuePatch?: SupportIssue | null) => {
-        const targetIssueId = execution.issueId || selectedIssue?.id;
-        setSelectedIssue(prev => {
-            if (!prev || (targetIssueId && prev.id !== targetIssueId)) return prev;
-            const nextIssue = issuePatch?.id === prev.id ? { ...prev, ...issuePatch } : prev;
-            return mergeActionExecutionIntoIssue(nextIssue, execution);
-        });
-        if (targetIssueId) {
-            setIssues(prev => prev.map(issue => {
-                if (issue.id !== targetIssueId) return issue;
-                const nextIssue = issuePatch?.id === issue.id ? { ...issue, ...issuePatch } : issue;
+    const updateActionExecution = (
+        execution: SupportActionExecution,
+        issuePatch?: SupportIssue | null,
+        mutation?: IssueMutationScope,
+    ) => {
+        const targetIssueId = execution.issueId || mutation?.requestedIssueId || selectedIssue?.id;
+        const apply = () => {
+            setSelectedIssue(prev => {
+                if (!prev || (targetIssueId && prev.id !== targetIssueId)) return prev;
+                const nextIssue = issuePatch?.id === prev.id ? { ...prev, ...issuePatch } : prev;
                 return mergeActionExecutionIntoIssue(nextIssue, execution);
-            }));
-        }
+            });
+            if (targetIssueId) {
+                setIssues(prev => prev.map(issue => {
+                    if (issue.id !== targetIssueId) return issue;
+                    const nextIssue = issuePatch?.id === issue.id ? { ...issue, ...issuePatch } : issue;
+                    return mergeActionExecutionIntoIssue(nextIssue, execution);
+                }));
+            }
+        };
+        if (mutation) return commitIssueMutation(mutation, apply);
+        apply();
+        return true;
     };
 
     const approveActionExecution = async (execution: SupportActionExecution) => {
         if (!selectedIssue || approvingActionExecutionId || rejectingActionExecutionId) return;
+        const issueIdForAction = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForAction, 'approve-action');
         setApprovingActionExecutionId(execution.id);
-        const res = await api.approveIssueActionExecution(projectId, selectedIssue.id, execution.id);
-        setApprovingActionExecutionId('');
+        const res = await api.approveIssueActionExecution(projectId, issueIdForAction, execution.id);
+        finishIssueMutation(mutation, () => setApprovingActionExecutionId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not approve action'));
             return;
         }
-        updateActionExecution(res.data.execution, res.data.issue);
-        if (res.data.issue) {
-            setAssigneeDraft(res.data.issue.assigneeEmail || '');
-            setTagDraft((res.data.issue.tags ?? []).join(', '));
-            setCustomFieldDraft(res.data.issue.customFields ?? {});
-        }
+        if (!commitIssueMutation(mutation, () => {
+            updateActionExecution(res.data!.execution, res.data!.issue);
+            if (res.data!.issue) {
+                setAssigneeDraft(res.data!.issue.assigneeEmail || '');
+                setTagDraft((res.data!.issue.tags ?? []).join(', '));
+                setCustomFieldDraft(res.data!.issue.customFields ?? {});
+            }
+        })) return;
         toast.success(t('Approved'));
     };
 
     const rejectActionExecution = async (execution: SupportActionExecution) => {
         if (!selectedIssue || approvingActionExecutionId || rejectingActionExecutionId) return;
+        const issueIdForAction = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForAction, 'reject-action');
         setRejectingActionExecutionId(execution.id);
-        const res = await api.rejectIssueActionExecution(projectId, selectedIssue.id, execution.id);
-        setRejectingActionExecutionId('');
+        const res = await api.rejectIssueActionExecution(projectId, issueIdForAction, execution.id);
+        finishIssueMutation(mutation, () => setRejectingActionExecutionId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not reject action'));
             return;
         }
-        updateActionExecution(res.data.execution, res.data.issue);
+        if (!updateActionExecution(res.data.execution, res.data.issue, mutation)) return;
         toast.success(t('Rejected'));
     };
 
     const approveReply = async (reply: SupportOutboundMessage) => {
         if (!selectedIssue || approvingReplyId || savingReplyEditId || revisingReplyId) return;
+        const issueForReply = selectedIssue;
+        const mutation = beginIssueMutation(issueForReply.id, 'approve-reply');
         setApprovingReplyId(reply.id);
-        const res = await api.approveIssueReply(projectId, selectedIssue.id, reply.id);
-        setApprovingReplyId('');
+        const res = await api.approveIssueReply(projectId, issueForReply.id, reply.id);
+        finishIssueMutation(mutation, () => setApprovingReplyId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not approve reply'));
             return;
         }
-        updateOutboundReply(res.data, {
-            issuePatch: replyApprovalIssuePatch(selectedIssue, res.data, currentUserEmail),
-        });
+        if (!updateOutboundReply(res.data, {
+            issuePatch: replyApprovalIssuePatch(issueForReply, res.data, currentUserEmail),
+        }, mutation)) return;
         toast.success(t('Approved'));
     };
 
@@ -5776,29 +6302,35 @@ export function Inbox({ projectId }: InboxProps) {
 
     const requestReplyChanges = async (reply: SupportOutboundMessage) => {
         if (!selectedIssue || requestingChangesReplyId || savingReplyEditId || revisingReplyId) return;
+        const issueIdForReply = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForReply, 'request-reply-changes');
         setRequestingChangesReplyId(reply.id);
-        const res = await api.requestIssueReplyChanges(projectId, selectedIssue.id, reply.id, changeRequestNote.trim());
-        setRequestingChangesReplyId('');
+        const res = await api.requestIssueReplyChanges(projectId, issueIdForReply, reply.id, changeRequestNote.trim());
+        finishIssueMutation(mutation, () => setRequestingChangesReplyId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not request changes'));
             return;
         }
-        updateOutboundReply(res.data);
-        cancelChangeRequest();
+        if (!updateOutboundReply(res.data, {}, mutation)) return;
+        commitIssueMutation(mutation, cancelChangeRequest);
         toast.success(t('Changes requested'));
     };
 
     const reviseReplyWithAgent = async (reply: SupportOutboundMessage) => {
         if (!selectedIssue || revisingReplyId || askingAgent || savingReplyEditId) return;
+        const issueIdForReply = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForReply, 'revise-reply');
         setRevisingReplyId(reply.id);
         const res = await api.reviseIssueReply(
             projectId,
-            selectedIssue.id,
+            issueIdForReply,
             reply.id,
             replyChangesNote(reply),
             replyIncludeFeedbackLink,
         );
-        setRevisingReplyId('');
+        finishIssueMutation(mutation, () => setRevisingReplyId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not revise draft'));
             return;
@@ -5807,27 +6339,29 @@ export function Inbox({ projectId }: InboxProps) {
         const revisedReply = answer.reply;
         const run = answer.run;
         const gap = answer.knowledgeGap ?? null;
-        setAgentAnswer(answer);
-        if (revisedReply) {
-            setSelectedIssue(prev => {
-                if (!prev) return prev;
-                const issueWithRun = {
+        if (!commitIssueMutation(mutation, () => {
+            setAgentAnswer(answer);
+            if (revisedReply) {
+                setSelectedIssue(prev => {
+                    if (!prev) return prev;
+                    const issueWithRun = {
+                        ...prev,
+                        aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
+                        knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
+                    };
+                    return mergeOutboundReplyIntoIssue(issueWithRun, revisedReply, { mode: 'full' });
+                });
+                setIssues(prev => prev.map(issue => issue.id === issueIdForReply
+                    ? mergeOutboundReplyIntoIssue(issue, revisedReply, { mode: 'aggregate' })
+                    : issue));
+            } else {
+                setSelectedIssue(prev => prev ? {
                     ...prev,
                     aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
                     knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-                };
-                return mergeOutboundReplyIntoIssue(issueWithRun, revisedReply, { mode: 'full' });
-            });
-            setIssues(prev => prev.map(issue => issue.id === selectedIssue.id
-                ? mergeOutboundReplyIntoIssue(issue, revisedReply, { mode: 'aggregate' })
-                : issue));
-        } else {
-            setSelectedIssue(prev => prev ? {
-                ...prev,
-                aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
-                knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-            } : prev);
-        }
+                } : prev);
+            }
+        })) return;
         toast.success(revisedReply ? t('Revision prepared') : t('Agent answered'));
     };
 
@@ -5841,58 +6375,69 @@ export function Inbox({ projectId }: InboxProps) {
             toast.error(selectedReplySendBlockDetail || t('Reply channel is blocked'));
             return;
         }
+        const issueForReply = selectedIssue;
+        const mutation = beginIssueMutation(issueForReply.id, 'send-reply');
         setSendingReplyId(reply.id);
         try {
             let replyToSend = reply;
             if (approveFirst && replyNeedsApproval(reply)) {
                 setApprovingReplyId(reply.id);
-                const approval = await api.approveIssueReply(projectId, selectedIssue.id, reply.id);
+                const approval = await api.approveIssueReply(projectId, issueForReply.id, reply.id);
+                if (!isIssueMutationCurrent(mutation)) return;
                 if (approval.error || !approval.data) {
                     toast.error(approval.error || t('Could not approve reply'));
                     return;
                 }
                 replyToSend = approval.data;
-                updateOutboundReply(replyToSend, {
-                    issuePatch: replyApprovalIssuePatch(selectedIssue, replyToSend, currentUserEmail),
-                });
+                if (!updateOutboundReply(replyToSend, {
+                    issuePatch: replyApprovalIssuePatch(issueForReply, replyToSend, currentUserEmail),
+                }, mutation)) return;
             }
-            const res = await api.sendIssueReply(projectId, selectedIssue.id, replyToSend.id, options.forceRetry === true);
+            const res = await api.sendIssueReply(projectId, issueForReply.id, replyToSend.id, options.forceRetry === true);
+            if (!isIssueMutationCurrent(mutation)) return;
             if (res.error || !res.data) {
                 toast.error(res.error || t('Could not send reply'));
                 return;
             }
-            updateOutboundReply(res.data, {
+            if (!updateOutboundReply(res.data, {
                 issuePatch: res.data.status === 'sent'
                     ? sentReplyIssuePatch(res.data, currentUserEmail)
                     : undefined,
                 appendSentTimeline: res.data.status === 'sent',
-            });
+            }, mutation)) return;
             if (res.data.status === 'sent') {
                 toast.success(t('Sent'));
             } else {
                 toast.error(res.data.error || t('Delivery failed'));
             }
         } finally {
-            setSendingReplyId('');
-            setApprovingReplyId('');
+            finishIssueMutation(mutation, () => {
+                setSendingReplyId('');
+                setApprovingReplyId('');
+            });
         }
     };
 
     const createPortalLink = async () => {
         if (!selectedIssue) return;
+        const issueIdForPortal = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForPortal, 'create-portal-link');
         setCreatingPortalLink(true);
-        const res = await api.createIssuePortalSession(projectId, selectedIssue.id);
-        setCreatingPortalLink(false);
+        const res = await api.createIssuePortalSession(projectId, issueIdForPortal);
+        finishIssueMutation(mutation, () => setCreatingPortalLink(false));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not create portal link'));
             return;
         }
         const url = res.data.url || '';
-        setPortalUrl(url);
-        setSelectedIssue(prev => prev ? {
-            ...prev,
-            portalSessions: [res.data!, ...(prev.portalSessions ?? [])],
-        } : prev);
+        if (!commitIssueMutation(mutation, () => {
+            setPortalUrl(url);
+            setSelectedIssue(prev => prev ? {
+                ...prev,
+                portalSessions: [res.data!, ...(prev.portalSessions ?? [])],
+            } : prev);
+        })) return;
         if (url && navigator.clipboard) {
             try {
                 await navigator.clipboard.writeText(url);
@@ -5955,49 +6500,63 @@ export function Inbox({ projectId }: InboxProps) {
 
     const createTicketAccountInsight = async (type: 'risk' | 'feature_request') => {
         if (!selectedIssue || !ticketAccount || savingAccountInsightKey) return;
-        const key = `${type}:${selectedIssue.id}`;
+        const issueForInsight = selectedIssue;
+        const accountForInsight = ticketAccount;
+        const mutation = beginIssueMutation(issueForInsight.id, 'create-account-insight');
+        const key = `${type}:${issueForInsight.id}`;
         setSavingAccountInsightKey(key);
         const title = type === 'risk'
-            ? `Support risk: ${selectedIssue.subject || accountLabel(ticketAccount)}`
-            : `Feature request: ${selectedIssue.subject || accountLabel(ticketAccount)}`;
-        const res = await api.createAccountInsight(projectId, ticketAccount.id, {
+            ? `Support risk: ${issueForInsight.subject || accountLabel(accountForInsight)}`
+            : `Feature request: ${issueForInsight.subject || accountLabel(accountForInsight)}`;
+        const res = await api.createAccountInsight(projectId, accountForInsight.id, {
             type,
             title,
             body: ticketInsightBody(type),
             severity: type === 'risk' ? 'high' : 'normal',
             status: 'open',
-            sourceIssueId: selectedIssue.id,
-            insightKey: `ticket:${type}:${selectedIssue.id}`,
+            sourceIssueId: issueForInsight.id,
+            insightKey: `ticket:${type}:${issueForInsight.id}`,
             metadata: {
                 source: 'ticket_workspace',
-                issueId: selectedIssue.id,
-                channel: selectedIssue.channel,
-                priority: selectedIssue.priority,
+                issueId: issueForInsight.id,
+                channel: issueForInsight.channel,
+                priority: issueForInsight.priority,
             },
         });
-        setSavingAccountInsightKey('');
+        finishIssueMutation(mutation, () => setSavingAccountInsightKey(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not create insight'));
             return;
         }
-        setTicketAccount(prev => prev ? mergeAccountInsight(prev, res.data!) : prev);
+        if (!commitIssueMutation(mutation, () => setTicketAccount(prev => prev?.id === accountForInsight.id
+            ? mergeAccountInsight(prev, res.data!)
+            : prev))) return;
         toast.success(type === 'risk' ? t('Risk added') : t('Feature request added'));
     };
 
     const updateTicketAccountInsightStatus = async (insight: SupportAccountInsight, status: string) => {
-        if (!ticketAccount || savingAccountInsightKey) return;
+        if (!selectedIssue || !ticketAccount || savingAccountInsightKey) return;
+        const issueIdForInsight = selectedIssue.id;
+        const accountIdForInsight = ticketAccount.id;
+        const mutation = beginIssueMutation(issueIdForInsight, 'update-account-insight');
         const key = `insight:${insight.id}:${status}`;
         setSavingAccountInsightKey(key);
         const res = await api.updateAccountInsight(projectId, insight.id, { status });
-        setSavingAccountInsightKey('');
+        finishIssueMutation(mutation, () => setSavingAccountInsightKey(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not update insight'));
             return;
         }
-        setTicketAccount(prev => prev ? updateAccountInsightInAccount(prev, res.data!) : prev);
-        const accountRes = await api.getAccount(projectId, ticketAccount.id);
-        if (accountRes.data) {
-            setTicketAccount(accountRes.data);
+        commitIssueMutation(mutation, () => setTicketAccount(prev => prev?.id === accountIdForInsight
+            ? updateAccountInsightInAccount(prev, res.data!)
+            : prev));
+        const accountRes = await api.getAccount(projectId, accountIdForInsight);
+        if (!isIssueMutationCurrent(mutation)) return;
+        const refreshedAccount = accountRes.data;
+        if (refreshedAccount) {
+            commitIssueMutation(mutation, () => setTicketAccount(refreshedAccount));
         }
         toast.success(status === 'resolved' ? t('Insight resolved') : t('Insight updated'));
     };
@@ -6007,68 +6566,77 @@ export function Inbox({ projectId }: InboxProps) {
         source?: AgentArticleSource,
     ) => {
         if (!selectedIssue) return;
+        const issueForArticle = selectedIssue;
+        const mutation = beginIssueMutation(issueForArticle.id, 'create-knowledge-article');
         const title = source?.title
             || gap?.suggestedArticleTitle
             || gap?.title.replace(/^Knowledge gap:\s*/i, '')
-            || selectedIssue.subject
+            || issueForArticle.subject
             || t('Support article');
         const body = ticketArticleBody(gap, source);
         if (!body.trim()) {
             toast.error(t('Could not create article'));
             return;
         }
-        const key = source?.key || gap?.id || selectedIssue.id;
+        const key = source?.key || gap?.id || issueForArticle.id;
         setCreatingKnowledgeArticle(key);
         const sourceTags = source?.tags ?? [];
         const res = await api.createKnowledgeArticle(projectId, {
             title,
             body,
             status: 'draft',
-            sourceIssueId: selectedIssue.id,
+            sourceIssueId: issueForArticle.id,
             sourceGapId: gap?.id,
-            tags: [selectedIssue.channel, selectedIssue.activatedIntent, 'ticket', ...sourceTags].filter(Boolean),
+            tags: [issueForArticle.channel, issueForArticle.activatedIntent, 'ticket', ...sourceTags].filter(Boolean),
         });
-        setCreatingKnowledgeArticle('');
+        finishIssueMutation(mutation, () => setCreatingKnowledgeArticle(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not create article'));
             return;
         }
-        setSelectedIssue(prev => prev ? {
+        if (!commitIssueMutation(mutation, () => setSelectedIssue(prev => prev ? {
             ...prev,
             knowledgeSuggestions: [res.data!, ...(prev.knowledgeSuggestions ?? [])],
             knowledgeGaps: gap ? (prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id) : prev.knowledgeGaps,
-        } : prev);
+        } : prev))) return;
         toast.success(t('Saved'));
     };
 
     const publishKnowledgeArticleFromTicket = async (article: KnowledgeArticle) => {
-        if (publishingKnowledgeArticleId) return;
+        if (!selectedIssue || publishingKnowledgeArticleId) return;
+        const mutation = beginIssueMutation(selectedIssue.id, 'publish-knowledge-article');
         setPublishingKnowledgeArticleId(article.id);
         const res = await api.updateKnowledgeArticle(projectId, article.id, {
             status: 'published',
             visibility: 'public',
             public: true,
         });
-        setPublishingKnowledgeArticleId('');
+        finishIssueMutation(mutation, () => setPublishingKnowledgeArticleId(''));
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not publish article'));
             return;
         }
         const published = res.data;
-        setKnowledgeArticles(prev => prev.some(item => item.id === published.id)
-            ? prev.map(item => item.id === published.id ? published : item)
-            : [published, ...prev]);
-        setSelectedIssue(prev => prev ? {
-            ...prev,
-            knowledgeSuggestions: (prev.knowledgeSuggestions ?? []).some(item => item.id === published.id)
-                ? (prev.knowledgeSuggestions ?? []).map(item => item.id === published.id ? published : item)
-                : [published, ...(prev.knowledgeSuggestions ?? [])],
-        } : prev);
+        if (!commitIssueMutation(mutation, () => {
+            setKnowledgeArticles(prev => prev.some(item => item.id === published.id)
+                ? prev.map(item => item.id === published.id ? published : item)
+                : [published, ...prev]);
+            setSelectedIssue(prev => prev ? {
+                ...prev,
+                knowledgeSuggestions: (prev.knowledgeSuggestions ?? []).some(item => item.id === published.id)
+                    ? (prev.knowledgeSuggestions ?? []).map(item => item.id === published.id ? published : item)
+                    : [published, ...(prev.knowledgeSuggestions ?? [])],
+            } : prev);
+        })) return;
         toast.success(t('Article published'));
     };
 
     const askAgent = async (questionOverride?: string, createDraft = false, actionKey = '', autoSend = false) => {
         if (!selectedIssue) return;
+        const issueIdForAgent = selectedIssue.id;
+        const mutation = beginIssueMutation(issueIdForAgent, 'ask-agent');
         const question = questionOverride ?? agentQuestion.trim();
         if (questionOverride) setAgentQuestion(questionOverride);
         setAskingAgent(true);
@@ -6076,15 +6644,18 @@ export function Inbox({ projectId }: InboxProps) {
         const shouldCreateDraft = createDraft || autoSend;
         const res = await api.askIssueAgent(
             projectId,
-            selectedIssue.id,
+            issueIdForAgent,
             question,
             shouldCreateDraft,
             shouldCreateDraft && replyIncludeFeedbackLink,
             !autoSend,
             autoSend,
         );
-        setAskingAgent(false);
-        setRunningAgentActionKey('');
+        finishIssueMutation(mutation, () => {
+            setAskingAgent(false);
+            setRunningAgentActionKey('');
+        });
+        if (!isIssueMutationCurrent(mutation)) return;
         if (res.error || !res.data) {
             toast.error(res.error || t('Could not ask agent'));
             return;
@@ -6096,34 +6667,36 @@ export function Inbox({ projectId }: InboxProps) {
         const responseAgentMessages = answer.agentMessages;
         const appendedAgentMessages = [answer.userMessage, answer.assistantMessage]
             .filter((message): message is SupportAgentMessage => Boolean(message));
-        setAgentAnswer(answer);
-        if (reply && !answer.autoSend) {
-            setReplyDraft(answer.answer);
-            setReplyRequiresApproval(Boolean(answer.approvalRequired));
-        }
-        if (reply) {
-            setSelectedIssue(prev => {
-                if (!prev) return prev;
-                const issueWithRun = {
+        if (!commitIssueMutation(mutation, () => {
+            setAgentAnswer(answer);
+            if (reply && !answer.autoSend) {
+                setReplyDraft(answer.answer);
+                setReplyRequiresApproval(Boolean(answer.approvalRequired));
+            }
+            if (reply) {
+                setSelectedIssue(prev => {
+                    if (!prev) return prev;
+                    const issueWithRun = {
+                        ...prev,
+                        aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
+                        agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
+                        knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
+                    };
+                    return mergeOutboundReplyIntoIssue(issueWithRun, reply, { mode: 'full' });
+                });
+                setIssues(prev => prev.map(issue => issue.id === issueIdForAgent
+                    ? mergeOutboundReplyIntoIssue(issue, reply, { mode: 'aggregate' })
+                    : issue));
+            } else {
+                setSelectedIssue(prev => prev ? {
                     ...prev,
                     aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
                     agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
                     knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-                };
-                return mergeOutboundReplyIntoIssue(issueWithRun, reply, { mode: 'full' });
-            });
-            setIssues(prev => prev.map(issue => issue.id === selectedIssue.id
-                ? mergeOutboundReplyIntoIssue(issue, reply, { mode: 'aggregate' })
-                : issue));
-        } else {
-            setSelectedIssue(prev => prev ? {
-                ...prev,
-                aiRuns: run ? [run, ...(prev.aiRuns ?? [])] : prev.aiRuns,
-                agentMessages: responseAgentMessages ?? [...(prev.agentMessages ?? []), ...appendedAgentMessages],
-                knowledgeGaps: gap ? [gap, ...(prev.knowledgeGaps ?? []).filter(item => item.id !== gap.id)] : prev.knowledgeGaps,
-            } : prev);
-        }
-        void refreshAnswerWorkspace(selectedIssue.id);
+                } : prev);
+            }
+        })) return;
+        void refreshAnswerWorkspace(issueIdForAgent);
         toast.success(answer.autoSend
             ? t('Reply queued')
             : reply && answer.autoSendRequested && answer.autoSendBlockedReason
@@ -7810,6 +8383,55 @@ export function Inbox({ projectId }: InboxProps) {
                     <Button type="button" data-reply-macro-save-submit onClick={() => void saveReplyMacro()} disabled={savingMacro || !macroTitleDraft.trim() || !replyDraft.trim()}>
                         {savingMacro ? <Loader className="size-4 animate-spin" /> : <Save className="size-4" />}
                         {t('Save macro')}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    ) : null;
+
+    const closeWithoutReplyDialog = closeWithoutReplyOpen && selectedIssue ? (
+        <Dialog
+            open={closeWithoutReplyOpen}
+            onOpenChange={(open) => {
+                if (!closingWithoutReply) setCloseWithoutReplyOpen(open);
+            }}
+        >
+            <DialogContent className="sm:max-w-lg" data-ticket-close-without-reply-dialog>
+                <DialogHeader>
+                    <DialogTitle>{t('Close without replying')}</DialogTitle>
+                    <DialogDescription>
+                        {t('Use this only when the customer does not need a reply. The reason is saved in the ticket history.')}
+                    </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-2">
+                    <Label htmlFor="close-without-reply-note">{t('Resolution note')}</Label>
+                    <Textarea
+                        id="close-without-reply-note"
+                        value={closeWithoutReplyNote}
+                        onChange={event => setCloseWithoutReplyNote(event.target.value)}
+                        rows={4}
+                        placeholder={t('Explain why no customer reply is required')}
+                        data-ticket-close-without-reply-note
+                    />
+                </div>
+                <DialogFooter>
+                    <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setCloseWithoutReplyOpen(false)}
+                        disabled={closingWithoutReply}
+                    >
+                        {t('Cancel')}
+                    </Button>
+                    <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={() => void closeSelectedIssueWithoutReply()}
+                        disabled={closingWithoutReply || !closeWithoutReplyNote.trim()}
+                        data-ticket-close-without-reply-confirm
+                    >
+                        {closingWithoutReply ? <Loader className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+                        {t('Close without reply')}
                     </Button>
                 </DialogFooter>
             </DialogContent>
@@ -9622,8 +10244,18 @@ export function Inbox({ projectId }: InboxProps) {
     const autopilotProofPanel = selectedIssue ? (() => {
         const proof = latestAutopilotProof(selectedIssue);
         if (!proof) return null;
+        const replyWithheld = proof.actions.some(
+            action => action.type === 'prepare_agent_reply' && action.status === 'withheld',
+        );
         const proofBadgeLabel = proof.complete ? 'Complete' : proof.failed ? 'Failed' : 'Needs review';
         const proofBadgeVariant = proof.failed ? 'destructive' : proof.complete ? 'secondary' : 'outline';
+        const proofDescription = proof.failed
+            ? 'Channel automation failed.'
+            : replyWithheld
+                ? 'Agent reply was withheld because no grounded draft was created.'
+                : proof.complete
+                    ? 'Agent package prepared from channel automation.'
+                    : 'Agent package needs review.';
         return (
             <section data-autopilot-proof-panel className="rounded-md border bg-background p-3">
                 <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
@@ -9632,8 +10264,8 @@ export function Inbox({ projectId }: InboxProps) {
                             <Sparkles className="size-4 shrink-0 text-muted-foreground" />
                             <span className="truncate">{t('Autopilot proof')}</span>
                         </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                            {t('Agent package prepared from channel automation.')}
+                        <div data-autopilot-proof-description className="mt-1 text-xs text-muted-foreground">
+                            {t(proofDescription)}
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -9660,7 +10292,12 @@ export function Inbox({ projectId }: InboxProps) {
                 )}
                 <div className="grid gap-2 sm:grid-cols-3">
                     {proof.actions.map(action => (
-                        <div key={action.type} className="rounded-md border bg-muted/20 p-2 text-xs">
+                        <div
+                            key={action.type}
+                            data-autopilot-action={action.type}
+                            data-autopilot-action-status={action.status}
+                            className="rounded-md border bg-muted/20 p-2 text-xs"
+                        >
                             <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
                                 <span className="min-w-0 truncate font-medium">{t(action.label)}</span>
                                 <Badge variant={autopilotStatusVariant(action.status)} className="font-normal">
@@ -9895,6 +10532,88 @@ export function Inbox({ projectId }: InboxProps) {
         </section>
     ) : null;
 
+    const duplicateSuggestionsPanel = selectedIssue ? (
+        <section className="rounded-md border p-3" data-ticket-duplicate-panel>
+            <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">{t('Suggested duplicates')}</div>
+                <div className="flex items-center gap-2">
+                    {loadingDuplicateSuggestions && <Loader className="size-3.5 animate-spin" />}
+                    <Badge variant="outline" className="font-normal">
+                        {duplicateSuggestions.length}
+                    </Badge>
+                </div>
+            </div>
+            <div className="space-y-2">
+                {duplicateSuggestions.slice(0, 5).map(suggestion => (
+                    <div
+                        key={suggestion.issue.id}
+                        className="rounded-md border bg-muted/20 p-2.5"
+                        data-ticket-duplicate-suggestion={suggestion.issue.id}
+                    >
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">
+                                    {suggestion.issue.subject || '(No subject)'}
+                                </div>
+                                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                                    {suggestion.issue.accountName || suggestion.issue.contactEmail || suggestion.issue.fromAddress || suggestion.issue.id}
+                                </div>
+                            </div>
+                            <Badge variant="secondary" className="shrink-0 font-normal">
+                                {t(duplicateScoreLabel(suggestion.score))} · {Math.round(suggestion.score)}%
+                            </Badge>
+                        </div>
+                        {suggestion.reasons.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {suggestion.reasons.slice(0, 4).map(reason => (
+                                    <Badge key={`${suggestion.issue.id}:${reason}`} variant="outline" className="font-normal">
+                                        {reason}
+                                    </Badge>
+                                ))}
+                            </div>
+                        )}
+                        <div className="mt-2 flex justify-end gap-2">
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                data-ticket-duplicate-open={suggestion.issue.id}
+                                onClick={() => navigateToIssue(suggestion.issue.id, { viewMode })}
+                            >
+                                <ExternalLink className="size-3.5" />
+                                {t('Open')}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                data-ticket-duplicate-merge={suggestion.issue.id}
+                                onClick={() => openMergeDialog(suggestion.issue.id)}
+                            >
+                                <Link className="size-3.5" />
+                                {t('Merge')}
+                            </Button>
+                        </div>
+                    </div>
+                ))}
+                {!loadingDuplicateSuggestions && duplicateSuggestions.length === 0 && (
+                    <div className="text-sm text-muted-foreground">{t('No duplicate suggestions')}</div>
+                )}
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-start"
+                    data-ticket-merge-duplicate-open
+                    onClick={() => openMergeDialog()}
+                    disabled={mergeTargetOptions.length === 0 || mergingIssue}
+                >
+                    <Link className="size-4" />
+                    {t('Merge another ticket')}
+                </Button>
+            </div>
+        </section>
+    ) : null;
+
     const boardDetailPanel = (
         <Drawer
             open={Boolean(issueId)}
@@ -9987,6 +10706,9 @@ export function Inbox({ projectId }: InboxProps) {
                     </div>
 
                     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+                        {ticketProcessingProgress && (
+                            <TicketProcessingProgressPanel progress={ticketProcessingProgress} t={t} />
+                        )}
                         {ticketWorkspacePanel}
                         {ticketOperatingProofPanel}
                         {ticketConversationPanel}
@@ -9994,6 +10716,7 @@ export function Inbox({ projectId }: InboxProps) {
                         {channelWebhookEventsPanel}
                         {autopilotProofPanel}
                         {reviewPackagePanel}
+                        {duplicateSuggestionsPanel}
 
                         <section className="rounded-md border bg-muted/20 p-3">
                             <div className="mb-2 text-sm font-medium">{t('AI summary')}</div>
@@ -10161,6 +10884,19 @@ export function Inbox({ projectId }: InboxProps) {
                                     <AlertTriangle className="size-3.5 shrink-0" />
                                     <span>{t('Resolve before closing')}: {issueDoneBlockerText(selectedIssue)}</span>
                                 </div>
+                            )}
+                            {issueWorkflowStatus(selectedIssue) !== 'done' && issueCanResolveWithoutReply(selectedIssue) && (
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="mt-3"
+                                    onClick={openCloseWithoutReplyDialog}
+                                    data-ticket-close-without-reply-open
+                                >
+                                    <CheckCircle2 className="size-3.5" />
+                                    {t('Close without reply')}
+                                </Button>
                             )}
                             {!selectedIssue.assigneeEmail && (
                                 <div className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -10496,10 +11232,11 @@ export function Inbox({ projectId }: InboxProps) {
                                 </Badge>
                             </div>
                             <div className="space-y-3">
-                                <div>
-                                    <div className="text-xs font-medium uppercase text-muted-foreground">{t('Runbook')}</div>
-                                    <div className="mt-1 text-sm">{selectedIssue.activatedIntent || t('No match')}</div>
-                                </div>
+                                <RunbookAudit
+                                    primaryIntent={selectedIssue.activatedIntent}
+                                    concerns={auditRunbookConcerns}
+                                    t={t}
+                                />
                                 <Separator />
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
@@ -10934,6 +11671,7 @@ export function Inbox({ projectId }: InboxProps) {
                 {newTicketDialog}
                 {saveViewDialog}
                 {saveMacroDialog}
+                {closeWithoutReplyDialog}
                 {mergeDialog}
                 {splitMessageDialog}
                 {bulkRejectActionsDialog}
@@ -11259,6 +11997,7 @@ export function Inbox({ projectId }: InboxProps) {
             {newTicketDialog}
             {saveViewDialog}
             {saveMacroDialog}
+            {closeWithoutReplyDialog}
             {mergeDialog}
             {splitMessageDialog}
             {bulkRejectActionsDialog}
@@ -11519,6 +12258,11 @@ export function Inbox({ projectId }: InboxProps) {
                             </div>
                         </div>
 
+                        {ticketProcessingProgress && (
+                            <div className="mb-4">
+                                <TicketProcessingProgressPanel progress={ticketProcessingProgress} t={t} />
+                            </div>
+                        )}
                         {ticketWorkspacePanel}
                         {ticketOperatingProofPanel}
                         {ticketConversationPanel}
@@ -12143,6 +12887,18 @@ export function Inbox({ projectId }: InboxProps) {
                                                     {t('Resolve before closing')}: {issueDoneBlockerText(selectedIssue)}
                                                 </div>
                                             )}
+                                            {issueWorkflowStatus(selectedIssue) !== 'done' && issueCanResolveWithoutReply(selectedIssue) && (
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={openCloseWithoutReplyDialog}
+                                                    data-ticket-close-without-reply-open
+                                                >
+                                                    <CheckCircle2 className="size-3.5" />
+                                                    {t('Close without reply')}
+                                                </Button>
+                                            )}
                                             {!selectedIssue.assigneeEmail && (
                                                 <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
                                                     <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -12319,52 +13075,8 @@ export function Inbox({ projectId }: InboxProps) {
                                                 </Button>
                                             </div>
                                         </div>
-                                        {(loadingDuplicateSuggestions || duplicateSuggestions.length > 0) && (
-                                            <div className="space-y-2 border-t pt-3">
-                                                <div className="flex items-center justify-between gap-2 text-xs font-medium uppercase text-muted-foreground">
-                                                    <span>{t('Suggested duplicates')}</span>
-                                                    {loadingDuplicateSuggestions && <Loader className="size-3.5 animate-spin" />}
-                                                </div>
-                                                <div className="space-y-1.5">
-                                                    {duplicateSuggestions.slice(0, 3).map(suggestion => (
-                                                        <button
-                                                            key={suggestion.issue.id}
-                                                            type="button"
-                                                            className="w-full rounded-md border px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted/50"
-                                                            data-ticket-duplicate-suggestion={suggestion.issue.id}
-                                                            onClick={() => openMergeDialog(suggestion.issue.id)}
-                                                        >
-                                                            <div className="flex min-w-0 items-center justify-between gap-2">
-                                                                <span className="min-w-0 truncate font-medium">
-                                                                    {suggestion.issue.subject || '(No subject)'}
-                                                                </span>
-                                                                <Badge variant="secondary" className="shrink-0 font-normal">
-                                                                    {t(duplicateScoreLabel(suggestion.score))}
-                                                                </Badge>
-                                                            </div>
-                                                            <div className="mt-1 truncate text-xs text-muted-foreground">
-                                                                {(suggestion.reasons ?? []).join(', ') || suggestion.issue.contactEmail || '-'}
-                                                            </div>
-                                                        </button>
-                                                    ))}
-                                                    {!loadingDuplicateSuggestions && duplicateSuggestions.length === 0 && (
-                                                        <div className="text-xs text-muted-foreground">-</div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        )}
                                         <div className="border-t pt-3">
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                className="w-full justify-start"
-                                                data-ticket-merge-duplicate-open
-                                                onClick={() => openMergeDialog()}
-                                                disabled={mergeTargetOptions.length === 0 || mergingIssue}
-                                            >
-                                                <Link className="size-4" />
-                                                {t('Merge duplicate')}
-                                            </Button>
+                                            {duplicateSuggestionsPanel}
                                         </div>
                                     </div>
                                 </section>
@@ -12597,8 +13309,11 @@ export function Inbox({ projectId }: InboxProps) {
                                 </section>
 
                                 <section className="rounded-md border p-4">
-                                    <div className="mb-3 text-sm font-medium">{t('Runbook')}</div>
-                                    <div className="text-sm">{selectedIssue.activatedIntent || t('No match')}</div>
+                                    <RunbookAudit
+                                        primaryIntent={selectedIssue.activatedIntent}
+                                        concerns={auditRunbookConcerns}
+                                        t={t}
+                                    />
                                     <Separator className="my-3" />
                                     <div className="space-y-2">
                                         <div className="text-xs font-medium uppercase text-muted-foreground">{t('Actions')}</div>

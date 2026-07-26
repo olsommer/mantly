@@ -1,4 +1,5 @@
 schema_version: "1.0"
+evidence_mode: "real"
 pilot_id: "replace-with-pilot-id"
 customer_identifier: "anonymized-or-contract-approved-name"
 operational_owner: "name-or-role"
@@ -8,6 +9,8 @@ pilot_window:
   end: "YYYY-MM-DD"
 mailbox_or_queue: "support@example.com"
 workflow: "email-based order and delivery support"
+tenant_ids:
+  - "replace-with-approved-tenant-id"
 expected_eligible_ticket_count: 200
 minimum_eligible_ticket_count: 200
 observation_window_days: 7
@@ -15,6 +18,8 @@ baseline:
   start: "YYYY-MM-DD"
   end: "YYYY-MM-DD"
   labour_cost_per_hour: 0.0
+costs:
+  allocated_pilot_operations: 0.0
 runbooks:
   - id: "delivery-status"
     version: "replace-with-published-version"

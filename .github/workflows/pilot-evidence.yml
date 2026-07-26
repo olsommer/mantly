@@ -43,6 +43,21 @@ jobs:
           ../tests/fixtures/pilot-evidence
           --now 2026-07-16T00:00:00Z
 
+      - name: Validate committed real-pilot evidence folders
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          found=false
+          for folder in ../docs/pilots/*; do
+            [ -d "$folder" ] || continue
+            [ "$(basename "$folder")" = "template" ] && continue
+            found=true
+            uv run python ../scripts/pilot-evidence.py validate "$folder" --require-real-evidence
+          done
+          if [ "$found" = false ]; then
+            echo "No real pilot evidence committed; issue #6 remains open."
+          fi
+
       - name: Generate deterministic summary
         working-directory: backend
         run: >
@@ -61,6 +76,8 @@ jobs:
 
           summary = json.loads(Path('tests/fixtures/pilot-evidence/summary.json').read_text(encoding='utf-8'))
           assert summary['sample']['eligible'] == 6, summary
+          assert summary['sample']['respondedEligible'] == 6, summary
+          assert summary['sample']['resolvedEligible'] == 6, summary
           assert summary['sample']['excluded'] == 0, summary
           assert summary['handling']['verified_autonomous'] == 2, summary
           assert summary['verifiedFullAutomationRate'] >= 0.20, summary
@@ -68,6 +85,8 @@ jobs:
           assert summary['unsafeOrMateriallyIncorrectRate'] == 0.0, summary
           assert summary['criticalOutcomes'] == 0, summary
           assert summary['cost']['recurringReduction'] >= 0.15, summary
+          assert summary['targets']['firstResponseTimeP90Seconds']['pass'] is True, summary
+          assert summary['targets']['resolutionTimeP90Seconds']['pass'] is True, summary
           assert summary['allTargetsPassed'] is True, summary
           assert summary['commercialDecision'] == 'commercial_trial', summary
           PY

@@ -1,4 +1,5 @@
 schema_version: "1.0"
+evidence_mode: "synthetic"
 pilot_id: "synthetic-pilot-ci"
 customer_identifier: "synthetic-design-partner"
 operational_owner: "synthetic-operations-owner"
@@ -8,6 +9,8 @@ pilot_window:
   end: "2026-07-15"
 mailbox_or_queue: "synthetic@example.test"
 workflow: "email-based order and delivery support"
+tenant_ids:
+  - "tenant-a"
 expected_eligible_ticket_count: 6
 minimum_eligible_ticket_count: 6
 observation_window_days: 7
@@ -15,6 +18,8 @@ baseline:
   start: "2026-06-01"
   end: "2026-06-30"
   labour_cost_per_hour: 60.0
+costs:
+  allocated_pilot_operations: 0.0
 runbooks:
   - id: "delivery-status"
     version: "1.0.0"

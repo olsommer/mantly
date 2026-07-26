@@ -224,13 +224,13 @@ Required controls:
 
 Action risk classes:
 
-| Class | Examples | V1 default |
-| --- | --- | --- |
-| Read-only | Shipment lookup, policy lookup | May run automatically when tenant-scoped |
-| Reversible low-risk | Add internal note, open non-financial case | Automatic or approval based on runbook |
-| Customer-visible | Send message, change delivery instruction | Idempotent; explicit response/action policy |
-| Financial/destructive | Refund, cancel contract/order, delete data | Human approval required in first pilot |
-| Irreversible/high-impact | Legal notice, payout, identity/account change | Disabled unless separately reviewed and approved |
+| Class | Examples | Required permission | Idempotency | Reversibility/compensation | Approval | V1 default |
+| --- | --- | --- | --- | --- | --- | --- |
+| Read-only | Shipment or policy lookup | Published runbook plus tenant-scoped read permission | Stable request correlation; retries bounded | No state change | No human approval when scope is verified | May run automatically |
+| Reversible low-risk | Add internal note, open non-financial case | Explicit tool/action permission in published runbook | Required operation key and fenced claim | Before-state or tested compensating action | Runbook-configured; human approval when compensation is uncertain | Automatic only when every control passes |
+| Customer-visible | Send message, change delivery instruction | Explicit channel/action permission and current conversation binding | Required; unknown provider outcome stops retry | Immutable approved content and provider-specific correction path | Explicit response/action policy; approval for material edits | Automatic only for approved pilot actions |
+| Financial/destructive | Refund, cancel contract/order, delete data | Separate high-risk permission and amount/object bounds | Required with durable provider reference | Recorded before-state and tested compensation where possible | Human approval required | Manual approval in first pilot |
+| Irreversible/high-impact | Legal notice, payout, identity/account change | Separately reviewed allowlist and least-privilege credential | Required, but not sufficient to enable action | No assumed reversibility | Two-person approval unless policy disables action entirely | Disabled |
 
 ### 5.6 Inbound webhooks and channel sync
 
@@ -407,19 +407,25 @@ Requirements:
 - backup encryption keys are separated from the backups;
 - local `.env`/`config.env` files and exported credentials remain ignored.
 
+Operational rotation and emergency access follow
+`docs/security/credential-rotation-and-break-glass.md`.
+
 ## 8. Security verification matrix
 
-| Boundary | Minimum verification before pilot |
-| --- | --- |
-| Authentication and authorization | Admin/non-admin tests, cross-tenant CRUD and attachment tests |
-| Message/attachment input | Prompt-injection, phishing, HTML sanitization, file limit tests |
-| Webhooks/channel sync | Signature, replay, duplicate, wrong-tenant tests |
-| Runbook/tool actions | Permission, schema, approval, idempotency, partial failure tests |
-| Outbound delivery | Atomic claim, duplicate send, retry/unknown outcome tests |
-| Logging/tracing | Secret and content redaction tests |
-| Storage/migrations | Clean bootstrap, existing-data migration, restore verification |
-| Deployment | Auth/CORS/demo flags, internal ports, TLS, health checks |
-| Dependencies/secrets | Automated pull-request scanning |
+| Boundary | Accountable owner | Minimum verification before pilot |
+| --- | --- | --- |
+| 5.1 Public edge | Platform owner | Auth/CORS/demo configuration, internal-port isolation, TLS, size/rate-limit, and external route scan evidence |
+| 5.2 Identity to tenant/project | Backend security owner | Admin/non-admin tests plus cross-tenant read/write/delete/export/attachment denial |
+| 5.3 Untrusted content | Agent safety owner | Prompt-injection, phishing, HTML sanitization, file-limit, provenance, SSRF, redirect, and DNS-rebinding tests |
+| 5.4 Model providers | Privacy/provider owner | Approved provider/region record, minimized payload inspection, timeout/budget tests, and secret/content-redaction evidence |
+| 5.5 Runbooks and tools | Automation owner | Permission, schema, approval, idempotency, fencing, partial/unknown-result, and compensation tests per enabled action class |
+| 5.6 Inbound webhooks/sync | Channel owner | Signature, timestamp, replay, duplicate, cursor, and wrong-tenant tests |
+| 5.7 Outbound delivery | Delivery owner | Immutable approval, atomic claim, duplicate-send, provider-idempotency, retry/unknown-outcome, and dead-letter tests |
+| 5.8 Schedulers/instances | Runtime owner | Single-instance deployment assertion, heartbeat/last-success evidence, and duplicate-worker fencing tests |
+| 5.9 PocketBase/storage | Data owner | Clean bootstrap, representative existing-data migration, authorization-rule preservation, integrity, and restore verification |
+| 5.10 Admin/add-in UI | Frontend security owner | XSS/HTML fixtures, origin/frame policy, token-leak checks, server authorization, and production-flag tests |
+| 5.11 Audit/telemetry | Observability owner | Secret, customer-content, identifier, exception, and duplicate-handler redaction tests plus access/retention review |
+| 5.12 Backup/recovery | Recovery owner | Encrypted off-host backup, portable checksum, clean-host restore, deletion replay, and recorded restore-drill evidence |
 
 ## 9. Residual risk and production acceptance
 

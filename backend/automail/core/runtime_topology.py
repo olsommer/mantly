@@ -7,23 +7,25 @@ import socket
 from dataclasses import asdict, dataclass
 from typing import Mapping
 
-_SCHEDULER_INTERVALS = (
-    "SUPPORT_SYNC_INTERVAL_SECONDS",
-    "SUPPORT_DELIVERY_INTERVAL_SECONDS",
-    "SUPPORT_CRM_SYNC_INTERVAL_SECONDS",
-    "SUPPORT_SLA_INTERVAL_SECONDS",
-)
+_SCHEDULER_INTERVAL_DEFAULTS = {
+    "SUPPORT_SYNC_INTERVAL_SECONDS": 0,
+    "SUPPORT_DELIVERY_INTERVAL_SECONDS": 0,
+    "SUPPORT_CRM_SYNC_INTERVAL_SECONDS": 0,
+    "SUPPORT_SLA_INTERVAL_SECONDS": 0,
+    "SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS": 60,
+    "SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS": 5,
+}
 
 
 @dataclass(frozen=True)
 class RuntimeTopology:
     instance_id: str
-    api_replicas: int
+    declared_api_replicas: int
     storage_mode: str
     worker_mode: str
     local_application_data: bool
     enabled_in_process_schedulers: tuple[str, ...]
-    supported: bool
+    configuration_supported: bool
 
     def as_public_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -42,8 +44,8 @@ def _positive_int(value: str | None, *, name: str, default: int) -> int:
 
 def _enabled_schedulers(env: Mapping[str, str]) -> tuple[str, ...]:
     enabled: list[str] = []
-    for name in _SCHEDULER_INTERVALS:
-        raw = env.get(name, "0").strip() or "0"
+    for name, default in _SCHEDULER_INTERVAL_DEFAULTS.items():
+        raw = env.get(name, str(default)).strip() or str(default)
         try:
             interval = int(raw)
         except ValueError as exc:
@@ -55,47 +57,63 @@ def _enabled_schedulers(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(enabled)
 
 
+def _boolean(value: str | None, *, name: str, default: bool) -> bool:
+    raw = str(value if value is not None else default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean, got {raw!r}")
+
+
 def inspect_runtime_topology(env: Mapping[str, str] | None = None) -> RuntimeTopology:
     values = os.environ if env is None else env
     replicas = _positive_int(values.get("MANTLY_API_REPLICAS"), name="MANTLY_API_REPLICAS", default=1)
     storage_mode = values.get("MANTLY_STORAGE_MODE", "pocketbase-sqlite").strip().lower()
     worker_mode = values.get("MANTLY_WORKER_MODE", "in-process").strip().lower()
-    local_application_data = values.get("MANTLY_LOCAL_APPLICATION_DATA", "true").strip().lower() == "true"
+    local_application_data = _boolean(
+        values.get("MANTLY_LOCAL_APPLICATION_DATA"),
+        name="MANTLY_LOCAL_APPLICATION_DATA",
+        default=True,
+    )
     instance_id = values.get("MANTLY_INSTANCE_ID", "").strip() or socket.gethostname()
     schedulers = _enabled_schedulers(values)
 
-    supported = (
+    configuration_supported = (
         replicas == 1
         and storage_mode == "pocketbase-sqlite"
         and worker_mode in {"in-process", "disabled"}
         and local_application_data
+        and not (worker_mode == "disabled" and schedulers)
     )
     return RuntimeTopology(
         instance_id=instance_id,
-        api_replicas=replicas,
+        declared_api_replicas=replicas,
         storage_mode=storage_mode,
         worker_mode=worker_mode,
         local_application_data=local_application_data,
         enabled_in_process_schedulers=schedulers,
-        supported=supported,
+        configuration_supported=configuration_supported,
     )
 
 
 def validate_runtime_topology(env: Mapping[str, str] | None = None) -> RuntimeTopology:
-    """Reject deployments whose correctness is not supported by this release.
+    """Reject declared process configuration unsupported by this release.
 
     The current implementation uses PocketBase/SQLite, local application data,
     and optional in-process scheduler threads. It deliberately supports one API
-    process. Horizontal scaling requires the external worker, durable lease,
+    process. This local check cannot observe orchestrator replica count; release
+    acceptance also requires ``scripts/runtime_topology_inventory.py``.
+    Horizontal scaling requires the external worker, durable lease, and
     Postgres/object-storage migration described in the architecture docs.
     """
 
     topology = inspect_runtime_topology(env)
     errors: list[str] = []
 
-    if topology.api_replicas != 1:
+    if topology.declared_api_replicas != 1:
         errors.append(
-            "MANTLY_API_REPLICAS must remain 1: this release does not support "
+            "declared MANTLY_API_REPLICAS must remain 1: this release does not support "
             "multiple API writers against PocketBase/SQLite or duplicated in-process schedulers"
         )
     if topology.storage_mode != "pocketbase-sqlite":

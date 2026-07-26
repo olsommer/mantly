@@ -45,21 +45,28 @@ router = APIRouter()
 ActionRunner = Callable[[], Awaitable[dict[str, Any]]]
 
 
+def _record_from(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _records_from(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def _blocked_channels(launch_proof: dict[str, Any]) -> list[dict[str, Any]]:
-    channels = launch_proof.get("channels") if isinstance(launch_proof.get("channels"), dict) else {}
-    items = channels.get("items") if isinstance(channels.get("items"), list) else []
+    channels = _record_from(launch_proof.get("channels"))
+    items = _records_from(channels.get("items"))
     return [
-        item for item in items
-        if isinstance(item, dict) and bool(item.get("required")) and not bool(item.get("ready"))
+        item for item in items if bool(item.get("required")) and not bool(item.get("ready"))
     ]
 
 
 def _blocker_keys(channel: dict[str, Any]) -> set[str]:
-    blockers = channel.get("blockers") if isinstance(channel.get("blockers"), list) else []
+    blockers = _records_from(channel.get("blockers"))
     return {
         str(blocker.get("key") or "")
         for blocker in blockers
-        if isinstance(blocker, dict) and str(blocker.get("key") or "")
+        if str(blocker.get("key") or "")
     }
 
 
@@ -122,7 +129,7 @@ def _session_issue_id(session: dict[str, Any]) -> str:
     issue_id = str(session.get("issueId") or "").strip()
     if issue_id:
         return issue_id
-    issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
+    issue = _record_from(session.get("issue"))
     return str(issue.get("id") or "").strip()
 
 
@@ -271,10 +278,10 @@ def _email_launch_proof(
             },
         },
     )
-    items = inbound.get("items") if isinstance(inbound.get("items"), list) else []
+    items = _records_from(inbound.get("items"))
     issue_id = ""
     for item in items:
-        if isinstance(item, dict) and str(item.get("issueId") or "").strip():
+        if str(item.get("issueId") or "").strip():
             issue_id = str(item.get("issueId") or "").strip()
             break
     if not issue_id:
@@ -424,7 +431,7 @@ def _channel_config_defaults_proof(
                 continue
         if str(channel.get("status") or "active").strip().lower() != "active":
             continue
-        config = dict(channel.get("config") if isinstance(channel.get("config"), dict) else {})
+        config = dict(_record_from(channel.get("config")))
         before = dict(config)
         config["ticketCreationMode"] = "per_message"
         config["autoPrepareAgentReply"] = True
@@ -1520,9 +1527,10 @@ async def run_support_launch_proof(ctx: ProjectEditorDep, request: Request, auth
             completed_at=completed_at,
         )
     except Exception as exc:
+        launch_readiness = _record_from(result.get("launchReadiness"))
         return {
             **result,
-            "status": str(result.get("launchReadiness", {}).get("status") or "unknown"),
+            "status": str(launch_readiness.get("status") or "unknown"),
             "error": str(exc),
             "startedAt": started_at,
             "completedAt": completed_at,

@@ -10,6 +10,12 @@ and follow the
 [Community deployment guide](https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md).
 Community self-hosting uses no Mantly license key or license-server check.
 
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
+
 ## Prerequisites
 
 - Linux server with Docker and Docker Compose v2

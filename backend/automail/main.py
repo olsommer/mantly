@@ -39,7 +39,7 @@ from automail.core.brand import get_brand
 
 # Set up structured logging right after env is loaded
 from automail.core.logging_config import setup_logging
-from automail.core.observability import install_observability, runtime_observability
+from automail.core.observability import install_observability, request_route_template, runtime_observability
 from automail.core.rate_limit import limiter
 from automail.core.runtime_flags import demo_routes_available, is_saas_mode
 from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema
@@ -234,7 +234,7 @@ def create_app() -> FastAPI:
                 extra={
                     "event": "request_failed",
                     "method": request.method,
-                    "path": request.url.path,
+                    "route": request_route_template(request),
                     "statusCode": 500,
                     "durationMs": duration_ms,
                 },
@@ -246,7 +246,7 @@ def create_app() -> FastAPI:
             extra={
                 "event": "request_completed",
                 "method": request.method,
-                "path": request.url.path,
+                "route": request_route_template(request),
                 "statusCode": response.status_code,
                 "durationMs": duration_ms,
             },
@@ -408,6 +408,8 @@ def main():
         host="0.0.0.0",
         port=port,
         reload=reload,
+        log_config=None,
+        access_log=False,
     )
 
 

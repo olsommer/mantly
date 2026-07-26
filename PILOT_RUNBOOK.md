@@ -60,6 +60,8 @@ Do not add a channel or unrelated workflow during the pilot without updating
 - `docs/pilot-targets.example.yml` has been copied, completed, and approved for this pilot.
 - Baseline data has been collected using the same inclusion and exclusion rules as the pilot.
 - Metric records validate against `docs/pilot-metrics-schema.json`.
+- The copied target contract passes `automail.pilot_evidence` without template
+  placeholders.
 - Security, privacy, recovery, and CI blockers are closed or have a documented owner, mitigation, and expiry date.
 
 ## Important production defaults
@@ -158,6 +160,7 @@ Backend:
 cd backend && uv run ruff check automail/ tests/
 cd backend && uv run pyright
 cd backend && uv run pytest -v
+cd backend && uv run python -m automail.pilot_evidence --targets ../docs/pilot-targets.example.yml --allow-template-placeholders
 ```
 
 Frontend:
@@ -214,3 +217,14 @@ The pilot environment is ready for controlled real-ticket processing when:
 Environment readiness is not pilot success. The pilot is successful only when the
 real-ticket sample is completed and assessed against the precommitted success
 criteria, including an explicit customer continuation decision.
+
+At pilot close, validate the completed evidence before writing the pass/fail
+claim:
+
+```bash
+cd backend
+uv run python -m automail.pilot_evidence \
+  --targets ../docs/pilots/<pilot-id>/targets.yml \
+  --results ../docs/pilots/<pilot-id>/results.yml \
+  --metrics ../docs/pilots/<pilot-id>/ticket-metrics.jsonl
+```

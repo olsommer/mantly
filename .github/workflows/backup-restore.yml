@@ -23,10 +23,14 @@ jobs:
       COMPOSE_FILE: ${{ github.workspace }}/tests/fixtures/backup/docker-compose.yml
       COMPOSE_PROJECT_NAME: mantly-backup-ci
       ALLOW_UNENCRYPTED_BACKUP: "true"
-      SKIP_RESTORE_SERVICE_HEALTHCHECK: "true"
       RESTORE_CONFIRM: ERASE_AND_RESTORE_MANTLY
       BACKUP_REASON: ci-restore-drill
       BACKUP_OPERATOR: github-actions
+      RESTORE_API_URL: http://127.0.0.1:18080
+      RESTORE_PB_URL: http://127.0.0.1:18090
+      PB_ADMIN_EMAIL: restore@example.test
+      PB_ADMIN_PASSWORD: restore-fixture-password
+      RESTORE_EXPECTATIONS_FILE: ${{ github.workspace }}/tests/fixtures/backup/restore-expectations.json
 
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +50,8 @@ jobs:
           set -euo pipefail
           docker compose run --rm pocketbase python - <<'PY'
           import pathlib
+          import hashlib
+          import json
           import sqlite3
 
           database = pathlib.Path('/pb/pb_data/data.db')
@@ -57,7 +63,45 @@ jobs:
               connection.commit()
           finally:
               connection.close()
-          pathlib.Path('/pb/pb_data/attachment.txt').write_text('attachment-before-backup\n', encoding='utf-8')
+          attachment = pathlib.Path('/pb/pb_data/attachment.txt')
+          attachment.write_text('attachment-before-backup\n', encoding='utf-8')
+          fixture = {
+              'collectionCounts': {
+                  'tenants': 1,
+                  'users': 1,
+                  'projects': 1,
+                  'project_intents': 1,
+                  'knowledge_articles': 1,
+                  'support_issues': 1,
+                  'support_messages': 1,
+                  'support_internal_notes': 1,
+                  'support_outbound_messages': 1,
+                  'support_action_executions': 1,
+                  'support_ai_runs': 1,
+              },
+              'records': {
+                  'projects': {'project-001': {'tenant': 'tenant-001'}},
+                  'support_issues': {'ticket-001': {'timeline_ref': 'timeline-001'}},
+                  'support_outbound_messages': {
+                      'outbound-001': {'delivery_state': 'delivered'}
+                  },
+                  'project_intents': {
+                      'runbook-001': {'knowledge_ref': 'knowledge-001'}
+                  },
+                  'support_messages': {
+                      'message-001': {
+                          'attachment_name': attachment.name,
+                          'attachment_sha256': hashlib.sha256(attachment.read_bytes()).hexdigest(),
+                      }
+                  },
+                  'support_action_executions': {
+                      'action-001': {'audit_ref': 'audit-001'}
+                  },
+              },
+          }
+          pathlib.Path('/pb/pb_data/restore-fixture.json').write_text(
+              json.dumps(fixture), encoding='utf-8'
+          )
           PY
           docker compose run --rm app sh -ec \
             "mkdir -p /app/data/nested; printf 'application-before-backup\n' > /app/data/nested/state.txt"
@@ -71,6 +115,10 @@ jobs:
           test -n "$bundle"
           test -s "$bundle"
           test -s "$bundle.sha256"
+          mkdir -p "$RUNNER_TEMP/restore-input"
+          mv "$bundle" "$bundle.sha256" "$RUNNER_TEMP/restore-input/"
+          bundle="$RUNNER_TEMP/restore-input/$(basename "$bundle")"
+          (cd "$RUNNER_TEMP/restore-input" && sha256sum -c "$(basename "$bundle.sha256")")
           printf 'BACKUP_BUNDLE=%s\n' "$bundle" >> "$GITHUB_ENV"
 
       - name: Mutate and delete durable state after backup
@@ -92,6 +140,7 @@ jobs:
           PY
           docker compose run --rm app sh -ec \
             "printf 'after-backup-corruption\n' > /app/data/nested/state.txt; printf 'must disappear\n' > /app/data/unwanted.txt"
+          docker compose stop app pocketbase
 
       - name: Restore and verify the backup
         run: bash scripts/restore.sh "$BACKUP_BUNDLE"
@@ -117,6 +166,23 @@ jobs:
           PY
           docker compose run --rm app sh -ec \
             "test \"$(cat /app/data/nested/state.txt)\" = 'application-before-backup'; test ! -e /app/data/unwanted.txt"
+
+      - name: Prove missing required attachment evidence fails closed
+        run: |
+          set -euo pipefail
+          docker compose run --rm pocketbase python - <<'PY'
+          import json
+          import pathlib
+
+          path = pathlib.Path('/pb/pb_data/restore-fixture.json')
+          fixture = json.loads(path.read_text(encoding='utf-8'))
+          del fixture['records']['support_messages']['message-001']['attachment_sha256']
+          path.write_text(json.dumps(fixture), encoding='utf-8')
+          PY
+          if python3 scripts/verify-restore.py; then
+            echo "Verifier accepted missing attachment evidence" >&2
+            exit 1
+          fi
 
       - name: Upload backup evidence
         if: always()

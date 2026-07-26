@@ -26,7 +26,7 @@ from automail.db.pocketbase.client import (
     record_channel_sync_run,
     upsert_channel_cursor,
 )
-from automail.models import Email, ProcessEmailRequest
+from automail.models import Attachment, Email, ProcessEmailRequest
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,14 @@ def _string(value: Any) -> str:
     if isinstance(value, (int, float, bool)):
         return str(value)
     return ""
+
+
+def _record(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _email_attachments(value: list[dict[str, Any]]) -> list[Attachment]:
+    return [Attachment.model_validate(item) for item in value]
 
 
 def _now_iso() -> str:
@@ -93,7 +101,7 @@ def _channel_sync_enabled(channel: dict[str, Any]) -> bool:
     if status != "active":
         return False
     channel_type = _string(channel.get("type")).lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record(channel.get("config"))
     sync_enabled = _config_bool(
         config,
         "syncEnabled",
@@ -334,7 +342,8 @@ def _imap_messages(
     with imaplib.IMAP4_SSL(host, port) as client:
         client.login(username, password)
         client.select(mailbox)
-        status, search_data = client.uid("SEARCH", None, f"UID {last_uid + 1}:*")
+        search_charset: Any = None
+        status, search_data = client.uid("SEARCH", search_charset, f"UID {last_uid + 1}:*")
         if status != "OK":
             raise ValueError("IMAP UID search failed")
         uids = search_data[0].split() if search_data and search_data[0] else []
@@ -396,9 +405,9 @@ def _record_sync_run(
 def _issue_resolver_result(issue: dict[str, Any] | None) -> dict[str, Any]:
     if not issue:
         return {}
-    metadata = issue.get("metadata") if isinstance(issue.get("metadata"), dict) else {}
-    resolver = metadata.get("resolver") if isinstance(metadata.get("resolver"), dict) else {}
-    result = {
+    metadata = _record(issue.get("metadata"))
+    resolver = _record(metadata.get("resolver"))
+    result: dict[str, Any] = {
         "issueId": _string(issue.get("id")),
         "ticketCreationMode": _string(metadata.get("ticketCreationMode") or resolver.get("ticketCreationMode")),
         "sourceIssueId": _string(metadata.get("sourceIssueId") or resolver.get("sourceIssueId")),
@@ -481,7 +490,7 @@ def ingest_email_webhook(
                     message_id=message.message_id or message.id,
                     in_reply_to=message.in_reply_to or None,
                     references=message.references,
-                    attachments=message.attachments,
+                    attachments=_email_attachments(message.attachments),
                 ),
                 creator=actor,
                 project_id=project_id,
@@ -553,7 +562,7 @@ def sync_support_channel(
     if not channel:
         raise ValueError("Channel not found")
     channel_key = _string(channel.get("channelKey"))
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record(channel.get("config"))
     adapter = _adapter_kind(config)
     cursor_key = _channel_cursor_key(config)
     legacy_cursor_key = "inbound" if cursor_key != "inbound" else ""
@@ -622,7 +631,7 @@ def sync_support_channel(
             "cursorKey": cursor_key,
             "status": "failed",
             "processed": 0,
-            "failed": 0,
+            "failed": 1,
             "skipped": skipped,
             "cursorValue": _string(cursor_value),
             "items": [],
@@ -653,7 +662,7 @@ def sync_support_channel(
                         message_id=message.message_id or message.id,
                         in_reply_to=message.in_reply_to or None,
                         references=message.references,
-                        attachments=message.attachments,
+                        attachments=_email_attachments(message.attachments),
                     ),
                     creator=actor_email,
                     project_id=project_id,

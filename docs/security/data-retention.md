@@ -1,12 +1,31 @@
 # Data retention and deletion
 
-Status: **Production baseline; customer-specific periods require contractual and legal review**
+Status: **Target policy. Customer-specific periods require contractual/legal
+review; automated enforcement is partial and must not be represented as complete.**
 
 Owner: Product/privacy owner with engineering implementation owner
 
 This document defines the default retention classes and the controls Mantly must
 support. It is not legal advice and does not replace a customer Data Processing
 Agreement or jurisdiction-specific retention requirement.
+
+## Implementation truth
+
+Current code does not implement this complete policy. The existing SaaS billing
+retention helper runs opportunistically when an administrator reads billing
+status. It deletes old `chats`, `eval_runs`, `eval_results`, and
+`llm_usage_events` only. It does not currently provide:
+
+- scheduled ticket, message, attachment, knowledge, audit, user, or tenant purge;
+- customer-configurable retention by every data class below;
+- legal-hold enforcement;
+- provider deletion orchestration;
+- backup-object expiry or restore-time deletion replay;
+- a complete export, deletion receipt, or tenant-termination executor.
+
+Everything below remains a required control or proposed default until linked
+implementation and synthetic lifecycle evidence prove it. A real customer pilot
+remains blocked; this document does not close issue #7.
 
 ## 1. Principles
 
@@ -41,7 +60,7 @@ configuration and customer agreement are authoritative.
 | Model traces | Prompt/response traces in approved provider | Disabled by default for content; when enabled, 7–30 days | Provider and local deletion must be documented |
 | Pilot metrics | Classifications, timing, costs, review outcomes, evidence references | Pilot duration plus 12 months or customer-agreed period | Delete/anonymize tenant identifiers and evidence links at end |
 | Billing records | Subscription, invoices, usage totals | According to applicable accounting/tax requirements | Keep legally required minimized financial record; remove support content |
-| Backups | Encrypted database and attachment snapshots | 30 days rolling by default | Expire automatically; deletion requests replayed after restore |
+| Backups | Encrypted database and attachment snapshots | Proposed 30 days rolling | Operator/provider expiry required; automated deletion replay not implemented |
 | Incident evidence | Scoped logs/exports and timeline | According to severity, legal need, and incident policy | Restricted, reviewed, and deleted when no longer required |
 | User account/profile | Email, role, tenant/project memberships | Until account deletion/tenant termination plus short recovery window | Disable immediately; delete/anonymize after recovery window |
 
@@ -170,11 +189,21 @@ A legal hold must not silently disable all tenant retention.
 
 ## 10. Implementation readiness checklist
 
+Current repository automation deletes only plan-expired `chats`, `eval_runs`,
+`eval_results`, and `llm_usage_events` through
+`backend/automail/billing/retention.py`. Ticket/message, attachment, knowledge,
+audit, user, full-tenant, provider, and backup deletion require the documented
+operator workflow until dedicated deletion paths and end-to-end evidence exist.
+Operators must not mark a request complete from the automated retention result
+alone.
+
 Before a real customer pilot:
 
 - [ ] Customer-specific periods and deletion obligations are recorded.
 - [ ] Every stored data class has an owner and deletion path.
 - [ ] Ticket, attachment, knowledge, user, and tenant deletion are tested.
+- [ ] Provider-side and backup deletion/replay are verified.
+- [ ] Automated and manual deletion results share one auditable evidence record.
 - [ ] Search/retrieval indexes are included in deletion.
 - [ ] Logs and traces pass redaction tests.
 - [ ] Backup retention and restore-time deletion replay are documented and tested.

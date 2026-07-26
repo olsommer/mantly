@@ -1,6 +1,7 @@
 # Data retention and deletion
 
-Status: **Target policy; full product deletion enforcement is not implemented**
+Status: **Target policy. Customer-specific periods require contractual/legal
+review; automated enforcement is partial and must not be represented as complete.**
 
 Owner: Product/privacy owner with engineering implementation owner
 
@@ -188,11 +189,21 @@ A legal hold must not silently disable all tenant retention.
 
 ## 10. Implementation readiness checklist
 
+Current repository automation deletes only plan-expired `chats`, `eval_runs`,
+`eval_results`, and `llm_usage_events` through
+`backend/automail/billing/retention.py`. Ticket/message, attachment, knowledge,
+audit, user, full-tenant, provider, and backup deletion require the documented
+operator workflow until dedicated deletion paths and end-to-end evidence exist.
+Operators must not mark a request complete from the automated retention result
+alone.
+
 Before a real customer pilot:
 
 - [ ] Customer-specific periods and deletion obligations are recorded.
 - [ ] Every stored data class has an owner and deletion path.
 - [ ] Ticket, attachment, knowledge, user, and tenant deletion are tested.
+- [ ] Provider-side and backup deletion/replay are verified.
+- [ ] Automated and manual deletion results share one auditable evidence record.
 - [ ] Search/retrieval indexes are included in deletion.
 - [ ] Logs and traces pass redaction tests.
 - [ ] Backup retention and restore-time deletion replay are documented and tested.

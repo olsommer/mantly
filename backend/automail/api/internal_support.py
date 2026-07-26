@@ -80,6 +80,13 @@ class SupportSyncRequest(CamelCaseModel):
     retry_failed: bool = False
 
 
+def _channel_config(channel: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(channel, dict):
+        return {}
+    config = channel.get("config")
+    return config if isinstance(config, dict) else {}
+
+
 def _request_token(request: Request) -> str:
     header = request.headers.get("x-support-sync-token", "").strip()
     if header:
@@ -231,7 +238,7 @@ def _channel_signature_config(channel: dict[str, Any] | None, *, provider: str =
 
 
 def _whatsapp_verify_token_env(channel: dict[str, Any] | None) -> str:
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    config = _channel_config(channel)
     return str(
         config.get("whatsappVerifyTokenEnv")
         or config.get("whatsapp_verify_token_env")
@@ -242,7 +249,7 @@ def _whatsapp_verify_token_env(channel: dict[str, Any] | None) -> str:
 
 
 def _messenger_verify_token_env(channel: dict[str, Any] | None) -> str:
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    config = _channel_config(channel)
     return str(
         config.get("messengerVerifyTokenEnv")
         or config.get("messenger_verify_token_env")
@@ -253,7 +260,7 @@ def _messenger_verify_token_env(channel: dict[str, Any] | None) -> str:
 
 
 def _instagram_verify_token_env(channel: dict[str, Any] | None) -> str:
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    config = _channel_config(channel)
     return str(
         config.get("instagramVerifyTokenEnv")
         or config.get("instagram_verify_token_env")
@@ -264,7 +271,7 @@ def _instagram_verify_token_env(channel: dict[str, Any] | None) -> str:
 
 
 def _twitter_consumer_secret_env(channel: dict[str, Any] | None) -> str:
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    config = _channel_config(channel)
     return str(
         config.get("twitterConsumerSecretEnv")
         or config.get("twitter_consumer_secret_env")
@@ -289,6 +296,8 @@ def _config_bool(config: dict[str, Any], *keys: str) -> bool:
 def _config_int(config: dict[str, Any], *keys: str, default: int) -> int:
     for key in keys:
         value = config.get(key)
+        if value is None:
+            continue
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -561,7 +570,7 @@ def _require_telegram_request(
         channel = get_channel_by_key(channel_key, tenant_id=tenant_id, project_id=project_id)
     except Exception:
         channel = None
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
+    config = _channel_config(channel)
     env_name, header_name = _channel_signature_config(channel, provider="telegram")
     if env_name:
         secret = _secret_value(env_name, tenant_id=tenant_id, project_id=project_id)

@@ -28,7 +28,7 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _bootstrap_payload(value: Any) -> dict[str, Any]:
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, dict):
         return value
@@ -89,7 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"support schema gate: check failed: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    health = payload.get("health") if isinstance(payload.get("health"), dict) else {}
+    raw_health = payload.get("health")
+    health: dict[str, Any] = raw_health if isinstance(raw_health, dict) else {}
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
 

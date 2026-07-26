@@ -76,16 +76,24 @@ def _enable_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def _auth_response_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+def _auth_response_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, MagicMock]:
+    account_type = MagicMock(return_value="demo")
+    tenant_name = MagicMock(return_value="Test Tenant")
+    capabilities = MagicMock(return_value={"canPublish": True})
+    create_token = MagicMock(return_value="issued-token")
     monkeypatch.setattr(auth, "get_is_root", lambda record: bool(record.get("is_root")))
-    monkeypatch.setattr(auth, "get_tenant_account_type", lambda _tenant_id: "normal")
-    monkeypatch.setattr(auth, "get_tenant_name", lambda _tenant_id: "Test Tenant")
-    monkeypatch.setattr(
-        auth,
-        "get_account_capabilities",
-        lambda _tenant_id, **_kwargs: {"canPublish": True},
-    )
-    monkeypatch.setattr(auth, "create_token", lambda *_args, **_kwargs: "issued-token")
+    monkeypatch.setattr(auth, "get_tenant_account_type", account_type)
+    monkeypatch.setattr(auth, "get_tenant_name", tenant_name)
+    monkeypatch.setattr(auth, "get_account_capabilities", capabilities)
+    monkeypatch.setattr(auth, "create_token", create_token)
+    return {
+        "account_type": account_type,
+        "tenant_name": tenant_name,
+        "capabilities": capabilities,
+        "create_token": create_token,
+    }
 
 
 @pytest.mark.no_gemini
@@ -302,10 +310,42 @@ def test_verify_login_code_counts_malformed_expiry_as_failed_attempt(
 
 
 @pytest.mark.no_gemini
+def test_verify_login_code_enforces_maximum_attempts_before_issuing_session(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    email = "user@example.test"
+    code = "123456"
+    user = _user_record(
+        login_code_hash=auth_utils._hash_login_code(email, code),
+        login_code_expires=datetime(2099, 1, 1, tzinfo=timezone.utc).isoformat(),
+        login_code_attempts=auth.LOGIN_CODE_MAX_ATTEMPTS,
+    )
+    patch_record = MagicMock()
+    issue_response = MagicMock()
+    monkeypatch.setattr(auth, "get_user_by_email", lambda _email: user)
+    monkeypatch.setattr(auth, "patch_user_record", patch_record)
+    monkeypatch.setattr(auth, "_issue_auth_response", issue_response)
+
+    response = client.post(
+        "/api/auth/verify-login-code",
+        json={"email": email, "code": code},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid or expired login code"
+    patch_record.assert_called_once_with(
+        "user-1",
+        {"login_code_attempts": auth.LOGIN_CODE_MAX_ATTEMPTS + 1},
+    )
+    issue_response.assert_not_called()
+
+
+@pytest.mark.no_gemini
 def test_verify_login_code_clears_secret_and_returns_session(
     client,
     monkeypatch: pytest.MonkeyPatch,
-    _auth_response_dependencies,
+    _auth_response_dependencies: dict[str, MagicMock],
 ) -> None:
     email = "user@example.test"
     code = "123456"
@@ -315,6 +355,8 @@ def test_verify_login_code_clears_secret_and_returns_session(
             datetime.now(timezone.utc) + timedelta(minutes=5)
         ).isoformat(),
         login_code_attempts=0,
+        is_root=True,
+        is_platform_admin=True,
     )
     patch_record = MagicMock()
     monkeypatch.setattr(auth, "IS_SAAS", False)
@@ -329,6 +371,8 @@ def test_verify_login_code_clears_secret_and_returns_session(
     assert response.status_code == 200
     assert response.json()["token"] == "issued-token"
     assert response.json()["language"] == "de"
+    assert response.json()["tenantAccountType"] == "demo"
+    assert response.json()["capabilities"] == {"canPublish": True}
     patch_record.assert_called_once_with(
         "user-1",
         {
@@ -336,6 +380,21 @@ def test_verify_login_code_clears_secret_and_returns_session(
             "login_code_expires": "",
             "login_code_attempts": 0,
         },
+    )
+    _auth_response_dependencies["account_type"].assert_called_once_with("tenant-1")
+    _auth_response_dependencies["tenant_name"].assert_called_once_with("tenant-1")
+    _auth_response_dependencies["create_token"].assert_called_once_with(
+        "user-1",
+        "user@example.test",
+        "tenant-1",
+        True,
+        tenant_name="Test Tenant",
+        is_platform_admin=True,
+        tenant_account_type="demo",
+    )
+    _auth_response_dependencies["capabilities"].assert_called_once_with(
+        "tenant-1",
+        is_platform_admin=True,
     )
 
 
@@ -394,13 +453,17 @@ def test_password_login_maps_pocketbase_failures(
 def test_password_login_returns_session_after_pocketbase_auth(
     client,
     monkeypatch: pytest.MonkeyPatch,
-    _auth_response_dependencies,
+    _auth_response_dependencies: dict[str, MagicMock],
 ) -> None:
     pocketbase_client = _PocketBaseClient()
     monkeypatch.setattr(
         auth,
         "get_user_by_email",
-        lambda _email: _user_record(password_login_enabled=True),
+        lambda _email: _user_record(
+            password_login_enabled=True,
+            is_root=True,
+            is_platform_admin=True,
+        ),
     )
     monkeypatch.setattr(auth.httpx, "Client", lambda **_kwargs: pocketbase_client)
 
@@ -411,12 +474,31 @@ def test_password_login_returns_session_after_pocketbase_auth(
 
     assert response.status_code == 200
     assert response.json()["token"] == "issued-token"
+    assert response.json()["isRoot"] is True
+    assert response.json()["isPlatformAdmin"] is True
+    assert response.json()["tenantAccountType"] == "demo"
+    assert response.json()["capabilities"] == {"canPublish": True}
     assert pocketbase_client.requests == [
         (
             f"{auth.PB_URL}/api/collections/users/auth-with-password",
             {"identity": "user@example.test", "password": "old-password"},
         ),
     ]
+    _auth_response_dependencies["account_type"].assert_called_once_with("tenant-1")
+    _auth_response_dependencies["tenant_name"].assert_called_once_with("tenant-1")
+    _auth_response_dependencies["create_token"].assert_called_once_with(
+        "user-1",
+        "user@example.test",
+        "tenant-1",
+        True,
+        tenant_name="Test Tenant",
+        is_platform_admin=True,
+        tenant_account_type="demo",
+    )
+    _auth_response_dependencies["capabilities"].assert_called_once_with(
+        "tenant-1",
+        is_platform_admin=True,
+    )
 
 
 @pytest.mark.no_gemini
@@ -639,11 +721,12 @@ def test_change_password_updates_password_and_returns_fresh_session(
         "is_platform_admin": True,
         "tenant_account_type": "demo",
     }
+    create_token = MagicMock(return_value="fresh-token")
     monkeypatch.setattr(auth, "decode_token", lambda _token: token_payload)
     monkeypatch.setattr(auth.httpx, "Client", lambda **_kwargs: pocketbase_client)
     monkeypatch.setattr(auth, "update_user_password", update_password)
     monkeypatch.setattr(auth, "get_tenant_name", lambda _tenant_id: "Test Tenant")
-    monkeypatch.setattr(auth, "create_token", lambda *_args, **_kwargs: "fresh-token")
+    monkeypatch.setattr(auth, "create_token", create_token)
 
     response = _change_password(client)
 
@@ -653,6 +736,15 @@ def test_change_password_updates_password_and_returns_fresh_session(
         "email": "user@example.test",
     }
     update_password.assert_called_once_with("user-1", "new-password")
+    create_token.assert_called_once_with(
+        "user-1",
+        "user@example.test",
+        "tenant-1",
+        True,
+        tenant_name="Test Tenant",
+        is_platform_admin=True,
+        tenant_account_type="demo",
+    )
     assert pocketbase_client.requests[0][1] == {
         "identity": "user@example.test",
         "password": "old-password",
@@ -849,8 +941,25 @@ def test_auth_utils_normalize_and_sign_values(
         auth_utils._hash_login_code("user@example.test", "654321")
     )
 
+    fixed_now = datetime(2030, 5, 17, 12, 34, 56, tzinfo=timezone.utc)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(auth_utils, "datetime", _FixedDatetime)
     token = auth_utils._create_verification_token("user-1", "user@example.test")
-    payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    payload = pyjwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=[JWT_ALGORITHM],
+        options={"verify_exp": False, "verify_iat": False},
+    )
     assert payload["sub"] == "user-1"
     assert payload["email"] == "user@example.test"
     assert payload["purpose"] == "email-verification"
+    assert payload["iat"] == int(fixed_now.timestamp())
+    assert payload["exp"] - payload["iat"] == (
+        auth_utils.VERIFICATION_TOKEN_HOURS * 60 * 60
+    )

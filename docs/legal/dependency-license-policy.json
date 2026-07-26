@@ -79,9 +79,25 @@
     }
   },
   "nodeOverrides": {
+    "cookie@1.1.1": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
+    },
     "format@0.2.2": {
       "spdx": "MIT",
       "evidence": "Installed package.json declares MIT in its legacy licenses array."
+    },
+    "react-router@7.18.1": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE.md contains the MIT license and package.json declares MIT."
+    },
+    "react-router-dom@7.18.1": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE.md contains the MIT license and package.json declares MIT."
+    },
+    "set-cookie-parser@2.7.2": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
     }
   },
   "prohibitedNodePackages": [

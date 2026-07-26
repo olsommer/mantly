@@ -13,16 +13,27 @@ URL templates and header values may reference:
 
 import json
 import logging
+import math
 import os
 import re
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from typing import Any, Callable, Iterator, Optional
+from urllib.parse import parse_qs, parse_qsl, quote, urlparse
 
 import httpx
 from langchain.tools import BaseTool, tool
 from pydantic import Field, create_model
+
+from automail.core.sensitive_values import contains_sensitive_credential
+from automail.demo.e2e_fixtures import (
+    E2EFixtureLookupError,
+    E2EFixtureNotFound,
+    e2e_fixture_runtime_enabled,
+    lookup_e2e_tool_fixture,
+    merge_e2e_tool_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +41,23 @@ logger = logging.getLogger(__name__)
 # Type mapping for dynamic Pydantic field construction
 # ---------------------------------------------------------------------------
 
-_TYPE_MAP: dict[str, type] = {
+_TYPE_MAP: dict[str, Any] = {
     "string": str,
     "number": float,
     "integer": int,
     "boolean": bool,
+    "array": list[str],
 }
 
 
-def _cast(py_type: type, value: str) -> Any:
+def _cast(py_type: Any, value: Any) -> Any:
     """Convert a string default value to the target Python type."""
     if py_type is bool:
-        return value.lower() in ("true", "1", "yes")
+        return str(value).lower() in ("true", "1", "yes")
+    if py_type == list[str]:
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return [str(value)]
     try:
         return py_type(value)
     except (ValueError, TypeError):
@@ -85,6 +101,128 @@ _tool_calls: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "http_tool_calls",
     default=None,
 )
+_tool_execution_claim: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "http_tool_execution_claim",
+    default=None,
+)
+
+
+class HttpToolExecutionFenced(RuntimeError):
+    """The durable processing claim expired before an HTTP tool could run."""
+
+
+@dataclass
+class HttpToolCollection:
+    """Tool activity captured inside one isolated execution scope."""
+
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    generated_attachments: list[dict[str, Any]] = field(default_factory=list)
+
+# Tool responses are untrusted.  Persist only a small, fixed set of operational
+# facts for later reply composition/grounding; never persist the raw response,
+# request arguments, URL, headers, or credentials in the tool-call audit.
+_RESPONSE_FACT_ALLOWED_KEYS = frozenset({
+    "action",
+    "addresschangeallowed",
+    "amount",
+    "available",
+    "cancellationdate",
+    "carrier",
+    "caseid",
+    "casenumber",
+    "claimid",
+    "claimnumber",
+    "contractid",
+    "contractnumber",
+    "currency",
+    "deliverydate",
+    "duedate",
+    "effectivedate",
+    "eligible",
+    "estimateddelivery",
+    "estimateddeliverydate",
+    "estimateddeliverywindow",
+    "eta",
+    "exists",
+    "found",
+    "greencardeligible",
+    "invoiceid",
+    "invoicenumber",
+    "licenseplate",
+    "matched",
+    "matterid",
+    "matchedby",
+    "ok",
+    "orderid",
+    "ordernumber",
+    "nextdeadline",
+    "policyid",
+    "policynumber",
+    "price",
+    "processid",
+    "product",
+    "productcode",
+    "quantity",
+    "reference",
+    "result",
+    "responsiblelawyer",
+    "shipmentfound",
+    "shipmentid",
+    "sku",
+    "state",
+    "status",
+    "statuslabel",
+    "success",
+    "ticketid",
+    "ticketnumber",
+    "ticketreference",
+    "trackingnumber",
+    "validfrom",
+    "validto",
+})
+_RESPONSE_FACT_NULLABLE_LOOKUP_KEYS = frozenset({"exists", "found", "matched"})
+_RESPONSE_FACT_ALLOWED_NESTED_KEYS = frozenset({
+    ("event", "label"),
+    ("event", "location"),
+    ("event", "timestamp"),
+    ("lastevent", "label"),
+    ("lastevent", "location"),
+    ("lastevent", "timestamp"),
+})
+_RESPONSE_FACT_PRIVATE_CONTAINERS = frozenset({
+    "account",
+    "contact",
+    "customer",
+    "debug",
+    "headers",
+    "input",
+    "lookup",
+    "payload",
+    "received",
+    "recipient",
+    "request",
+    "sender",
+    "user",
+})
+_RESPONSE_FACT_SECRET_FRAGMENTS = (
+    "apikey",
+    "authorization",
+    "base64",
+    "cookie",
+    "credential",
+    "password",
+    "privatekey",
+    "secret",
+    "token",
+)
+_RESPONSE_FACT_MAX_COUNT = 24
+_RESPONSE_FACT_MAX_DEPTH = 5
+_RESPONSE_FACT_MAX_INSPECTED_NODES = 256
+_RESPONSE_FACT_MAX_PATH_CHARS = 240
+_RESPONSE_FACT_MAX_STRING_CHARS = 240
+_RESPONSE_FACT_MAX_SERIALIZED_BYTES = 4_096
+_LOOKUP_RESULT_SIGNAL_KEYS = frozenset({"exists", "found", "matched"})
+_AFFIRMATIVE_LOOKUP_RESULT_VALUES = frozenset({"1", "true", "yes"})
 
 
 def begin_generated_attachment_collection() -> Token:
@@ -118,14 +256,265 @@ def collect_tool_calls(token: Token | None = None) -> list[dict[str, Any]]:
     return collected
 
 
-def _record_tool_call(defn: ToolDefinition, *, status: str) -> None:
+def current_tool_calls() -> list[dict[str, Any]]:
+    """Return HTTP tool calls collected so far without resetting context."""
+    return [dict(call) for call in (_tool_calls.get() or [])]
+
+
+@contextmanager
+def fence_http_tool_execution(claim_is_active: Callable[[], bool]) -> Iterator[None]:
+    """Require a durable active claim immediately before every HTTP tool call."""
+    token = _tool_execution_claim.set(claim_is_active)
+    try:
+        yield
+    finally:
+        _tool_execution_claim.reset(token)
+
+
+def _require_http_tool_execution_claim() -> None:
+    claim_is_active = _tool_execution_claim.get()
+    if claim_is_active is not None and not claim_is_active():
+        raise HttpToolExecutionFenced("HTTP tool execution claim expired")
+
+
+@contextmanager
+def isolated_http_tool_collection() -> Iterator[HttpToolCollection]:
+    """Capture tool activity without reading from or mutating a parent scope."""
+    collection = HttpToolCollection()
+    generated_token = _generated_attachments.set(collection.generated_attachments)
+    tool_token = _tool_calls.set(collection.tool_calls)
+    try:
+        yield collection
+    finally:
+        _tool_calls.reset(tool_token)
+        _generated_attachments.reset(generated_token)
+
+
+def merge_http_tool_collection(
+    collection: HttpToolCollection,
+    *,
+    include_generated_attachments: bool = True,
+) -> None:
+    """Append allowed isolated activity to the active parent in caller order."""
+    tool_calls = _tool_calls.get()
+    if tool_calls is not None:
+        tool_calls.extend(dict(call) for call in collection.tool_calls)
+    generated_attachments = _generated_attachments.get()
+    if generated_attachments is not None and include_generated_attachments:
+        generated_attachments.extend(dict(item) for item in collection.generated_attachments)
+
+
+def _normalized_fact_key(value: str) -> str:
+    return "".join(character for character in value.lower() if character.isalnum())
+
+
+def _safe_fact_path(path: tuple[str, ...]) -> bool:
+    for segment in path:
+        if segment.isdigit():
+            continue
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", segment):
+            return False
+        normalized = _normalized_fact_key(segment)
+        if normalized in _RESPONSE_FACT_PRIVATE_CONTAINERS:
+            return False
+        if any(fragment in normalized for fragment in _RESPONSE_FACT_SECRET_FRAGMENTS):
+            return False
+    return True
+
+
+def _allowed_fact_path(path: tuple[str, ...]) -> bool:
+    normalized = [
+        _normalized_fact_key(segment)
+        for segment in path
+        if not segment.isdigit()
+    ]
+    if not normalized:
+        return False
+    if normalized[-1] in _RESPONSE_FACT_ALLOWED_KEYS:
+        return True
+    return len(normalized) >= 2 and tuple(normalized[-2:]) in _RESPONSE_FACT_ALLOWED_NESTED_KEYS
+
+
+def _response_facts(response_text: str) -> tuple[list[dict[str, Any]], bool]:
+    """Extract bounded, allowlisted scalar facts from a successful JSON response."""
+    try:
+        data = json.loads(response_text)
+    except (json.JSONDecodeError, TypeError):
+        return [], False
+    if not isinstance(data, (dict, list)):
+        return [], False
+
+    facts: list[dict[str, Any]] = []
+    inspected_nodes = 0
+    truncated = False
+
+    def _visit(value: Any, path: tuple[str, ...], depth: int) -> None:
+        nonlocal inspected_nodes, truncated
+        inspected_nodes += 1
+        if inspected_nodes > _RESPONSE_FACT_MAX_INSPECTED_NODES:
+            truncated = True
+            return
+        if depth > _RESPONSE_FACT_MAX_DEPTH:
+            truncated = True
+            return
+        if len(facts) >= _RESPONSE_FACT_MAX_COUNT:
+            truncated = True
+            return
+
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                if (
+                    inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES
+                    or len(facts) >= _RESPONSE_FACT_MAX_COUNT
+                ):
+                    truncated = True
+                    break
+                if not isinstance(raw_key, str):
+                    continue
+                child_path = (*path, raw_key)
+                if _safe_fact_path(child_path):
+                    _visit(child, child_path, depth + 1)
+            return
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                if (
+                    inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES
+                    or len(facts) >= _RESPONSE_FACT_MAX_COUNT
+                ):
+                    truncated = True
+                    break
+                _visit(child, (*path, str(index)), depth + 1)
+            return
+        if not path or not _allowed_fact_path(path):
+            return
+        normalized_leaf_path = _normalized_fact_key(path[-1])
+        if value is None:
+            if normalized_leaf_path not in _RESPONSE_FACT_NULLABLE_LOOKUP_KEYS:
+                return
+            safe_value: str | bool | int | float | None = None
+        elif isinstance(value, bool):
+            safe_value = value
+        elif isinstance(value, int):
+            safe_value = value
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                return
+            safe_value = value
+        elif isinstance(value, str):
+            if len(value) > _RESPONSE_FACT_MAX_STRING_CHARS:
+                truncated = True
+                return
+            if contains_sensitive_credential(value):
+                return
+            safe_value = value
+        else:
+            return
+
+        rendered_path = ".".join(path)
+        if len(rendered_path) > _RESPONSE_FACT_MAX_PATH_CHARS:
+            truncated = True
+            return
+        candidate = {"path": rendered_path, "value": safe_value}
+        candidate_facts = [*facts, candidate]
+        serialized_size = len(
+            json.dumps(candidate_facts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        if serialized_size > _RESPONSE_FACT_MAX_SERIALIZED_BYTES:
+            truncated = True
+            return
+        facts.append(candidate)
+
+    _visit(data, (), 0)
+    return facts, truncated
+
+
+def _response_has_nonaffirmative_lookup_result(response_text: str) -> bool:
+    """Reject negative lookup signals or a raw scan that cannot finish safely."""
+
+    try:
+        data = json.loads(response_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    found_signal = False
+    nonaffirmative = False
+    scan_incomplete = False
+    inspected_nodes = 0
+
+    def _visit(value: Any, depth: int) -> None:
+        nonlocal found_signal, inspected_nodes, nonaffirmative, scan_incomplete
+        if nonaffirmative or scan_incomplete:
+            return
+        if depth > _RESPONSE_FACT_MAX_DEPTH or inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+            scan_incomplete = True
+            return
+        inspected_nodes += 1
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                if nonaffirmative or scan_incomplete:
+                    break
+                if inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+                    scan_incomplete = True
+                    break
+                if not isinstance(raw_key, str):
+                    continue
+                normalized_key = _normalized_fact_key(raw_key)
+                if normalized_key in _LOOKUP_RESULT_SIGNAL_KEYS:
+                    found_signal = True
+                    if isinstance(child, bool):
+                        affirmative = child
+                    elif isinstance(child, int) and not isinstance(child, bool):
+                        affirmative = child == 1
+                    elif isinstance(child, str):
+                        affirmative = (
+                            " ".join(child.casefold().split())
+                            in _AFFIRMATIVE_LOOKUP_RESULT_VALUES
+                        )
+                    else:
+                        affirmative = False
+                    if not affirmative:
+                        nonaffirmative = True
+                        return
+                else:
+                    _visit(child, depth + 1)
+            return
+        if isinstance(value, list):
+            for child in value:
+                if nonaffirmative or scan_incomplete:
+                    break
+                if inspected_nodes >= _RESPONSE_FACT_MAX_INSPECTED_NODES:
+                    scan_incomplete = True
+                    break
+                _visit(child, depth + 1)
+
+    _visit(data, 0)
+    return scan_incomplete or (found_signal and nonaffirmative)
+
+
+def _record_tool_call(
+    defn: ToolDefinition,
+    *,
+    status: str,
+    response_text: str | None = None,
+) -> None:
     collector = _tool_calls.get()
     if collector is not None:
-        collector.append({
+        audit: dict[str, Any] = {
             "name": defn.name,
             "method": defn.method,
             "status": status,
-        })
+        }
+        if status == "success" and response_text is not None:
+            response_facts, truncated = _response_facts(response_text)
+            if response_facts:
+                audit["responseFacts"] = response_facts
+            if truncated:
+                audit["responseFactsTruncated"] = True
+            if (
+                (defn.name == "matter_lookup" or defn.name.startswith("fixture_matter_"))
+                and _response_has_nonaffirmative_lookup_result(response_text)
+            ):
+                audit["hasNonaffirmativeLookupResult"] = True
+        collector.append(audit)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +556,26 @@ def _resolve_env_vars(value: str, secrets: dict[str, str] | None = None) -> str:
 def _maybe_call_hosted_demo_tool(url: str, payload: dict[str, Any]) -> str | None:
     """Resolve hosted demo tools in-process for stable demos."""
     parsed = urlparse(url)
+    e2e_match = re.fullmatch(
+        r"/demo/e2e/tool/(?P<persona_id>[a-z][a-z0-9-]+)/"
+        r"(?P<tool_name>[a-z][a-z0-9_]*)",
+        parsed.path,
+    )
+    if e2e_match:
+        if not e2e_fixture_runtime_enabled():
+            raise E2EFixtureLookupError("E2E fixture runtime is disabled")
+        supplied_input = merge_e2e_tool_input(
+            parse_qsl(parsed.query, keep_blank_values=True),
+            payload,
+        )
+        result = lookup_e2e_tool_fixture(
+            e2e_match.group("persona_id"),
+            e2e_match.group("tool_name"),
+            supplied_input,
+        )
+        logger.info("Using in-process E2E fixture tool for %s", parsed.path)
+        return json.dumps(result, ensure_ascii=False)
+
     demo_paths = {
         "/demo/insurance/motor-policy",
         "/demo/insurance/green-card",
@@ -332,6 +741,9 @@ def _make_http_tool(
     _bound_sender = sender_email or ""
 
     def _http_call(**kwargs: Any) -> str:
+        # Fence before demo adapters and real network calls. A stale worker may
+        # still finish LLM reasoning, but it cannot start another tool request.
+        _require_http_tool_execution_claim()
         # Resolve sender_email: LLM-provided (identity) or pre-bound (intent)
         email_addr: str = kwargs.pop("sender_email", _bound_sender)
         url = defn.url_template.replace(
@@ -360,7 +772,7 @@ def _make_http_tool(
         try:
             demo_result = _maybe_call_hosted_demo_tool(url, payload)
             if demo_result is not None:
-                _record_tool_call(defn, status="success")
+                _record_tool_call(defn, status="success", response_text=demo_result)
                 return _capture_generated_file(defn, demo_result)
 
             response = httpx.request(
@@ -372,8 +784,12 @@ def _make_http_tool(
                 timeout=15.0,
             )
             response.raise_for_status()
-            _record_tool_call(defn, status="success")
+            _record_tool_call(defn, status="success", response_text=response.text)
             return _capture_generated_file(defn, response.text)
+        except E2EFixtureLookupError as exc:
+            status = "fixture_not_found" if isinstance(exc, E2EFixtureNotFound) else "fixture_error"
+            _record_tool_call(defn, status=status)
+            return f"E2E fixture lookup failed: {exc}"
         except httpx.HTTPStatusError as exc:
             _record_tool_call(defn, status=f"http_{exc.response.status_code}")
             return f"HTTP {exc.response.status_code}: {exc.response.text[:500]}"

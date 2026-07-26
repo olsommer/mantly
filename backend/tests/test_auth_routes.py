@@ -36,7 +36,7 @@ def _verification_token(**overrides: Any) -> str:
         "sub": "user-1",
         "email": "user@example.test",
         "purpose": "email-verification",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "exp": datetime(2099, 1, 1, tzinfo=timezone.utc),
     }
     payload.update(overrides)
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)

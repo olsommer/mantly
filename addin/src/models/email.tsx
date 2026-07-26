@@ -37,6 +37,14 @@ export interface IntentResponseConfig {
     auto: boolean;
 }
 
+export interface RunbookOutcome {
+    concernId: string;
+    concernSummary?: string;
+    matched: boolean;
+    intentName?: string;
+    actions: IntentAction[];
+}
+
 export interface IdentityResult {
     customerFound: boolean;
     data: Record<string, unknown>;
@@ -49,6 +57,7 @@ export interface IntentResult {
     intentName?: string;
     actions: IntentAction[];
     response?: IntentResponseConfig;
+    concerns?: RunbookOutcome[];
     error?: string;
 }
 
@@ -76,6 +85,7 @@ export interface TokenUsageCall {
     stage: string;
     provider: string;
     model: string;
+    durationMs?: number | null;
     inputTokens: number | null;
     outputTokens: number | null;
     cachedInputTokens: number | null;

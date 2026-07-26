@@ -50,6 +50,7 @@ export const OfficeProvider = ({ children }: { children: ReactNode }) => {
         user: null,
     });
     const { isDemoMode, demoUser } = useDemo();
+    const isEmbedMode = new URLSearchParams(window.location.search).has('embed');
 
     useEffect(() => {
         if (settings.isMockMode) {
@@ -66,7 +67,7 @@ export const OfficeProvider = ({ children }: { children: ReactNode }) => {
             return () => window.removeEventListener('auth:session-changed', syncMockOfficeState);
         }
 
-        if (isDemoMode) {
+        if (isDemoMode || isEmbedMode) {
             return;
         }
 
@@ -87,7 +88,7 @@ export const OfficeProvider = ({ children }: { children: ReactNode }) => {
                 user,
             });
         });
-    }, [isDemoMode, demoUser]);
+    }, [isDemoMode, isEmbedMode, demoUser]);
 
     const applyEmail = (email: string, attachments: { filename: string; base64: string; }[]) => {
         if (officeState.isOutlook && typeof Office !== 'undefined' && Office.context?.mailbox?.item) {
@@ -120,7 +121,7 @@ export const OfficeProvider = ({ children }: { children: ReactNode }) => {
             isDemoMode,
             applyEmail,
         }
-        : isDemoMode
+        : isDemoMode || isEmbedMode
         ? {
             isOfficeReady: true,
             isOutlook: true,

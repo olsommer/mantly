@@ -10,6 +10,9 @@
 ## Message History
 {messages}
 
+## Required Reply Language
+{reply_language}
+
 ## Reviewed Knowledge
 {knowledge_articles}
 

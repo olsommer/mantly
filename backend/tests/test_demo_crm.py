@@ -172,6 +172,43 @@ def test_demo_shipment_status_returns_missing_identifier_payload(demo_client):
 
 
 @pytest.mark.no_gemini
+def test_demo_logistics_open_ticket_is_deterministic_and_synthetic(demo_client):
+    payload = {
+        "orderNumber": "ZF-10482",
+        "subject": "Delivery exception",
+        "senderEmail": "lena.schmidt@example-shop.de",
+    }
+
+    first = demo_client.post("/demo/logistics/open-ticket", json=payload)
+    second = demo_client.post("/demo/logistics/open-ticket", json=payload)
+
+    assert first.status_code == 200
+    assert first.json() == second.json()
+    assert first.json() == {
+        "ok": True,
+        "action": "open-logistics-ticket",
+        "status": "open",
+        "ticketReference": first.json()["ticketReference"],
+        "received": payload,
+    }
+    assert first.json()["ticketReference"].startswith("ZF-TKT-")
+
+
+@pytest.mark.no_gemini
+def test_saas_normal_tenant_cannot_open_demo_logistics_ticket(saas_demo_client, monkeypatch):
+    monkeypatch.setattr("automail.db.pocketbase.client.get_tenant_account_type", lambda tenant_id: "normal")
+    token = create_token("user", "user@example.com", "tenant-normal", True)
+
+    response = saas_demo_client.post(
+        "/demo/logistics/open-ticket",
+        json={"orderNumber": "ZF-10482"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.no_gemini
 def test_intent_http_tool_resolves_demo_shipment_status_in_process():
     tool = make_intent_http_tool(
         IntentToolDefinition(

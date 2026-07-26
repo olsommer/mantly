@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.db.pocketbase.client import (
@@ -600,8 +601,9 @@ def _require_telegram_request(
 
 @router.post("/support/sync")
 async def run_support_sync(body: SupportSyncRequest, request: Request) -> dict[str, Any]:
-    _require_support_token(request, "SUPPORT_SYNC_TOKEN")
-    return run_scheduled_support_sync(
+    await run_in_threadpool(_require_support_token, request, "SUPPORT_SYNC_TOKEN")
+    return await run_in_threadpool(
+        run_scheduled_support_sync,
         tenant_id=body.tenant_id,
         project_id=body.project_id,
         limit=max(1, min(body.limit, 100)),
@@ -611,8 +613,9 @@ async def run_support_sync(body: SupportSyncRequest, request: Request) -> dict[s
 
 @router.post("/support/delivery")
 async def run_support_delivery(body: SupportSyncRequest, request: Request) -> dict[str, Any]:
-    _require_support_token(request, "SUPPORT_DELIVERY_TOKEN")
-    return run_scheduled_support_delivery(
+    await run_in_threadpool(_require_support_token, request, "SUPPORT_DELIVERY_TOKEN")
+    return await run_in_threadpool(
+        run_scheduled_support_delivery,
         tenant_id=body.tenant_id,
         project_id=body.project_id,
         limit=max(1, min(body.limit, 100)),
@@ -623,8 +626,9 @@ async def run_support_delivery(body: SupportSyncRequest, request: Request) -> di
 
 @router.post("/support/crm-sync")
 async def run_support_crm_sync(body: SupportSyncRequest, request: Request) -> dict[str, Any]:
-    _require_support_token(request, "SUPPORT_CRM_SYNC_TOKEN")
-    return run_scheduled_support_crm_sync(
+    await run_in_threadpool(_require_support_token, request, "SUPPORT_CRM_SYNC_TOKEN")
+    return await run_in_threadpool(
+        run_scheduled_support_crm_sync,
         tenant_id=body.tenant_id,
         project_id=body.project_id,
         limit=max(1, min(body.limit, 100)),
@@ -634,10 +638,11 @@ async def run_support_crm_sync(body: SupportSyncRequest, request: Request) -> di
 
 @router.post("/support/sla")
 async def run_support_sla_escalations(body: SupportSyncRequest, request: Request) -> dict[str, Any]:
-    _require_support_token(request, "SUPPORT_SLA_TOKEN")
+    await run_in_threadpool(_require_support_token, request, "SUPPORT_SLA_TOKEN")
     if not body.project_id:
         raise HTTPException(status_code=400, detail="projectId is required")
-    return run_scheduled_support_sla_escalations(
+    return await run_in_threadpool(
+        run_scheduled_support_sla_escalations,
         tenant_id=body.tenant_id,
         project_id=body.project_id,
         limit=max(1, min(body.limit, 200)),
@@ -652,7 +657,7 @@ async def receive_support_crm_webhook(
     tenant_id: str | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    _require_support_token(request, "SUPPORT_CRM_WEBHOOK_TOKEN")
+    await run_in_threadpool(_require_support_token, request, "SUPPORT_CRM_WEBHOOK_TOKEN")
     try:
         body = await request.json()
     except Exception as exc:
@@ -666,7 +671,8 @@ async def receive_support_crm_webhook(
         if "payload" in body:
             payload = body["payload"]
     try:
-        return ingest_crm_webhook(
+        return await run_in_threadpool(
+            ingest_crm_webhook,
             connector_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -692,7 +698,10 @@ async def receive_support_email_event(
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
     if not scoped_project_id:
         raise HTTPException(status_code=400, detail="projectId is required")
-    _require_provider_channel_request(
+    # Channel lookup and the full email pipeline use synchronous HTTP/LLM clients.
+    # Keep both outside the ASGI event loop so unrelated requests remain responsive.
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -705,7 +714,8 @@ async def receive_support_email_event(
     if isinstance(body, dict):
         actor_email = str(body.get("actorEmail") or body.get("actor_email") or body.get("creator") or actor_email).strip()
     try:
-        return ingest_email_webhook(
+        return await run_in_threadpool(
+            ingest_email_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -730,7 +740,8 @@ async def receive_support_slack_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_slack_request(
+    await run_in_threadpool(
+        _require_slack_request,
         channel_key,
         request,
         raw_body,
@@ -740,7 +751,8 @@ async def receive_support_slack_event(
     if isinstance(body, dict) and body.get("type") == "url_verification" and body.get("challenge"):
         return {"challenge": str(body["challenge"])}
     try:
-        return ingest_slack_event(
+        return await run_in_threadpool(
+            ingest_slack_event,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -775,7 +787,8 @@ async def receive_support_teams_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -787,7 +800,8 @@ async def receive_support_teams_event(
     if isinstance(body, dict) and body.get("challenge"):
         return {"challenge": str(body["challenge"])}
     try:
-        return ingest_teams_event(
+        return await run_in_threadpool(
+            ingest_teams_event,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -811,7 +825,8 @@ async def receive_support_discord_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -821,7 +836,8 @@ async def receive_support_discord_event(
         provider="discord",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -845,7 +861,8 @@ async def receive_support_telegram_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_telegram_request(
+    await run_in_threadpool(
+        _require_telegram_request,
         channel_key,
         request,
         raw_body,
@@ -853,7 +870,8 @@ async def receive_support_telegram_event(
         project_id=scoped_project_id,
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -877,7 +895,8 @@ async def receive_support_line_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -887,7 +906,8 @@ async def receive_support_line_event(
         provider="line",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -911,7 +931,8 @@ async def receive_support_viber_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -921,7 +942,8 @@ async def receive_support_viber_event(
         provider="viber",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -966,7 +988,8 @@ async def receive_support_whatsapp_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -976,7 +999,8 @@ async def receive_support_whatsapp_event(
         provider="whatsapp",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -1021,7 +1045,8 @@ async def receive_support_messenger_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -1031,7 +1056,8 @@ async def receive_support_messenger_event(
         provider="messenger",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -1076,7 +1102,8 @@ async def receive_support_instagram_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -1086,7 +1113,8 @@ async def receive_support_instagram_event(
         provider="instagram",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -1130,7 +1158,8 @@ async def receive_support_twitter_event(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -1140,7 +1169,8 @@ async def receive_support_twitter_event(
         provider="twitter",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -1174,7 +1204,8 @@ async def receive_support_twilio_event(
         body = {str(key): str(value) for key, value in form.items()}
         request.state.support_form_params = body
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_provider_channel_request(
+    await run_in_threadpool(
+        _require_provider_channel_request,
         channel_key,
         request,
         raw_body,
@@ -1184,7 +1215,8 @@ async def receive_support_twilio_event(
         provider="sms",
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,
@@ -1259,7 +1291,10 @@ async def receive_support_channel_webhook(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     scoped_tenant_id, scoped_project_id, payload = _body_scope(body, tenant_id, project_id)
-    _require_channel_webhook_request(
+    # Channel lookup and adapter processing are synchronous and may run the
+    # complete inbound email pipeline. Keep both outside the ASGI event loop.
+    await run_in_threadpool(
+        _require_channel_webhook_request,
         channel_key,
         request,
         raw_body,
@@ -1267,7 +1302,8 @@ async def receive_support_channel_webhook(
         project_id=scoped_project_id,
     )
     try:
-        return ingest_channel_webhook(
+        return await run_in_threadpool(
+            ingest_channel_webhook,
             channel_key,
             payload=payload,
             tenant_id=scoped_tenant_id,

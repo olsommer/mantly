@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import shlex
@@ -15,7 +16,7 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import Field
 
@@ -49,6 +50,7 @@ from automail.db.pocketbase.client import (
     upsert_crm_connector,
 )
 from automail.models import CamelCaseModel
+from automail.support.channel_test_jobs import enqueue_channel_test_message, get_channel_test_job_status
 from automail.support.crm import sync_support_crm_connector, sync_support_crm_connectors, validate_crm_connector
 from automail.support.delivery import send_support_channel_reply
 from automail.support.ingestion import ingest_email_webhook, sync_support_channel, sync_support_channels
@@ -138,6 +140,10 @@ class ChannelLifecycleSmokeInput(CamelCaseModel):
 
 class ChannelWebhookRematchInput(CamelCaseModel):
     outbound_message_id: str = ""
+
+
+class SmokeHttpTimeoutError(ValueError):
+    """The provider-facing HTTP smoke did not finish within its bounded wait."""
 
 
 class SlackInstallUrlInput(CamelCaseModel):
@@ -8193,6 +8199,29 @@ def _provider_smoke_payload(channel_key: str, channel_type: str, body: ChannelTe
     author_name = body.author_name.strip() or "Test customer"
     author_email = body.author_email.strip() or "customer@example.com"
     attachments = _smoke_attachments(body.attachments)
+    if channel_type == "email":
+        subject = next((line.strip() for line in text.splitlines() if line.strip()), "Admin support smoke")[:160]
+        return (
+            {
+                "email": {
+                    "messageId": message_id,
+                    "threadId": thread_ref or message_id,
+                    "subject": subject,
+                    "fromAddress": author_email,
+                    "fromName": author_name,
+                    "body": text,
+                    "attachments": attachments,
+                },
+                "metadata": {
+                    "source": "admin_smoke",
+                    "channelKey": channel_key,
+                    "eventId": event_id,
+                },
+            },
+            "email",
+            event_id,
+            message_id,
+        )
     if channel_type == "slack":
         slack_ts = message_id
         event: dict[str, Any] = {
@@ -8581,7 +8610,7 @@ def _smoke_count(result: dict[str, Any], key: str, fallback: int = 0) -> int:
 
 
 def _smoke_url(provider: str, setup: dict[str, Any]) -> str:
-    if provider in {"slack", "teams", "discord", "telegram", "line", "viber", "whatsapp", "messenger", "instagram", "twitter", "sms"}:
+    if provider in {"email", "slack", "teams", "discord", "telegram", "line", "viber", "whatsapp", "messenger", "instagram", "twitter", "sms"}:
         return str(setup.get("providerWebhookUrl") or "").strip()
     return str(setup.get("inboundWebhookUrl") or "").strip()
 
@@ -8620,6 +8649,25 @@ def _smoke_twilio_signature(url: str, payload: dict[str, Any], auth_token: str) 
     return base64.b64encode(
         hmac.new(auth_token.encode("utf-8"), signed.encode("utf-8"), hashlib.sha1).digest()
     ).decode("ascii")
+
+
+def _smoke_http_timeout(provider: str = "") -> float:
+    normalized_provider = provider.strip().lower()
+    default = 180.0 if normalized_provider == "email" else 60.0
+    configured = (
+        os.getenv("SUPPORT_EMAIL_SMOKE_TIMEOUT")
+        if normalized_provider == "email"
+        else None
+    )
+    if configured is None:
+        configured = os.getenv("SUPPORT_SMOKE_TIMEOUT")
+    try:
+        timeout = float(configured) if configured is not None else default
+    except (TypeError, ValueError):
+        timeout = default
+    if not math.isfinite(timeout):
+        timeout = default
+    return max(1.0, min(timeout, 300.0))
 
 
 def _smoke_http_headers(provider: str, setup: dict[str, Any], secrets: dict[str, str] | None, raw_body: bytes) -> tuple[dict[str, str], dict[str, str]]:
@@ -8711,9 +8759,14 @@ def _post_smoke_http(provider: str, setup: dict[str, Any], payload: dict[str, An
     else:
         raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         headers, auth = _smoke_http_headers(provider, setup, secrets, raw_body)
+    timeout = _smoke_http_timeout(provider)
     try:
-        with httpx.Client(timeout=12) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(url, content=raw_body, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise SmokeHttpTimeoutError(
+            f"Smoke endpoint timed out after {timeout:g} seconds"
+        ) from exc
     except Exception as exc:
         raise ValueError(str(exc)) from exc
     if response.status_code >= 400:
@@ -9073,7 +9126,10 @@ async def sync_channel(channel_id: str, ctx: ProjectEditorDep, auth: AuthDep, li
         raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 400, detail=str(exc)) from exc
 
 
-@router.post("/projects/{pid}/channels/{channel_id}/test-message")
+@router.post(
+    "/projects/{pid}/channels/{channel_id}/test-message",
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def test_channel_message(channel_id: str, body: ChannelTestMessageInput, ctx: ProjectEditorDep) -> dict[str, Any]:
     channel = get_channel(
         channel_id,
@@ -9092,16 +9148,26 @@ async def test_channel_message(channel_id: str, body: ChannelTestMessageInput, c
     channel_type = str(channel.get("type") or "webhook").strip() or "webhook"
     payload, _event_id, _message_id = _generic_test_message_payload(channel_key, channel_type, body)
     try:
-        result = ingest_channel_webhook(
-            channel_key,
+        return enqueue_channel_test_message(
+            channel=channel,
             payload=payload,
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
-            source="admin-test",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"payload": payload, **result}
+
+
+@router.get("/projects/{pid}/channels/test-message-jobs/{job_id}")
+async def channel_test_message_job(job_id: str, ctx: ProjectViewerDep) -> dict[str, Any]:
+    result = get_channel_test_job_status(
+        job_id,
+        tenant_id=ctx.tenant_id,
+        project_id=ctx.project_id,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Channel test message job not found")
+    return result
 
 
 def _run_channel_smoke(
@@ -9143,6 +9209,14 @@ def _run_channel_smoke(
         )
     elif provider == "teams":
         result = ingest_teams_event(
+            channel_key,
+            payload=payload,
+            tenant_id=ctx.tenant_id,
+            project_id=ctx.project_id,
+            source="admin-smoke",
+        )
+    elif provider == "email":
+        result = ingest_email_webhook(
             channel_key,
             payload=payload,
             tenant_id=ctx.tenant_id,
@@ -10048,6 +10122,8 @@ async def smoke_channel(channel_id: str, body: ChannelTestMessageInput, ctx: Pro
     started_at = datetime.now(timezone.utc).isoformat()
     try:
         result = await asyncio.to_thread(_run_channel_smoke, channel, body=body, ctx=ctx, request=request)
+    except SmokeHttpTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     run_id = _record_smoke_run(
@@ -10120,6 +10196,8 @@ async def smoke_channel_lifecycle(
             request=request,
             actor_email=auth.email,
         )
+    except SmokeHttpTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     run_id = _record_smoke_run(

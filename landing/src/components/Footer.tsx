@@ -21,45 +21,57 @@ export function Footer() {
 
   return (
     <footer className="border-t border-border/50 bg-background">
-      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-12">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
+      <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8">
+        <div className="flex flex-col items-start justify-between gap-5 sm:flex-row sm:items-center sm:gap-6">
           {/* Brand */}
           <div>
-            <a href={homeHref} className="flex items-baseline gap-1.5">
-              <span className="font-display text-2xl font-normal leading-tight tracking-tight">{t("brand.name")}</span>
+            <a href={homeHref} className="flex min-h-11 items-center gap-1.5">
+              <span className="font-display text-2xl font-semibold leading-tight tracking-tight">{t("brand.name")}</span>
               
             </a>
-            <p className="mt-2 text-base text-muted-foreground/70 max-w-xs">
+            <p className="mt-2 text-base text-muted-foreground max-w-xs">
               {t("footer.tagline")}
             </p>
           </div>
 
           {/* Links */}
-          <div className="flex flex-wrap items-center gap-6 text-base text-muted-foreground/70">
-            <a href={homeHref} className="hover:text-foreground transition-colors">
-              {t("brand.name")}
+          <div className="flex flex-wrap items-center gap-x-6 text-base text-muted-foreground sm:gap-y-2">
+            <a href="https://github.com/olsommer/mantly" className="inline-flex min-h-11 items-center transition-colors hover:text-foreground">
+              {t("footer.github")}
+            </a>
+            <a
+              href="https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
+            >
+              {t("footer.docs")}
+            </a>
+            <a
+              href="mailto:support@mantly.io?subject=Mantly%20Enterprise"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
+            >
+              {t("footer.sales")}
             </a>
             <a
               href={legalLinks.support}
-              className="hover:text-foreground transition-colors"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
             >
               {t("footer.support")}
             </a>
             <a
               href={legalLinks.privacy}
-              className="hover:text-foreground transition-colors"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
             >
               {t("footer.privacy")}
             </a>
             <a
               href={legalLinks.terms}
-              className="hover:text-foreground transition-colors"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
             >
               {t("footer.terms")}
             </a>
             <a
               href={legalLinks.imprint}
-              className="hover:text-foreground transition-colors"
+              className="inline-flex min-h-11 items-center transition-colors hover:text-foreground"
             >
               {t("footer.imprint")}
             </a>
@@ -68,8 +80,8 @@ export function Footer() {
               variant="ghost"
               size="sm"
               onClick={toggleLang}
-              className="h-auto px-0 text-base text-muted-foreground/70 hover:text-foreground"
-              aria-label="Toggle language"
+              className="h-11 px-0 text-base text-muted-foreground hover:text-foreground"
+              aria-label={t(lang === "en" ? "a11y.switchToGerman" : "a11y.switchToEnglish")}
             >
               <Globe className="h-3.5 w-3.5" />
               {lang === "en" ? "DE" : "EN"}
@@ -79,7 +91,7 @@ export function Footer() {
 
         <Separator className="my-8 bg-border/50" />
 
-        <p className="text-xs text-muted-foreground/50 text-center">
+        <p className="text-xs text-muted-foreground text-center">
           &copy; {new Date().getFullYear()} {t("brand.name")}. {t("footer.rights")}
         </p>
       </div>

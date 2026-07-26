@@ -252,7 +252,11 @@ def run_scheduled_support_sla_escalations(
             "items": [],
             "error": "projectId is required for SLA escalation scans",
         }
-        runtime_observability.mark_failure("support.sla", result["error"], details=_numeric_details(result))
+        runtime_observability.mark_failure(
+            "support.sla",
+            "project_id_required",
+            details=_numeric_details(result),
+        )
         return result
     return _run_observed(
         "support.sla",

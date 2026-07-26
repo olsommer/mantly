@@ -163,6 +163,7 @@ const Chat = () => {
     const promptInjectionResult = latestContent?.promptInjectionResult;
     const requiresHuman = latestContent?.requiresHuman ?? false;
     const responseEnabled = intentResult?.response?.enabled ?? false;
+    const hasComposedResponse = Boolean(latestContent?.emailBody?.trim());
     const showActionsPanel = !!identityResult || !!intentResult;
 
     const [responseRevealed, setResponseRevealed] = useState(true);
@@ -270,7 +271,8 @@ const Chat = () => {
     }
 
     const shouldShowResponse = Boolean(latestResponse && (
-        requiresHuman
+        hasComposedResponse
+        || requiresHuman
         || !showActionsPanel
         || responseEnabled && responseRevealed
     ));
@@ -532,6 +534,7 @@ const Chat = () => {
                     chatId={chatId ?? ''}
                     projectId={selectedProjectId}
                     responseRevealed={responseRevealed}
+                    hasComposedResponse={hasComposedResponse}
                     onRevealResponse={() => setResponseRevealed(true)}
                 />
             )}

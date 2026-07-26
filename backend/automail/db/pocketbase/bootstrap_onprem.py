@@ -96,6 +96,7 @@ def bootstrap_onprem_tenant(
                     "tenant": tenant_id,
                     "is_root": True,
                     "must_change_password": True,
+                    "password_login_enabled": True,
                     "verified": True,
                 },
             ).raise_for_status()

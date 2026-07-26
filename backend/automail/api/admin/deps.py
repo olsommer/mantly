@@ -55,6 +55,17 @@ def _root_auth(request: Request) -> TokenPayload:
     return payload
 
 
+def _platform_admin_auth(request: Request) -> TokenPayload:
+    """Require a platform administrator for global, cross-tenant operations."""
+    payload = require_authenticated(request)
+    if not payload.user_id or not payload.is_platform_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Platform administrator access required",
+        )
+    return payload
+
+
 def _require_ctx_capability(ctx: ProjectContext, capability: str) -> None:
     if not ctx.tenant_id:
         return
@@ -80,4 +91,5 @@ ProjectEditorDep = Annotated[ProjectContext, Depends(_project_editor)]
 ProjectAdminDep = Annotated[ProjectContext, Depends(_project_admin)]
 RootDep = Annotated[str, Depends(require_root)]
 RootAuthDep = Annotated[TokenPayload, Depends(_root_auth)]
+PlatformAdminDep = Annotated[TokenPayload, Depends(_platform_admin_auth)]
 AuthDep = Annotated[TokenPayload, Depends(require_authenticated)]

@@ -115,6 +115,11 @@ jobs:
           test -s docs/security/threat-model.md
           test -s docs/security/incident-response.md
           test -s docs/security/data-retention.md
+          test -s docs/security/credential-rotation-and-break-glass.md
           grep -q "tenant isolation" docs/security/threat-model.md
+          grep -q "Required permission" docs/security/threat-model.md
+          grep -q "5.12 Backup/recovery" docs/security/threat-model.md
           grep -q "duplicate side effects" docs/security/incident-response.md
+          grep -q "Maximum planned overlap: 24 hours" docs/security/credential-rotation-and-break-glass.md
+          grep -q "Access lifetime: maximum 60 minutes" docs/security/credential-rotation-and-break-glass.md
           grep -q "Backups" docs/security/data-retention.md

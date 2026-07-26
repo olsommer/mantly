@@ -3,16 +3,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
+
 from automail.core.config import AdminConfig
 from automail.pipeline.intent.intents_factory import get_intent_response_rules
 from automail.pipeline.store import (
     PipelineSource,
+    _validate_intent_actions,
     compose_intent_content,
     config_from_payload,
     config_payload,
     ensure_project_pipeline,
     list_project_intents,
     parse_intent_content,
+    upsert_project_intent,
 )
 
 
@@ -62,6 +66,42 @@ def test_compose_intent_content_preserves_metadata_and_pb_fields():
     assert frontmatter["response"] == {"enabled": True, "response_rules": ["Use a concise tone"]}
     assert body == "Reply with claim instructions."
     assert "\ntools:\n  - name: lookup\n" in content
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        pytest.param(
+            {"type": "button", "name": "open-ticket", "label": "Open ticket"},
+            id="button",
+        ),
+        pytest.param(
+            {"type": "input", "name": "tracking", "label": "Tracking", "separate_call": True},
+            id="separate-call",
+        ),
+    ],
+)
+def test_upsert_project_intent_rejects_enabled_webhook_actions_without_url(action):
+    content = compose_intent_content(
+        {
+            "name": "claim",
+            "description": "Handle claim",
+            "actions": [action],
+            "content": "Handle the request.",
+        }
+    )
+
+    with pytest.raises(ValueError, match="Webhook URL is required for enabled action"):
+        upsert_project_intent(PipelineSource("project-1", "draft"), "claim", content)
+
+
+def test_action_webhook_validation_allows_disabled_or_collected_actions():
+    _validate_intent_actions(
+        [
+            {"type": "button", "name": "disabled", "enabled": False},
+            {"type": "input", "name": "collected", "separate_call": False},
+        ]
+    )
 
 
 def test_list_project_intents_hydrates_child_tools_and_actions(monkeypatch):

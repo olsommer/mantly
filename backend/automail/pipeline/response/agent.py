@@ -35,7 +35,8 @@ def _validate_response(
     2. requires_human=False without runtime intent → override to requires_human=True
     3. activated_intent not in known intents → clear it, set requires_human=True
     4. response_attachments with invalid filenames → remove them
-    5. activated_intent set AND requires_human=True → override to requires_human=False
+    5. explicit human-review state remains authoritative even when a primary
+       runbook matched (for example, another concern is unmatched).
     """
     if known_intents is None:
         known_intents = get_known_intent_names(intents_dir=intents_dir)
@@ -61,16 +62,6 @@ def _validate_response(
             response.activated_intent = None
             response.requires_human = True
             response.requires_human_reason = f"Unknown intent: '{unknown_name}'."
-
-    # Rule 5: intent activated but still flagged for human review — override to False.
-    if response.activated_intent and response.requires_human:
-        if response.activated_intent.lower() in known_intents:
-            logger.warning(
-                "Runtime response has intent '%s' but requires_human=True — overriding to False",
-                response.activated_intent,
-            )
-            response.requires_human = False
-            response.requires_human_reason = None
 
     # Rule 4: validate attachment filenames
     if response.response_attachments:

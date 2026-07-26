@@ -13,6 +13,6 @@ ENV VITE_PUBLIC_POSTHOG_HOST=${VITE_PUBLIC_POSTHOG_HOST}
 RUN npm run build
 
 FROM nginx:1.27-alpine
-COPY deploy/spa-nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/landing-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/landing/dist /usr/share/nginx/html
 EXPOSE 80

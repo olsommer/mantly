@@ -31,7 +31,7 @@ const content: Record<"de" | "en", SupportContent> = {
       {
         title: "Hilfreiche Angaben",
         body: [
-          "Bitte nennen Sie die verwendete E-Mail-Adresse, Organisation, eine kurze Beschreibung des Problems, den Zeitpunkt des Auftretens und relevante Fehlermeldungen.",
+          "Bitte nenne die verwendete E-Mail-Adresse, deine Organisation, eine kurze Beschreibung des Problems, den Zeitpunkt des Auftretens und relevante Fehlermeldungen.",
           "Bei Outlook-Problemen helfen außerdem Outlook-Version, Browser oder Desktop-App, Betriebssystem und die Schritte, mit denen sich das Problem reproduzieren lässt.",
         ],
       },

@@ -8,6 +8,7 @@ export interface AppSettings {
     enablePreview: boolean;
     enableDemoMode: boolean;
     isSaas: boolean;
+    sourceUrl: string;
 }
 
 const getApiBaseUrl = (): string => {
@@ -66,4 +67,5 @@ export const settings: AppSettings = {
     enablePreview: import.meta.env.VITE_ENABLE_ADMIN_PREVIEW !== 'false',
     enableDemoMode: import.meta.env.VITE_ENABLE_DEMO_MODE === 'true',
     isSaas: import.meta.env.VITE_IS_SAAS === 'true',
+    sourceUrl: readEnvString('VITE_SOURCE_URL') ?? 'https://github.com/olsommer/mantly',
 };

@@ -304,7 +304,7 @@ const AdminApp = () => {
     const handleCreateProject = useCallback(() => {
         // In SaaS Free plan, block and redirect to billing
         if (settings.isSaas && (!billing || billing.plan === 'free')) {
-            toast.error(t('The Free plan is limited to 1 project. Upgrade to Pro to create more.'));
+            toast.error(t('The Cloud Sandbox is limited to 1 project. Upgrade to Cloud to create more.'));
             void navigate(`/${tenantId}/billing`);
             return;
         }
@@ -510,6 +510,7 @@ const AdminApp = () => {
                 <ChangePasswordGate
                     onComplete={() => setMustChangePassword(false)}
                     onSignOut={handleSignOut}
+                    userEmail={userEmail}
                 />
             </Suspense>
         );

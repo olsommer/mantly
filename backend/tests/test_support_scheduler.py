@@ -1,10 +1,13 @@
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from automail.api.admin import channels as admin_channels
 from automail.api.admin import issues as admin_issue_api
-from automail.support import scheduler
+from automail.support import channel_test_jobs, scheduler
 
 
 def _provider_delivery_proof(provider: str = "slack", channel_id: str = "C_LIVE") -> dict:
@@ -89,6 +92,67 @@ def test_run_scheduled_support_sync_delegates_scope(monkeypatch):
     assert seen["project_id"] == "project1"
     assert seen["actor_email"] == "support-sync"
     assert seen["source"] == "cron"
+
+
+def test_run_scheduled_support_processing_expiry_delegates_scope(monkeypatch):
+    seen: dict = {}
+
+    def fake_expiry(**kwargs):
+        seen.update(kwargs)
+        return {"inspected": 2, "expired": 1, "failed": 0, "items": []}
+
+    monkeypatch.setattr(
+        scheduler,
+        "expire_stale_direct_channel_processing_runs_for_scope",
+        fake_expiry,
+    )
+
+    result = scheduler.run_scheduled_support_processing_expiry(
+        tenant_id="tenant1",
+        project_id="project1",
+        limit=12,
+        source="cron",
+    )
+
+    assert result["expired"] == 1
+    assert seen == {
+        "tenant_id": "tenant1",
+        "project_id": "project1",
+        "limit": 12,
+        "source": "cron",
+    }
+
+
+def test_support_processing_expiry_scheduler_starts_by_default(monkeypatch):
+    created: dict = {}
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            created.update({
+                "target": target,
+                "args": args,
+                "daemon": daemon,
+                "name": name,
+            })
+
+        def start(self):
+            created["started"] = True
+
+    monkeypatch.setattr(scheduler, "_processing_expiry_started", False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_TENANT_ID", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_PROJECT_ID", raising=False)
+    monkeypatch.delenv("SUPPORT_PROCESSING_EXPIRY_LIMIT", raising=False)
+    monkeypatch.setattr(scheduler.threading, "Thread", FakeThread)
+
+    assert scheduler.start_support_processing_expiry_scheduler() is True
+    assert created == {
+        "target": scheduler._loop_processing_expiry,
+        "args": (60, None, None, 200),
+        "daemon": True,
+        "name": "support-processing-expiry-scheduler",
+        "started": True,
+    }
 
 
 def test_run_scheduled_support_delivery_records_run(monkeypatch):
@@ -636,6 +700,339 @@ def test_internal_support_channel_webhook_ingests_with_token(client, monkeypatch
     }]
 
 
+def test_internal_support_channel_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {
+            "messageId": "msg-generic-liveness",
+            "fromAddress": "customer@example.com",
+            "body": "Where is my order?",
+        },
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0, "items": []}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, "ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr(internal_support, "_require_channel_webhook_request", fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/channel-webhooks/fulfillment-main",
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_channel_webhook("fulfillment-main", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert len(auth_threads) == 1
+            assert len(worker_threads) == 1
+            assert auth_threads[0] != event_loop_thread
+            assert worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("route_name", "auth_name", "ingest_name", "path"),
+    [
+        (
+            "receive_support_slack_event",
+            "_require_slack_request",
+            "ingest_slack_event",
+            "/api/internal/support/slack/slack-main",
+        ),
+        (
+            "receive_support_teams_event",
+            "_require_provider_channel_request",
+            "ingest_teams_event",
+            "/api/internal/support/teams/teams-main",
+        ),
+    ],
+)
+def test_direct_provider_webhooks_keep_event_loop_responsive(
+    monkeypatch,
+    route_name,
+    auth_name,
+    ingest_name,
+    path,
+):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {"messageId": "provider-message-1", "text": "Where is my order?"},
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, ingest_name, fake_ingest)
+    monkeypatch.setattr(internal_support, auth_name, fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        route = getattr(internal_support, route_name)
+        request_task = asyncio.create_task(route(path.rsplit("/", 1)[-1], request))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("route_name", ["start_web_chat", "add_web_chat_message"])
+def test_public_web_chat_posts_keep_event_loop_responsive(monkeypatch, route_name):
+    from automail.api import support_web_chat
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+
+    def fake_create(*_args, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"id": "result1", "sessionKey": "session1"}
+
+    dependency_name = (
+        "create_web_chat_session"
+        if route_name == "start_web_chat"
+        else "create_web_chat_message"
+    )
+    monkeypatch.setattr(support_web_chat, dependency_name, fake_create)
+
+    async def scenario():
+        event_loop_thread = threading.get_ident()
+        if route_name == "start_web_chat":
+            request_task = asyncio.create_task(
+                support_web_chat.start_web_chat(
+                    "project1",
+                    support_web_chat.WebChatSessionCreate(initial_message="Need help"),
+                )
+            )
+        else:
+            request_task = asyncio.create_task(
+                support_web_chat.add_web_chat_message(
+                    "session1",
+                    support_web_chat.WebChatMessageCreate(body="Still need help"),
+                )
+            )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert worker_threads and worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["id"] == "result1"
+
+    asyncio.run(scenario())
+
+
+def test_internal_support_sync_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    def fake_run(**_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"processed": 1}
+
+    monkeypatch.setattr(internal_support, "_require_support_token", fake_require)
+    monkeypatch.setattr(internal_support, "run_scheduled_support_sync", fake_run)
+
+    async def scenario():
+        request = Request({"type": "http", "method": "POST", "path": "/api/internal/support/sync", "headers": []})
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.run_support_sync(
+                internal_support.SupportSyncRequest(project_id="project1"),
+                request,
+            )
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+        finally:
+            release.set()
+        assert (await asyncio.wait_for(request_task, timeout=1))["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_internal_crm_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {"eventId": "evt-1"},
+    }).encode()
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    def fake_ingest(_connector_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"processed": 1}
+
+    monkeypatch.setattr(internal_support, "_require_support_token", fake_require)
+    monkeypatch.setattr(internal_support, "ingest_crm_webhook", fake_ingest)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/crm-webhooks/hubspot-main",
+            "headers": [(b"content-type", b"application/json")],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_crm_webhook("hubspot-main", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert auth_threads and auth_threads[0] != event_loop_thread
+            assert worker_threads and worker_threads[0] != event_loop_thread
+        finally:
+            release.set()
+        assert (await asyncio.wait_for(request_task, timeout=1))["processed"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("message", "status_code"),
+    [("Channel not found", 404), ("Invalid inbound payload", 400)],
+)
+def test_internal_support_channel_webhook_preserves_value_error_mapping(
+    client,
+    monkeypatch,
+    message,
+    status_code,
+):
+    from automail.api import internal_support
+
+    monkeypatch.setattr(internal_support, "_require_channel_webhook_request", lambda *_args, **_kwargs: None)
+
+    def fail_ingest(*_args, **_kwargs):
+        raise ValueError(message)
+
+    monkeypatch.setattr(internal_support, "ingest_channel_webhook", fail_ingest)
+
+    response = client.post(
+        "/api/internal/support/channel-webhooks/fulfillment-main",
+        json={"tenantId": "tenant1", "projectId": "project1", "payload": {}},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == message
+
+
 def test_internal_support_channel_webhook_prefers_channel_token(client, monkeypatch):
     monkeypatch.setenv("SUPPORT_SYNC_TOKEN", "sync-token")
     monkeypatch.setenv("SUPPORT_CHANNEL_WEBHOOK_TOKEN", "channel-token")
@@ -716,6 +1113,74 @@ def test_internal_support_email_webhook_ingests_with_email_token(client, monkeyp
         "actor_email": "ingress@example.com",
         "source": "email-webhook",
     }]
+
+
+def test_internal_support_email_webhook_keeps_event_loop_responsive(monkeypatch):
+    from starlette.requests import Request
+
+    from automail.api import internal_support
+
+    started = threading.Event()
+    release = threading.Event()
+    auth_threads: list[int] = []
+    worker_threads: list[int] = []
+    raw_body = json.dumps({
+        "tenantId": "tenant1",
+        "projectId": "project1",
+        "payload": {
+            "messageId": "msg-liveness",
+            "fromAddress": "customer@example.com",
+            "body": "Need help",
+        },
+    }).encode()
+
+    def fake_ingest(_channel_key: str, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2)
+        return {"status": "success", "processed": 1, "failed": 0, "skipped": 0, "items": []}
+
+    def fake_require(*_args, **_kwargs):
+        auth_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(internal_support, "ingest_email_webhook", fake_ingest)
+    monkeypatch.setattr(internal_support, "_require_provider_channel_request", fake_require)
+
+    async def scenario():
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/internal/support/email/email:support",
+            "headers": [],
+        }, receive)
+        event_loop_thread = threading.get_ident()
+        request_task = asyncio.create_task(
+            internal_support.receive_support_email_event("email:support", request)
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1.5)
+            assert request_task.done() is False
+            assert len(auth_threads) == 1
+            assert len(worker_threads) == 1
+            assert auth_threads[0] != event_loop_thread
+            assert worker_threads[0] != event_loop_thread
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(request_task, timeout=1)
+        assert result["processed"] == 1
+
+    asyncio.run(scenario())
 
 
 def test_internal_support_channel_webhook_outbound_echo_uses_outbound_token(client, monkeypatch):
@@ -6548,10 +7013,134 @@ def test_sms_http_smoke_posts_form_with_twilio_signature(monkeypatch):
     assert posted == payload
     assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
     assert captured["headers"]["X-Twilio-Signature"] == expected
+    assert captured["timeout"] == 60.0
     assert http_result["auth"] == {
         "mode": "twilio_signature",
         "env": "SUPPORT_TWILIO_AUTH_TOKEN",
         "header": "X-Twilio-Signature",
+    }
+
+
+def test_smoke_http_timeout_uses_email_specific_default_and_config(monkeypatch):
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.delenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", raising=False)
+
+    assert admin_channels._smoke_http_timeout("email") == 180.0
+    assert admin_channels._smoke_http_timeout("slack") == 60.0
+
+    monkeypatch.setenv("SUPPORT_SMOKE_TIMEOUT", "75")
+    assert admin_channels._smoke_http_timeout("email") == 75.0
+    assert admin_channels._smoke_http_timeout("slack") == 75.0
+
+    monkeypatch.setenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", "240")
+    assert admin_channels._smoke_http_timeout("email") == 240.0
+    assert admin_channels._smoke_http_timeout("slack") == 75.0
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("0", 1.0),
+        ("999", 300.0),
+        ("not-a-number", 180.0),
+        ("nan", 180.0),
+    ],
+)
+def test_email_smoke_http_timeout_is_bounded(monkeypatch, configured, expected):
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.setenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", configured)
+
+    assert admin_channels._smoke_http_timeout("email") == expected
+
+
+def test_email_http_smoke_timeout_has_stable_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, timeout: float):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url: str, *, content: bytes, headers: dict[str, str]):
+            raise admin_channels.httpx.ReadTimeout(
+                "The read operation timed out",
+                request=admin_channels.httpx.Request("POST", url),
+            )
+
+    monkeypatch.delenv("SUPPORT_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.delenv("SUPPORT_EMAIL_SMOKE_TIMEOUT", raising=False)
+    monkeypatch.setattr(admin_channels.httpx, "Client", FakeClient)
+
+    with pytest.raises(
+        admin_channels.SmokeHttpTimeoutError,
+        match="Smoke endpoint timed out after 180 seconds",
+    ):
+        admin_channels._post_smoke_http(
+            "email",
+            {"providerWebhookUrl": "https://support.example.test/api/internal/support/email/email-main"},
+            {"email": {"messageId": "email-message-1", "body": "Need help"}},
+            {"SUPPORT_SYNC_TOKEN": "sync-token"},
+        )
+
+    assert captured["timeout"] == 180.0
+
+
+def test_email_http_smoke_uses_provider_pipeline_url():
+    setup = {
+        "providerWebhookUrl": "https://support.example.test/api/internal/support/email/email-main",
+        "inboundWebhookUrl": "https://support.example.test/api/internal/support/channel-webhooks/email-main",
+    }
+
+    assert admin_channels._smoke_url("email", setup) == setup["providerWebhookUrl"]
+    assert admin_channels._smoke_url("webhook", setup) == setup["inboundWebhookUrl"]
+
+
+def test_email_provider_smoke_payload_uses_email_webhook_shape():
+    payload, provider, event_id, message_id = admin_channels._provider_smoke_payload(
+        "email-main",
+        "email",
+        admin_channels.ChannelTestMessageInput(
+            body="Where is order ZF-1042?\nPlease use confirmed shipment facts only.",
+            author_name="Lena Schmidt",
+            author_email="lena.schmidt@example-shop.de",
+            thread_id="email-thread-1",
+            message_id="email-message-1",
+            event_id="email-event-1",
+            attachments=[{
+                "id": "packing-slip-1",
+                "filename": "packing-slip.pdf",
+                "contentType": "application/pdf",
+            }],
+        ),
+    )
+
+    assert provider == "email"
+    assert event_id == "email-event-1"
+    assert message_id == "email-message-1"
+    assert payload == {
+        "email": {
+            "messageId": "email-message-1",
+            "threadId": "email-thread-1",
+            "subject": "Where is order ZF-1042?",
+            "fromAddress": "lena.schmidt@example-shop.de",
+            "fromName": "Lena Schmidt",
+            "body": "Where is order ZF-1042?\nPlease use confirmed shipment facts only.",
+            "attachments": [{
+                "id": "packing-slip-1",
+                "filename": "packing-slip.pdf",
+                "contentType": "application/pdf",
+            }],
+        },
+        "metadata": {
+            "source": "admin_smoke",
+            "channelKey": "email-main",
+            "eventId": "email-event-1",
+        },
     }
 
 
@@ -7232,7 +7821,7 @@ def test_admin_channels_report_provider_signature_key_readiness(client, monkeypa
     assert any(env["name"] == "ACME_TELEGRAM_SIGNING_SECRET" and not env["configured"] and env["required"] for env in telegram["envVars"])
 
 
-def test_admin_channel_test_message_ingests_normalized_message(client, monkeypatch):
+def test_admin_channel_test_message_enqueues_normalized_message(client, monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         "automail.api.admin.channels.get_channel",
@@ -7245,17 +7834,22 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
         },
     )
 
-    def fake_ingest(channel_key: str, **kwargs):
-        calls.append({"channel_key": channel_key, **kwargs})
+    def fake_enqueue(**kwargs):
+        calls.append(kwargs)
         return {
-            "status": "success",
-            "processed": 1,
+            "accepted": True,
+            "status": "queued",
+            "processed": 0,
             "failed": 0,
             "skipped": 0,
-            "items": [{"kind": "inbound_message", "issueId": "issue1", "messageId": "msg1"}],
+            "items": [],
+            "payload": kwargs["payload"],
+            "runId": "job-row-1",
+            "eventId": kwargs["payload"]["eventId"],
+            "sourceIssueId": "discord:discord-main:C123:message-1",
         }
 
-    monkeypatch.setattr("automail.api.admin.channels.ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr("automail.api.admin.channels.enqueue_channel_test_message", fake_enqueue)
 
     resp = client.post(
         "/api/admin/projects/project1/channels/channel1/test-message",
@@ -7269,14 +7863,15 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
         },
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     data = resp.json()
-    assert data["processed"] == 1
-    assert data["items"][0]["issueId"] == "issue1"
-    assert calls[0]["channel_key"] == "discord-main"
+    assert data["accepted"] is True
+    assert data["status"] == "queued"
+    assert data["runId"] == "job-row-1"
+    assert data["sourceIssueId"] == "discord:discord-main:C123:message-1"
+    assert calls[0]["channel"]["channelKey"] == "discord-main"
     assert calls[0]["tenant_id"] == ""
     assert calls[0]["project_id"] == "project1"
-    assert calls[0]["source"] == "admin-test"
     payload = calls[0]["payload"]
     assert payload["provider"] == "discord"
     assert payload["content"] == "Production API is down."
@@ -7285,6 +7880,297 @@ def test_admin_channel_test_message_ingests_normalized_message(client, monkeypat
     assert payload["messageId"] == "message-1"
     assert payload["author"]["email"] == "ana@example.com"
     assert payload["metadata"]["source"] == "admin_test_message"
+
+
+def test_admin_channel_test_message_job_returns_exact_status(client, monkeypatch):
+    monkeypatch.setattr(
+        "automail.api.admin.channels.get_channel_test_job_status",
+        lambda job_id, **_kwargs: {
+            "accepted": False,
+            "status": "processed",
+            "processed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "unmatched": 0,
+            "payload": {},
+            "items": [{"issueId": "issue-1"}],
+            "runId": job_id,
+            "issueId": "issue-1",
+        },
+    )
+
+    resp = client.get(
+        "/api/admin/projects/project1/channels/test-message-jobs/job-row-1",
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["runId"] == "job-row-1"
+    assert resp.json()["issueId"] == "issue-1"
+
+
+def test_channel_test_job_uses_separate_receipt_and_reaches_terminal(monkeypatch):
+    events_by_event_id: dict[str, dict] = {}
+    ingest_calls: list[dict] = []
+    aggregates = iter([
+        {
+            "status": "success",
+            "processed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "unmatched": 0,
+            "items": [{"kind": "inbound_message", "issueId": "issue-1", "messageId": "message-1"}],
+        },
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{
+                "kind": "inbound_message",
+                "status": "skipped",
+                "winnerStatus": "processed",
+                "issueId": "issue-1",
+                "messageId": "message-1",
+            }],
+        },
+    ])
+
+    def fake_get(_channel_id: str, event_id: str, **_kwargs):
+        return events_by_event_id.get(event_id)
+
+    def fake_record(**kwargs):
+        record = {
+            "id": f"job-row-{len(events_by_event_id) + 1}",
+            "channelId": kwargs["channel_id"],
+            "provider": kwargs["provider"],
+            "eventId": kwargs["event_id"],
+            "status": kwargs["status"],
+            "payload": kwargs["payload"],
+            "result": kwargs["result"],
+            "error": "",
+        }
+        events_by_event_id[kwargs["event_id"]] = record
+        return record
+
+    def fake_update(job_id: str, **kwargs):
+        record = next(value for value in events_by_event_id.values() if value["id"] == job_id)
+        record.update({
+            "status": kwargs["status"],
+            "result": kwargs.get("result") or {},
+            "error": kwargs.get("error") or "",
+        })
+        return record
+
+    def fake_ingest(channel_key: str, **kwargs):
+        ingest_calls.append({"channel_key": channel_key, **kwargs})
+        return next(aggregates)
+
+    def fake_claim(event: dict, **_kwargs):
+        event["processingAttempt"] = 1
+        return event, "job-claim-token"
+
+    def fake_complete(job_id: str, **kwargs):
+        record = next(value for value in events_by_event_id.values() if value["id"] == job_id)
+        record.update({
+            "status": kwargs["status"],
+            "result": kwargs.get("result") or {},
+            "error": kwargs.get("error") or "",
+        })
+        return True
+
+    class ImmediateThread:
+        def __init__(self, *, target, kwargs, daemon, name):
+            self.target = target
+            self.kwargs = kwargs
+            assert daemon is True
+            assert name.startswith("channel-test-")
+
+        def start(self):
+            self.target(**self.kwargs)
+
+    monkeypatch.setattr(channel_test_jobs, "get_channel_webhook_event", fake_get)
+    monkeypatch.setattr(channel_test_jobs, "record_channel_webhook_event", fake_record)
+    monkeypatch.setattr(channel_test_jobs, "update_channel_webhook_event", fake_update)
+    monkeypatch.setattr(channel_test_jobs, "ingest_channel_webhook", fake_ingest)
+    monkeypatch.setattr(channel_test_jobs, "_claim_existing_channel_webhook_event", fake_claim)
+    monkeypatch.setattr(channel_test_jobs, "_try_complete_channel_webhook_claim", fake_complete)
+    monkeypatch.setattr(channel_test_jobs.threading, "Thread", ImmediateThread)
+
+    payload = {
+        "provider": "discord",
+        "eventId": "provider-event-1",
+        "messageId": "message-1",
+        "channelId": "C123",
+        "threadId": "thread-1",
+    }
+    result = channel_test_jobs.enqueue_channel_test_message(
+        channel={
+            "id": "channel-1",
+            "channelKey": "discord-main",
+            "type": "discord",
+            "config": {"ticketCreationMode": "per_message"},
+        },
+        payload=payload,
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert len(events_by_event_id) == 1
+    job_event_id = next(iter(events_by_event_id))
+    assert job_event_id.startswith("admin-test-job:provider-event-1:")
+    assert ingest_calls[0] == {
+        "channel_key": "discord-main",
+        "payload": payload,
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "source": "admin-test-async",
+    }
+    assert events_by_event_id[job_event_id]["status"] == "processed"
+    assert events_by_event_id[job_event_id]["result"]["issueId"] == "issue-1"
+    assert result["status"] == "processed"
+    assert result["processed"] == 1
+    assert result["items"][0]["issueId"] == "issue-1"
+    monkeypatch.setattr(channel_test_jobs, "_list_all", lambda *_args, **_kwargs: [events_by_event_id[job_event_id]])
+    persisted = channel_test_jobs.get_channel_test_job_status(
+        "job-row-1",
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+    assert persisted is not None
+    assert persisted["status"] == "processed"
+    assert persisted["issueId"] == "issue-1"
+
+    replay = channel_test_jobs.enqueue_channel_test_message(
+        channel={
+            "id": "channel-1",
+            "channelKey": "discord-main",
+            "type": "discord",
+            "config": {"ticketCreationMode": "per_message"},
+        },
+        payload=payload,
+        tenant_id="tenant-1",
+        project_id="project-1",
+    )
+
+    assert len(events_by_event_id) == 2
+    assert len(ingest_calls) == 2
+    assert replay["status"] == "skipped"
+    assert replay["processed"] == 0
+    assert replay["skipped"] == 1
+    assert replay["issueId"] == "issue-1"
+
+
+def test_channel_test_job_waits_out_abandoned_provider_claim_before_terminalizing(monkeypatch):
+    updates: list[dict] = []
+    completions: list[dict] = []
+    claim_attempts = iter([1, 2])
+    aggregates = iter([
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{"status": "skipped", "winnerStatus": "received"}],
+        },
+        {
+            "status": "success",
+            "processed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "unmatched": 0,
+            "items": [{
+                "status": "skipped",
+                "winnerStatus": "processed",
+                "issueId": "issue-recovered",
+            }],
+        },
+    ])
+
+    def fake_update(_job_id: str, **kwargs):
+        updates.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(channel_test_jobs, "update_channel_webhook_event", fake_update)
+    monkeypatch.setattr(channel_test_jobs, "ingest_channel_webhook", lambda *_args, **_kwargs: next(aggregates))
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "get_channel_webhook_event",
+        lambda *_args, **_kwargs: {"status": "received", "result": {}},
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_claim_existing_channel_webhook_event",
+        lambda event, **_kwargs: ({**event, "processingAttempt": next(claim_attempts)}, "claim-token"),
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_try_complete_channel_webhook_claim",
+        lambda _job_id, **kwargs: completions.append(kwargs) is None or True,
+    )
+
+    kwargs = {
+        "job_id": "job-row-1",
+        "channel_id": "channel-1",
+            "event_id": "admin-test-job:provider-event-1:invocation-1",
+        "channel_key": "discord-main",
+        "payload": {"eventId": "provider-event-1"},
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "metadata": {
+            "kind": channel_test_jobs.CHANNEL_TEST_JOB_KIND,
+            "eventId": "provider-event-1",
+            "messageId": "message-1",
+        },
+    }
+
+    channel_test_jobs.process_channel_test_job(**kwargs)
+
+    assert updates[-1]["status"] == "received"
+    assert updates[-1]["result"]["processing"] is True
+    assert completions == []
+
+    channel_test_jobs.process_channel_test_job(**kwargs)
+
+    assert completions[-1]["status"] == "processed"
+    assert completions[-1]["result"]["issueId"] == "issue-recovered"
+    assert completions[-1]["result"]["aggregate"]["processed"] == 1
+    assert completions[-1]["result"]["aggregate"]["skipped"] == 0
+
+
+def test_channel_test_job_scheduler_recovers_unclaimed_received_job(monkeypatch):
+    started: list[dict] = []
+    received = {
+        "id": "job-row-1",
+        "channel": "channel-1",
+        "event_id": "admin-test-job:provider-event-1:invocation-1",
+        "status": "received",
+        "payload": {"eventId": "provider-event-1"},
+        "result": {
+            "kind": channel_test_jobs.CHANNEL_TEST_JOB_KIND,
+            "channelKey": "discord-main",
+            "projectId": "project-1",
+        },
+        "project": "project-1",
+        "processing_claim_token": "",
+    }
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "_raw_jobs",
+        lambda status, _limit: [received] if status == "received" else [],
+    )
+    monkeypatch.setattr(
+        channel_test_jobs,
+        "start_channel_test_job",
+        lambda **kwargs: started.append(kwargs) is None or True,
+    )
+
+    result = channel_test_jobs.run_queued_channel_test_jobs(limit=5)
+
+    assert result["started"] == 1
+    assert started[0]["job_id"] == "job-row-1"
+    assert started[0]["channel_key"] == "discord-main"
 
 
 def test_admin_channel_webhook_event_rematch(client, monkeypatch):
@@ -7385,6 +8271,34 @@ def test_admin_channel_smoke_uses_slack_native_payload(client, monkeypatch):
         "project_id": "project1",
         "updates": {"status": "done", "workflow_source": "admin-channel-smoke-cleanup"},
     }]
+
+
+def test_admin_channel_smoke_maps_http_timeout_to_gateway_timeout(client, monkeypatch):
+    monkeypatch.setattr(
+        admin_channels,
+        "get_channel",
+        lambda channel_id, **_kwargs: {
+            "id": channel_id,
+            "channelKey": "email-main",
+            "type": "email",
+            "status": "active",
+        },
+    )
+
+    def timeout(*_args, **_kwargs):
+        raise admin_channels.SmokeHttpTimeoutError(
+            "Smoke endpoint timed out after 180 seconds"
+        )
+
+    monkeypatch.setattr(admin_channels, "_run_channel_smoke", timeout)
+
+    resp = client.post(
+        "/api/admin/projects/project1/channels/channel1/smoke",
+        json={"body": "Where is order ZF-1042?", "transport": "http"},
+    )
+
+    assert resp.status_code == 504
+    assert resp.json() == {"detail": "Smoke endpoint timed out after 180 seconds"}
 
 
 def test_admin_channel_smoke_accepts_slack_file_only_payload(client, monkeypatch):
@@ -9994,7 +10908,11 @@ def test_public_support_portal_accepts_customer_message(client, monkeypatch):
 
     resp = client.post(
         "/api/support/portal/portal-token/messages",
-        json={"body": "Still need help.", "senderEmail": "customer@example.com"},
+        json={
+            "body": "Still need help.",
+            "senderEmail": "customer@example.com",
+            "messageId": "portal-client-1",
+        },
     )
 
     assert resp.status_code == 200
@@ -10004,6 +10922,7 @@ def test_public_support_portal_accepts_customer_message(client, monkeypatch):
         "body": "Still need help.",
         "sender_name": "",
         "sender_email": "customer@example.com",
+        "message_id": "portal-client-1",
     }]
 
 

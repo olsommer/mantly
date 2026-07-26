@@ -2,20 +2,28 @@
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
+import httpx
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.messages import AIMessage
-from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from langgraph.errors import GraphRecursionError
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from automail.core.runtime_secrets import load_runtime_secrets
 from automail.integrations.http_tool import _make_http_tool, current_generated_attachments, raw_tool_to_definition
-from automail.models import Email, IdentityResult, IntentAction
+from automail.models import ConcernRoute, Email, IdentityResult, IntentAction
+from automail.pipeline.intent.activate_intent import MAX_ROUTED_CONCERNS
 from automail.pipeline.intent.intents_factory import (
     get_intent_frontmatters,
     get_intent_tools,
 )
 
 logger = logging.getLogger(__name__)
+
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+_ACTION_SELECTION_PROMPT = (_PROMPTS_DIR / "action_selection.md").read_text(encoding="utf-8").strip()
 
 
 def _retry_exception(retry_state: RetryCallState) -> BaseException | str:
@@ -24,6 +32,13 @@ def _retry_exception(retry_state: RetryCallState) -> BaseException | str:
         return ""
     exc = outcome.exception()
     return exc if exc is not None else ""
+
+
+def _is_retryable_agent_error(exc: BaseException) -> bool:
+    """Retry transport failures only; model clients handle provider retries."""
+    if isinstance(exc, (GraphRecursionError, ToolCallLimitExceededError, RecursionError)):
+        return False
+    return isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError))
 
 
 def _generated_attachment_prompt_items() -> list[dict]:
@@ -53,7 +68,7 @@ def _generated_attachment_prompt_items() -> list[dict]:
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=2, min=2, max=10),
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception(_is_retryable_agent_error),
     reraise=True,
     before_sleep=lambda rs: logger.warning(
         "Intent agent invoke failed (attempt %d), retrying: %s",
@@ -68,6 +83,7 @@ def _invoke_agent(
     run_name: str | None = None,
     tags: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    recursion_limit: int | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [{"role": "user", "content": user_prompt}]}
     if parsed_attachments is not None:
@@ -80,6 +96,8 @@ def _invoke_agent(
         config["tags"] = tags
     if metadata:
         config["metadata"] = metadata
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
 
     result = agent.invoke(payload, config=config) if config else agent.invoke(payload)
     from automail.llm.usage import record_usage_from_result
@@ -129,6 +147,26 @@ def _find_activated_intent(messages: list[Any]) -> str | None:
         return None
     intent_name = str(args.get("intent_name") or "").strip()
     return intent_name or None
+
+
+def _find_routed_concerns(messages: list[Any]) -> list[ConcernRoute] | None:
+    """Parse the multi-concern router call, preserving its declared order."""
+    args = _find_router_tool_call(messages, "route_concerns")
+    if args is None:
+        return None
+    raw_concerns = args.get("concerns")
+    if not isinstance(raw_concerns, list):
+        return []
+
+    concerns: list[ConcernRoute] = []
+    for raw in raw_concerns[:MAX_ROUTED_CONCERNS]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            concerns.append(ConcernRoute.model_validate(raw))
+        except Exception as exc:
+            logger.warning("Ignoring invalid routed concern: %s", exc)
+    return concerns
 
 
 def _find_no_match_reason(messages: list[Any]) -> str | None:
@@ -232,6 +270,13 @@ def _extract_mapping_placeholders(value: Any) -> set[str]:
     return set()
 
 
+def _is_open_ticket_button(action: IntentAction) -> bool:
+    return (
+        action.type == "button"
+        and action.name.strip().lower().replace("-", "_") == "open_ticket"
+    )
+
+
 def _build_process_user_message(
     email: Email,
     identity_result: IdentityResult | None,
@@ -259,7 +304,11 @@ def _build_process_user_message(
         parts.append("\n## Customer Identity\nNo customer record found.")
 
     # Fillable actions (tell the LLM what fields to extract)
-    fillable = [a for a in actions if a.type in ("dropdown", "input", "calendar")]
+    fillable = [
+        a
+        for a in actions
+        if a.type in ("dropdown", "input", "calendar") or _is_open_ticket_button(a)
+    ]
     if fillable:
         parts.append("\n## Action Fields to Fill")
         parts.append(
@@ -274,6 +323,8 @@ def _build_process_user_message(
                 extra = f" (choose from: {', '.join(a.options)})"
             elif a.type == "calendar":
                 extra = " (use ISO 8601 format: YYYY-MM-DD)"
+            elif _is_open_ticket_button(a):
+                extra = " (write a concise ticket task grounded in the email)"
             parts.append(f"- **{a.name}**: {desc}{extra}")
 
     button_actions = [a for a in actions if a.type == "button"]
@@ -281,8 +332,8 @@ def _build_process_user_message(
         parts.append("\n## Action Buttons")
         parts.append(
             "These are fixed user-triggered actions. Use their descriptions as context "
-            "when extracting values for related action fields. Do not return action_fills "
-            "for button actions.",
+            "when extracting values for related action fields. Only return action_fills "
+            "for buttons also listed under Action Fields to Fill.",
         )
         for a in button_actions:
             desc = a.description or a.label or a.name
@@ -292,5 +343,19 @@ def _build_process_user_message(
             )
             extra = f" (uses: {', '.join(mapped_fields)})" if mapped_fields else ""
             parts.append(f"- **{a.name}**: {desc}{extra}")
+
+    if actions:
+        parts.extend(["", _ACTION_SELECTION_PROMPT])
+
+    parts.extend([
+        "",
+        "## Required Structured Runbook Outcome",
+        "Do not draft or address a customer reply. Return only the structured outcome.",
+        "Summarize the runbook decision without presenting inferred business facts as verified.",
+        "Tool evidence is captured directly by the runtime. Do not repeat or reinterpret "
+        "tool payloads as evidence.",
+        "List missing information, customer reply requirements, and forbidden claims "
+        "separately so one ticket-level composer can combine all concerns later.",
+    ])
 
     return "\n".join(parts)

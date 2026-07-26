@@ -55,10 +55,11 @@ class IntentResponseConfig(CamelCaseModel):
     enabled: bool = False
     auto: bool = True
     response_rules: list[str] = Field(default_factory=list)
+    required_guidance: list[str] = Field(default_factory=list)
     attachments: list[ResponseAttachment] = Field(default_factory=list)
     use_feedback_learnings: bool = True
 
-    @field_validator("response_rules", mode="before")
+    @field_validator("response_rules", "required_guidance", mode="before")
     @classmethod
     def _coerce_response_rules(cls, v: Any) -> list[str]:
         if v is None:
@@ -94,12 +95,100 @@ class IntentAction(CamelCaseModel):
     initial_value: Optional[str] = None  # LLM-extracted pre-fill value
 
 
+class ConcernRoute(BaseModel):
+    """One independently actionable concern selected by the intent router."""
+
+    summary: str = ""
+    source_text: str = ""
+    answer_obligations: list[str] = Field(default_factory=list, max_length=10)
+    intent_name: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
+class AnswerObligation(CamelCaseModel):
+    """One explicit customer question the final reply must address."""
+
+    obligation_id: str
+    question: str
+    source_text: str = ""
+
+
+class VerifiedFact(CamelCaseModel):
+    """Allowlisted fact prepared for ticket-level reply composition."""
+
+    fact: str = ""
+    path: str = ""
+    value: str | bool | int | float | None = None
+    source: str = "runbook"
+
+
+class RunbookToolEvidence(CamelCaseModel):
+    """Safe, structured facts derived from one runbook tool call."""
+
+    tool_name: str
+    method: str = ""
+    facts: list[VerifiedFact] = Field(default_factory=list)
+    status: str = "success"
+    response_facts_truncated: bool = False
+    has_nonaffirmative_lookup_result: bool = False
+
+
+class RunbookActionOutcome(CamelCaseModel):
+    """Execution/proposal state for one runbook action."""
+
+    name: str
+    label: str = ""
+    status: Literal["proposed", "pending_input", "succeeded", "failed", "skipped"] = "proposed"
+    initial_value: Optional[str] = None
+    detail: str = ""
+    reference: str = ""
+
+
+class RunbookAttachment(CamelCaseModel):
+    """Attachment made available by a runbook or one of its tools."""
+
+    filename: str
+    description: str = ""
+    source: Literal["runbook", "tool"] = "runbook"
+    mode: str = "dynamic"
+    source_filename: str = ""
+    source_intent: str = ""
+
+
+class RunbookOutcome(CamelCaseModel):
+    """Structured output of one concern's independently executed runbook."""
+
+    concern_id: str
+    concern_summary: str = ""
+    source_text: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    matched: bool = False
+    intent_name: Optional[str] = None
+    status: Literal["ready", "requires_human", "unmatched", "failed"] = "unmatched"
+    summary: str = ""
+    answer_obligations: list[AnswerObligation] = Field(default_factory=list)
+    actions: list[IntentAction] = Field(default_factory=list)
+    action_outcomes: list[RunbookActionOutcome] = Field(default_factory=list)
+    verified_facts: list[VerifiedFact] = Field(default_factory=list)
+    tool_evidence: list[RunbookToolEvidence] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    reply_requirements: list[str] = Field(default_factory=list)
+    required_guidance: list[str] = Field(default_factory=list)
+    forbidden_claims: list[str] = Field(default_factory=list)
+    attachments: list[RunbookAttachment] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+    error: Optional[str] = None
+
+
 class IntentResult(CamelCaseModel):
-    """Result of Phase 2: customer intent analysis."""
+    """Result of Phase 2 with legacy primary-intent compatibility fields."""
     matched: bool = False
     intent_name: Optional[str] = None
     actions: list[IntentAction] = Field(default_factory=list)
     response: IntentResponseConfig = Field(default_factory=IntentResponseConfig)
+    concerns: list[RunbookOutcome] = Field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -135,6 +224,7 @@ class TokenUsageCall(CamelCaseModel):
     stage: str = "unknown"
     provider: str = ""
     model: str = ""
+    duration_ms: Optional[int] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cached_input_tokens: Optional[int] = None
@@ -163,23 +253,33 @@ class ActionFill(BaseModel):
     initial_value: Optional[str] = None
 
 
-class IntentProcessingOutput(BaseModel):
+class RunbookProcessingDetails(BaseModel):
+    """Shared structured handoff from a runbook to the ticket composer."""
+
+    summary: str = ""
+    missing_information: list[str] = Field(default_factory=list)
+    reply_requirements: list[str] = Field(default_factory=list)
+    forbidden_claims: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+
+
+class IntentProcessingOutput(RunbookProcessingDetails):
     """Structured output for the intent-processing stage (Stage B).
 
-    The LLM fills action values and decides whether human review is needed.
+    The LLM selects applicable actions, fills action values, and decides whether
+    human review is needed.
     Action *definitions* (type, webhook, etc.) still come from INTENT.md
-    frontmatter — the LLM only provides initial_value fills.
+    frontmatter — the LLM only selects definitions and provides initial_value
+    fills. A null selection is invalid and fails closed; an explicit empty list
+    suppresses every configured action.
     """
+    selected_action_names: Optional[list[str]] = None
     action_fills: list[ActionFill] = Field(default_factory=list)
-    requires_human: bool = False
-    requires_human_reason: Optional[str] = None
 
 
-class IntentReviewOutput(BaseModel):
+class IntentReviewOutput(RunbookProcessingDetails):
     """Structured output for intent processing when no actions are configured."""
-
-    requires_human: bool = False
-    requires_human_reason: Optional[str] = None
 
 
 class Attachment(CamelCaseModel):
@@ -219,6 +319,11 @@ class ResponseDraft(BaseModel):
     response_attachments: Optional[List[str]] = None  # Just filenames
     response_cc: Optional[List[str]] = None
     response_bcc: Optional[List[str]] = None
+    covered_concern_ids: list[str] = Field(default_factory=list)
+    covered_obligation_ids: list[str] = Field(default_factory=list)
+    requires_human: bool = False
+    requires_human_reason: Optional[str] = None
+    conflicting_requirements: list[str] = Field(default_factory=list)
 
 
 class AgentResponse(CamelCaseModel):

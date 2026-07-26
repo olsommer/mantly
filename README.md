@@ -151,6 +151,7 @@ The production trust boundaries and response procedures are documented in:
 
 - [Threat model](docs/security/threat-model.md)
 - [Incident response](docs/security/incident-response.md)
+- [Credential rotation and break-glass](docs/security/credential-rotation-and-break-glass.md)
 - [Retention and deletion](docs/security/data-retention.md)
 
 ## Documentation

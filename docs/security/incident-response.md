@@ -131,7 +131,8 @@ available and able to coordinate.
 ### Suspected credential exposure
 
 1. Identify credential type, scope, environment, tenant, and last known valid use.
-2. Disable or rotate it immediately when safe.
+2. Follow `docs/security/credential-rotation-and-break-glass.md`; preserve
+   evidence when safe, then disable or rotate the affected credential.
 3. Search logs/provider consoles for anomalous use before and after rotation.
 4. Rotate dependent credentials if the exposed secret could reveal or mint them.
 5. Invalidate sessions/tokens derived from the secret.
@@ -278,8 +279,11 @@ that allowed one action to create the incident.
 
 - [ ] Add real primary and backup incident contacts.
 - [ ] Add customer-contract notification contacts and timelines.
-- [ ] Add infrastructure, PocketBase, DNS, SMTP, Stripe, model-provider, and email-provider emergency access procedures.
-- [ ] Add credential rotation commands/links for every production secret class.
+- [ ] Record deployment-specific account IDs, vault references, and provider
+      consoles for every credential class in
+      `docs/security/credential-rotation-and-break-glass.md`.
+- [ ] Name primary/backup break-glass owners and complete a recorded rotation
+      plus break-glass drill.
 - [ ] Add provider security contact and account identifiers.
 - [ ] Add the approved private evidence location.
 - [ ] Exercise a tabletop scenario for tenant isolation, credential exposure, and duplicate external action.

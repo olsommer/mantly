@@ -2,6 +2,12 @@
 
 Production deployment guide for the hosted SaaS version on Hetzner (or any VPS with Docker).
 
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
+
 ## Prerequisites
 
 - Linux VPS with Docker and Docker Compose v2

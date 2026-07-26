@@ -4,8 +4,8 @@
   "adminTitle": "Mantly Admin",
   "addinDisplayName": "Mantly",
   "providerName": "Mantly",
-  "description": "AI-powered email assistant",
-  "descriptionDe": "KI-gestützter E-Mail-Assistent für professionelle Teams",
+  "description": "Open-source agentic customer support under your rules",
+  "descriptionDe": "Open-Source-Kundensupport mit agentischer Ausführung nach Ihren Regeln",
   "supportEmail": "support@mantly.io",
   "supportUrl": "https://mantly.io"
 }

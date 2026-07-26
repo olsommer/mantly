@@ -40,7 +40,7 @@ from automail.core.brand import get_brand
 # Set up structured logging right after env is loaded
 from automail.core.logging_config import setup_logging
 from automail.core.rate_limit import limiter
-from automail.core.runtime_flags import demo_routes_available
+from automail.core.runtime_flags import demo_routes_available, is_saas_mode
 from automail.db.pocketbase.bootstrap_app_schema import ensure_app_collections_schema
 from automail.db.pocketbase.bootstrap_common import validate_pb_bootstrap_env
 from automail.db.pocketbase.bootstrap_mail import sync_pocketbase_mail_settings
@@ -49,8 +49,10 @@ from automail.db.pocketbase.bootstrap_onprem import bootstrap_onprem_tenant
 from automail.db.pocketbase.bootstrap_users import ensure_users_collection_schema
 from automail.db.pocketbase.migration import migrate_to_projects
 from automail.support.scheduler import (
+    start_channel_test_job_scheduler,
     start_support_crm_sync_scheduler,
     start_support_delivery_scheduler,
+    start_support_processing_expiry_scheduler,
     start_support_sla_scheduler,
     start_support_sync_scheduler,
 )
@@ -64,6 +66,9 @@ brand = get_brand()
 # ── Startup validation ────────────────────────────────────────────────────────
 
 REQUIRE_AUTH: bool = os.getenv("REQUIRE_AUTH", "false").lower() == "true"
+
+if is_saas_mode() and not REQUIRE_AUTH:
+    raise RuntimeError("REQUIRE_AUTH=true is required when IS_SAAS=true")
 
 if REQUIRE_AUTH and not os.getenv("JWT_SECRET"):
     raise RuntimeError(
@@ -153,6 +158,8 @@ def create_app() -> FastAPI:
         start_support_delivery_scheduler()
         start_support_crm_sync_scheduler()
         start_support_sla_scheduler()
+        start_support_processing_expiry_scheduler()
+        start_channel_test_job_scheduler()
 
         yield
 
@@ -246,7 +253,14 @@ def create_app() -> FastAPI:
             mock_demo_update_title,
         )
         from automail.demo.crm import lookup_demo_customer
-        from automail.demo.shipments import lookup_demo_shipment_status
+        from automail.demo.e2e_fixtures import (
+            E2EFixtureManifestError,
+            E2EFixtureNotFound,
+            e2e_fixture_runtime_enabled,
+            lookup_e2e_tool_fixture,
+            merge_e2e_tool_input,
+        )
+        from automail.demo.shipments import lookup_demo_shipment_status, open_demo_logistics_ticket
 
         @app.get("/demo/crm")
         async def demo_crm_lookup(sender_email: str, request: Request):
@@ -266,6 +280,32 @@ def create_app() -> FastAPI:
                 order_number=order_number,
                 tracking_number=tracking_number,
             )
+
+        @app.get("/demo/e2e/tool/{persona_id}/{tool_name}")
+        async def demo_e2e_tool_lookup(
+            persona_id: str,
+            tool_name: str,
+            request: Request,
+        ):
+            require_demo_endpoint_access(request)
+            if not e2e_fixture_runtime_enabled():
+                raise HTTPException(status_code=404, detail="Not found")
+            supplied_input = merge_e2e_tool_input(request.query_params.multi_items())
+            try:
+                return lookup_e2e_tool_fixture(persona_id, tool_name, supplied_input)
+            except E2EFixtureNotFound as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except E2EFixtureManifestError as exc:
+                logger.exception("E2E fixture manifest lookup failed")
+                raise HTTPException(
+                    status_code=500,
+                    detail="E2E fixture manifests are unavailable",
+                ) from exc
+
+        @app.post("/demo/logistics/open-ticket")
+        async def demo_logistics_open_ticket(payload: dict[str, Any], request: Request):
+            require_demo_endpoint_access(request)
+            return open_demo_logistics_ticket(payload)
 
         @app.post("/demo/process-start")
         async def demo_process_start(payload: DemoProcessStartRequest, request: Request):

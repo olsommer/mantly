@@ -144,6 +144,20 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() not in {"false", "0", "no", "off"}
 
 
+def _validate_intent_actions(actions: list[dict[str, Any]]) -> None:
+    for index, action in enumerate(actions):
+        if not _as_bool(action.get("enabled"), default=True):
+            continue
+        action_type = str(action.get("type") or "button").strip().lower()
+        separate_call = _as_bool(
+            action.get("separate_call", action.get("separateCall")),
+            default=action_type != "button",
+        )
+        if (action_type == "button" or separate_call) and not str(action.get("webhook") or "").strip():
+            action_name = str(action.get("label") or action.get("name") or f"#{index + 1}").strip()
+            raise ValueError(f"Webhook URL is required for enabled action '{action_name}'")
+
+
 def read_project_config(source: PipelineSource) -> AdminConfig:
     rec = _first("project_configs", _config_filter(source))
     if not rec:
@@ -306,6 +320,7 @@ def upsert_project_intent(source: PipelineSource, name: str, content: str) -> di
     if not intent_name:
         raise ValueError("Intent name is required")
     actions = _dict_list(fm.get("actions"))
+    _validate_intent_actions(actions)
     tools = _dict_list(fm.get("tools"))
     response = fm.get("response") if isinstance(fm.get("response"), dict) else {}
     known_keys = {"name", "description", "active", "require_review", "actions", "tools", "response"}

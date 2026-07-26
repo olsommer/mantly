@@ -2,9 +2,9 @@
 
 SaaS-side endpoints:
     POST /api/license/validate     — unauthenticated; called by on-prem instances
-    GET  /api/admin/licenses       — list all licenses (admin only)
-    POST /api/admin/licenses       — create a new license (admin only)
-    DELETE /api/admin/licenses/{id} — revoke/delete a license (admin only)
+    GET  /api/admin/licenses       — list all licenses (platform admin only)
+    POST /api/admin/licenses       — create a new license (platform admin only)
+    DELETE /api/admin/licenses/{id} — revoke/delete a license (platform admin only)
 
 The on-prem instance sends its LICENSE_KEY + a machine fingerprint.
 On first call the fingerprint is bound to the license record so the same
@@ -13,15 +13,25 @@ key cannot be reused on a different machine.
 
 import logging
 import os
-import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
-from automail.db.pocketbase.client import _escape_pb, _first, _list_all, _patch, _post, generate_id
+from automail.api.admin.deps import PlatformAdminDep
+from automail.billing.license_store import (
+    find_license_by_key,
+    generate_license_key,
+    license_key_prefix,
+    license_key_prefix_from_record,
+    license_key_storage_fields,
+    masked_license_key,
+)
+from automail.core.auth import TokenPayload
+from automail.core.rate_limit import limiter
+from automail.db.pocketbase.client import _list_all, _patch, _post, generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +43,8 @@ public_router = APIRouter(prefix="/api/license")
 
 
 class ValidateRequest(BaseModel):
-    license_key: str
-    instance_id: str
+    license_key: str = Field(max_length=256)
+    instance_id: str = Field(max_length=256)
 
 
 class ValidateResponse(BaseModel):
@@ -45,7 +55,8 @@ class ValidateResponse(BaseModel):
 
 
 @public_router.post("/validate", response_model=ValidateResponse)
-async def validate_license(body: ValidateRequest):
+@limiter.limit("60/minute")
+async def validate_license(body: ValidateRequest, request: Request):
     """Validate an on-prem license key.
 
     Called periodically by on-prem instances.  On first call the
@@ -60,7 +71,7 @@ async def validate_license(body: ValidateRequest):
     if not key or not instance_id:
         return ValidateResponse(valid=False, message="Missing license key or instance ID")
 
-    rec = _first("licenses", f"key='{_escape_pb(key)}'")
+    rec = find_license_by_key(key)
     if not rec:
         logger.warning("License validation failed: unknown key")
         return ValidateResponse(valid=False, message="Invalid license key")
@@ -90,11 +101,13 @@ async def validate_license(body: ValidateRequest):
             f"/api/collections/licenses/records/{rec['id']}",
             {"instance_id": instance_id},
         )
-        logger.info("License %s bound to instance %s", key[:8], instance_id[:12])
+        logger.info("License record %s bound to instance %s", rec["id"], instance_id[:12])
     elif stored_instance != instance_id:
         logger.warning(
-            "License %s instance mismatch: stored=%s got=%s",
-            key[:8], stored_instance[:12], instance_id[:12],
+            "License record %s instance mismatch: stored=%s got=%s",
+            rec["id"],
+            stored_instance[:12],
+            instance_id[:12],
         )
         return ValidateResponse(
             valid=False,
@@ -110,7 +123,7 @@ async def validate_license(body: ValidateRequest):
     )
 
 
-# ── Admin router (requires admin JWT) ────────────────────────────────────────
+# ── Admin router (requires platform-admin JWT) ───────────────────────────────
 
 admin_router = APIRouter()
 
@@ -121,16 +134,21 @@ class CreateLicenseRequest(BaseModel):
     expires_at: Optional[str] = None
 
 
+def _audit_actor(auth: TokenPayload) -> str:
+    return auth.user_id or "local-no-auth"
+
+
 @admin_router.get("/licenses")
-async def list_licenses() -> list[dict]:
-    """List all licenses (SaaS admin only)."""
+async def list_licenses(auth: PlatformAdminDep) -> list[dict]:
+    """List all licenses (SaaS platform administrators only)."""
     if not IS_SAAS:
         raise HTTPException(status_code=404, detail="Not found")
     records = _list_all("licenses", sort="-created")
-    return [
+    response = [
         {
             "id": r["id"],
-            "key": r.get("key", ""),
+            "key": masked_license_key(r),
+            "keyPrefix": license_key_prefix_from_record(r),
             "tenantName": r.get("tenant_name", ""),
             "maxUsers": r.get("max_users"),
             "expiresAt": r.get("expires_at"),
@@ -141,19 +159,30 @@ async def list_licenses() -> list[dict]:
         }
         for r in records
     ]
+    logger.info(
+        "License inventory listed by platform admin %s (records=%d)",
+        _audit_actor(auth),
+        len(response),
+    )
+    return response
 
 
 @admin_router.post("/licenses")
-async def create_license(body: CreateLicenseRequest) -> dict:
-    """Create a new on-prem license (SaaS admin only)."""
+async def create_license(
+    body: CreateLicenseRequest,
+    response: Response,
+    auth: PlatformAdminDep,
+) -> dict:
+    """Create a new on-prem license (SaaS platform administrators only)."""
     if not IS_SAAS:
         raise HTTPException(status_code=404, detail="Not found")
 
-    key = secrets.token_hex(20)  # 40-char hex key
+    key = generate_license_key()
+    tenant_name = body.tenant_name.strip()
     data: dict[str, object] = {
         "id": generate_id(),
-        "key": key,
-        "tenant_name": body.tenant_name.strip(),
+        **license_key_storage_fields(key),
+        "tenant_name": tenant_name,
         "is_active": True,
     }
     if body.max_users is not None:
@@ -164,14 +193,29 @@ async def create_license(body: CreateLicenseRequest) -> dict:
     try:
         rec = _post("/api/collections/licenses/records", data)
     except httpx.HTTPStatusError as exc:
-        logger.error("Failed to create license: %s", exc.response.text)
-        raise HTTPException(status_code=500, detail="Failed to create license")
+        logger.error(
+            "Failed to create license record (status=%s)",
+            exc.response.status_code,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create license") from exc
 
-    return {"id": rec["id"], "key": key, "tenantName": body.tenant_name}
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    logger.info(
+        "License record %s created by platform admin %s",
+        rec["id"],
+        _audit_actor(auth),
+    )
+    return {
+        "id": rec["id"],
+        "key": key,
+        "keyPrefix": license_key_prefix(key),
+        "tenantName": tenant_name,
+    }
 
 
 @admin_router.delete("/licenses/{license_id}")
-async def revoke_license(license_id: str) -> dict:
+async def revoke_license(license_id: str, auth: PlatformAdminDep) -> dict:
     """Revoke (deactivate) a license."""
     if not IS_SAAS:
         raise HTTPException(status_code=404, detail="Not found")
@@ -183,14 +227,19 @@ async def revoke_license(license_id: str) -> dict:
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="License not found")
-        raise HTTPException(status_code=500, detail="Failed to revoke license")
+            raise HTTPException(status_code=404, detail="License not found") from exc
+        raise HTTPException(status_code=500, detail="Failed to revoke license") from exc
 
+    logger.info(
+        "License record %s revoked by platform admin %s",
+        license_id,
+        _audit_actor(auth),
+    )
     return {"status": "revoked"}
 
 
 @admin_router.post("/licenses/{license_id}/reset-instance")
-async def reset_license_instance(license_id: str) -> dict:
+async def reset_license_instance(license_id: str, auth: PlatformAdminDep) -> dict:
     """Clear the instance binding so the license can be used on a new machine."""
     if not IS_SAAS:
         raise HTTPException(status_code=404, detail="Not found")
@@ -202,8 +251,12 @@ async def reset_license_instance(license_id: str) -> dict:
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="License not found")
-        raise HTTPException(status_code=500, detail="Failed to reset instance")
+            raise HTTPException(status_code=404, detail="License not found") from exc
+        raise HTTPException(status_code=500, detail="Failed to reset instance") from exc
 
-    logger.info("License %s instance binding cleared", license_id)
+    logger.info(
+        "License record %s instance binding cleared by platform admin %s",
+        license_id,
+        _audit_actor(auth),
+    )
     return {"status": "reset"}

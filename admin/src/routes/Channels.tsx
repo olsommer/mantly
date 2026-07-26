@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, ChevronDown, Copy, Database, Download, ExternalLink, Hash, Loader, Plus, RefreshCw, Save, Send } from 'lucide-react';
 import { toast } from 'sonner';
@@ -30,6 +30,7 @@ import type {
     SupportCrmValidation,
     SupportCrmWebhookEvent,
     SupportDeliveryRunRecord,
+    SupportIssue,
     SupportQueue,
     SupportWebChatSession,
 } from '@/api/endpoints';
@@ -48,6 +49,37 @@ interface ChannelsProps {
 }
 
 type QueueRoutingMode = 'static' | 'least_open';
+
+type ChannelTestProgressStage = {
+    key: string;
+    label: string;
+    status: string;
+    detail: string;
+};
+
+type ChannelTestProgress = {
+    channelId: string;
+    runId: string;
+    status: string;
+    stage: string;
+    label: string;
+    detail: string;
+    updatedAt: string;
+    issueId: string;
+    sourceIssueId: string;
+    error: string;
+    stages: ChannelTestProgressStage[];
+};
+
+const CHANNEL_TEST_POLL_ATTEMPTS = 300;
+const CHANNEL_TEST_POLL_INTERVAL_MS = 1_000;
+const CHANNEL_TEST_TERMINAL_STATUSES = new Set([
+    'processed',
+    'failed',
+    'skipped',
+    'ignored',
+    'unmatched',
+]);
 
 function formatTime(value: string) {
     if (!value) return '-';
@@ -77,6 +109,40 @@ function recordObject(record: Record<string, unknown> | undefined, key: string):
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : undefined;
+}
+
+function channelTestProgressFromIssue(issue: SupportIssue): Omit<ChannelTestProgress, 'channelId' | 'sourceIssueId' | 'error'> | null {
+    const candidates = (issue.aiRuns ?? []).map(run => {
+        const raw = recordObject(run.metadata, 'processingProgress')
+            ?? recordObject(run.metadata, 'processing_progress');
+        if (!raw) return null;
+        const stages = Array.isArray(raw.stages)
+            ? raw.stages
+                .filter((stage): stage is Record<string, unknown> => (
+                    Boolean(stage) && typeof stage === 'object' && !Array.isArray(stage)
+                ))
+                .map(stage => ({
+                    key: textValue(stage.key),
+                    label: textValue(stage.label),
+                    status: textValue(stage.status),
+                    detail: textValue(stage.detail),
+                }))
+                .filter(stage => stage.key || stage.label)
+            : [];
+        return {
+            runId: run.id,
+            status: textValue(raw.status, run.status || 'processing'),
+            stage: textValue(raw.stage, 'processing'),
+            label: textValue(raw.label, 'Processing ticket'),
+            detail: textValue(raw.detail),
+            updatedAt: textValue(raw.updatedAt ?? raw.updated_at, run.updated || run.startedAt),
+            issueId: issue.id,
+            stages,
+        };
+    }).filter((progress): progress is NonNullable<typeof progress> => progress !== null);
+    return candidates.sort((left, right) => (
+        (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0)
+    ))[0] ?? null;
 }
 
 function resolverProofFrom(result: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
@@ -1412,6 +1478,8 @@ export function Channels({ projectId }: ChannelsProps) {
     const [outboundSmokeBody, setOutboundSmokeBody] = useState('Thanks for reaching out. Testing outbound delivery from channel setup.');
     const [lifecycleAttachmentOnly, setLifecycleAttachmentOnly] = useState(false);
     const [testMessageResult, setTestMessageResult] = useState<SupportChannelTestMessageResult | null>(null);
+    const [testMessageProgress, setTestMessageProgress] = useState<ChannelTestProgress | null>(null);
+    const testMessagePollRef = useRef(0);
     const [smokeResult, setSmokeResult] = useState<SupportChannelSmokeResult | null>(null);
     const [outboundSmokeResult, setOutboundSmokeResult] = useState<SupportChannelOutboundSmokeResult | null>(null);
     const [lifecycleSmokeResult, setLifecycleSmokeResult] = useState<SupportChannelLifecycleSmokeResult | null>(null);
@@ -1429,6 +1497,9 @@ export function Channels({ projectId }: ChannelsProps) {
         () => channels.find(channel => channel.channelKey === selectedKey) ?? null,
         [channels, selectedKey],
     );
+    useEffect(() => () => {
+        testMessagePollRef.current += 1;
+    }, []);
     const selectedChannelSupportsOutboundSmoke = Boolean(
         selectedChannel && supportsProviderLifecycle(selectedChannel.type),
     );
@@ -1940,6 +2011,8 @@ export function Channels({ projectId }: ChannelsProps) {
     }, [selectedQueue]);
 
     const startNew = () => {
+        testMessagePollRef.current += 1;
+        setTestingChannel('');
         setSelectedKey('');
         setType('email');
         setName('');
@@ -1975,6 +2048,7 @@ export function Channels({ projectId }: ChannelsProps) {
         setTestThreadId('');
         setTestProviderMessageId('');
         setTestMessageResult(null);
+        setTestMessageProgress(null);
         setSmokeResult(null);
         setOutboundSmokeResult(null);
         setLifecycleSmokeResult(null);
@@ -1982,6 +2056,8 @@ export function Channels({ projectId }: ChannelsProps) {
     };
 
     const applyChannelPreset = (preset: SupportChannelPreset) => {
+        testMessagePollRef.current += 1;
+        setTestingChannel('');
         const nextType = channelTypeFromPreset(preset);
         const presetDefaultAssignee = textFromConfig(preset.config, 'defaultAssigneeEmail', 'default_assignee_email');
         setType(nextType);
@@ -2058,6 +2134,7 @@ export function Channels({ projectId }: ChannelsProps) {
         if (preset.testMessage.channelId) setTestChannelId(preset.testMessage.channelId);
         if (preset.testMessage.threadId) setTestThreadId(preset.testMessage.threadId);
         setTestMessageResult(null);
+        setTestMessageProgress(null);
         setSmokeResult(null);
         setOutboundSmokeResult(null);
         setLifecycleSmokeResult(null);
@@ -2067,7 +2144,10 @@ export function Channels({ projectId }: ChannelsProps) {
 
     const selectChannel = useCallback((key: string) => {
         if (key !== selectedKey) {
+            testMessagePollRef.current += 1;
+            setTestingChannel('');
             setTestMessageResult(null);
+            setTestMessageProgress(null);
             setSmokeResult(null);
             setOutboundSmokeResult(null);
             setLifecycleSmokeResult(null);
@@ -2762,13 +2842,98 @@ export function Channels({ projectId }: ChannelsProps) {
         loadChannels();
     };
 
+    const pollChannelTestMessage = async (
+        channelId: string,
+        initial: SupportChannelTestMessageResult,
+        pollToken: number,
+    ) => {
+        let latestIssue: SupportIssue | undefined;
+        for (let attempt = 0; attempt < CHANNEL_TEST_POLL_ATTEMPTS; attempt += 1) {
+            const [jobResponse, issueResponse] = await Promise.all([
+                api.getChannelTestMessageJob(projectId, initial.runId || ''),
+                initial.sourceIssueId
+                    ? api.getIssueByChat(projectId, initial.sourceIssueId)
+                    : Promise.resolve({ data: undefined, error: undefined }),
+            ]);
+            if (pollToken !== testMessagePollRef.current) return;
+            if (issueResponse.data) latestIssue = issueResponse.data;
+            const job = jobResponse.data;
+            const status = job?.status || 'queued';
+            if (job && CHANNEL_TEST_TERMINAL_STATUSES.has(status.toLowerCase())) {
+                const result = {
+                    ...job,
+                    issueId: job.issueId || latestIssue?.id || '',
+                };
+                setTestMessageProgress(null);
+                setTestMessageResult(result);
+                setTestingChannel('');
+                if (status.toLowerCase() === 'failed') {
+                    toast.error(result.error || t('Test message failed'));
+                } else {
+                    toast.success(t('Test message processed') + `: ${result.processed} ${t('processed')}`);
+                }
+                loadChannelCursors(channelId);
+                loadChannelWebhookEvents(channelId);
+                loadChannels();
+                return;
+            }
+
+            const ticketProgress = latestIssue ? channelTestProgressFromIssue(latestIssue) : null;
+            setTestMessageProgress({
+                channelId,
+                runId: initial.runId || '',
+                status,
+                stage: ticketProgress?.stage || (status === 'processing' ? 'ticket' : 'queued'),
+                label: ticketProgress?.label || (status === 'processing' ? 'Creating and processing ticket' : 'Test message queued'),
+                detail: ticketProgress?.detail
+                    || (jobResponse.error
+                        ? t('Status check failed. Retrying automatically.')
+                        : t('Working in the background. This page stays responsive.')),
+                updatedAt: ticketProgress?.updatedAt || new Date().toISOString(),
+                issueId: latestIssue?.id || '',
+                sourceIssueId: initial.sourceIssueId || '',
+                error: job?.error || '',
+                stages: ticketProgress?.stages || [],
+            });
+            await new Promise(resolve => window.setTimeout(resolve, CHANNEL_TEST_POLL_INTERVAL_MS));
+            if (pollToken !== testMessagePollRef.current) return;
+        }
+
+        if (pollToken !== testMessagePollRef.current) return;
+        setTestingChannel('');
+        setTestMessageProgress(current => current ? {
+            ...current,
+            status: 'stalled',
+            label: 'Processing may be stalled',
+            detail: 'No terminal update arrived. The durable job remains available for recovery.',
+        } : current);
+        toast.error(t('Test message is still processing. Check its progress before retrying.'));
+    };
+
     const runTestMessage = async () => {
         if (!selectedChannel || !testMessageBody.trim()) return;
-        setTestingChannel(selectedChannel.id);
+        const channelId = selectedChannel.id;
+        const pollToken = testMessagePollRef.current + 1;
+        testMessagePollRef.current = pollToken;
+        setTestingChannel(channelId);
+        setTestMessageResult(null);
+        setTestMessageProgress({
+            channelId,
+            runId: '',
+            status: 'submitting',
+            stage: 'submitting',
+            label: 'Submitting test message',
+            detail: 'Creating a durable background job.',
+            updatedAt: new Date().toISOString(),
+            issueId: '',
+            sourceIssueId: '',
+            error: '',
+            stages: [],
+        });
         const channelTarget = testChannelId.trim() || smokeTargetChannelId.trim();
         const threadTarget = testThreadId.trim() || smokeTargetThreadId.trim();
         const messageTarget = testProviderMessageId.trim() || smokeTargetProviderMessageId.trim();
-        const res = await api.testChannelMessage(projectId, selectedChannel.id, {
+        const res = await api.testChannelMessage(projectId, channelId, {
             body: testMessageBody.trim(),
             authorName: testAuthorName.trim() || undefined,
             authorEmail: testAuthorEmail.trim() || undefined,
@@ -2776,16 +2941,37 @@ export function Channels({ projectId }: ChannelsProps) {
             threadId: threadTarget || undefined,
             messageId: messageTarget || undefined,
         });
-        setTestingChannel('');
+        if (pollToken !== testMessagePollRef.current) return;
         if (res.error || !res.data) {
+            setTestingChannel('');
+            setTestMessageProgress(null);
             toast.error(res.error || t('Could not create test message'));
             return;
         }
-        setTestMessageResult(res.data);
-        toast.success(t('Test message processed') + `: ${res.data.processed} ${t('processed')}`);
-        loadChannelCursors(selectedChannel.id);
-        loadChannelWebhookEvents(selectedChannel.id);
-        loadChannels();
+        if (res.data.accepted === false || CHANNEL_TEST_TERMINAL_STATUSES.has(res.data.status.toLowerCase())) {
+            setTestingChannel('');
+            setTestMessageProgress(null);
+            setTestMessageResult(res.data);
+            if (res.data.status.toLowerCase() === 'failed') {
+                toast.error(res.data.error || t('Test message failed'));
+            } else {
+                toast.success(t('Test message processed') + `: ${res.data.processed} ${t('processed')}`);
+            }
+            loadChannelCursors(channelId);
+            loadChannelWebhookEvents(channelId);
+            loadChannels();
+            return;
+        }
+        setTestMessageProgress(current => current ? {
+            ...current,
+            runId: res.data?.runId || '',
+            status: res.data?.status || 'queued',
+            stage: 'queued',
+            label: 'Test message queued',
+            detail: 'Waiting for ticket processing to start.',
+            sourceIssueId: res.data?.sourceIssueId || '',
+        } : current);
+        await pollChannelTestMessage(channelId, res.data, pollToken);
     };
 
     const runSmoke = async (transport: 'direct' | 'http' = 'http') => {
@@ -6463,6 +6649,72 @@ export function Channels({ projectId }: ChannelsProps) {
                                     />
                                 </div>
                             </div>
+                            {testMessageProgress && testMessageProgress.channelId === selectedChannel.id && (
+                                <div
+                                    className={`mt-3 rounded-md border p-3 text-sm ${testMessageProgress.status === 'stalled' ? 'border-destructive/40 bg-destructive/5' : 'border-primary/30 bg-primary/5'}`}
+                                    data-channel-test-progress
+                                    data-channel-test-run={testMessageProgress.runId}
+                                    data-channel-test-stage={testMessageProgress.stage}
+                                    data-channel-test-status={testMessageProgress.status}
+                                >
+                                    <div className="flex items-start gap-3">
+                                        {testMessageProgress.status === 'stalled'
+                                            ? <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+                                            : <Loader className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />}
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <span className="font-medium">{t(testMessageProgress.label)}</span>
+                                                <div className="flex items-center gap-2">
+                                                    {testMessageProgress.stages.length > 0 && (
+                                                        <Badge variant="outline" className="font-normal">
+                                                            {testMessageProgress.stages.filter(stage => stage.status === 'completed').length}/{testMessageProgress.stages.length} {t('stages')}
+                                                        </Badge>
+                                                    )}
+                                                    <Badge variant="outline" className="font-normal">
+                                                        {testMessageProgress.status}
+                                                    </Badge>
+                                                </div>
+                                            </div>
+                                            <div className="mt-1 text-xs text-muted-foreground">
+                                                {t(testMessageProgress.detail)}
+                                            </div>
+                                            {testMessageProgress.stages.length > 0 && (
+                                                <div className="mt-2 flex flex-wrap gap-1.5" data-channel-test-stages>
+                                                    {testMessageProgress.stages.map(stage => (
+                                                        <Badge
+                                                            key={stage.key || stage.label}
+                                                            variant={stage.status === 'completed' ? 'secondary' : 'outline'}
+                                                            className="gap-1 font-normal"
+                                                            title={stage.detail}
+                                                            data-channel-test-stage-item={stage.key}
+                                                            data-channel-test-stage-status={stage.status}
+                                                        >
+                                                            {stage.status === 'completed'
+                                                                ? <CheckCircle2 className="size-3" />
+                                                                : stage.status === 'processing'
+                                                                    ? <Loader className="size-3 animate-spin" />
+                                                                    : null}
+                                                            {t(stage.label || stage.key)}
+                                                        </Badge>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {testMessageProgress.issueId && tenantId && (
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="mt-2 h-7 px-2 text-xs"
+                                                    onClick={() => openTicket(testMessageProgress.issueId)}
+                                                >
+                                                    <ExternalLink className="size-3.5" />
+                                                    {t('Open ticket')}
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                             {testMessageResult && (
                                 <div className="mt-3 rounded-md border bg-muted/20 p-2 text-sm">
                                     <div className="mb-1 flex items-center justify-between gap-2">

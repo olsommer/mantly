@@ -21,6 +21,7 @@ class PortalMessageCreate(CamelCaseModel):
     body: str
     sender_name: str = ""
     sender_email: str = ""
+    message_id: str = ""
 
 
 class PortalFeedbackCreate(CamelCaseModel):
@@ -59,6 +60,7 @@ async def add_portal_message(token: str, body: PortalMessageCreate) -> dict[str,
             body=body.body,
             sender_name=body.sender_name,
             sender_email=body.sender_email,
+            message_id=body.message_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -195,6 +197,7 @@ def _render_portal_html(portal: dict[str, Any], token: str) -> str:
     const portalProjectId = {project_json};
     const button = document.getElementById('send');
     const statusEl = document.getElementById('status');
+    let pendingMessageId = '';
     let selectedRating = {feedback_rating};
     const feedbackButton = document.getElementById('submitFeedback');
     const feedbackStatusEl = document.getElementById('feedbackStatus');
@@ -260,13 +263,16 @@ def _render_portal_html(portal: dict[str, Any], token: str) -> str:
       }}
       button.disabled = true;
       statusEl.textContent = '';
+      pendingMessageId = pendingMessageId || (globalThis.crypto?.randomUUID?.()
+        || ('portal-' + Date.now() + '-' + Math.random().toString(16).slice(2)));
       try {{
         const res = await fetch('/api/support/portal/' + encodeURIComponent(portalToken) + '/messages', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ body, senderEmail }})
+          body: JSON.stringify({{ body, senderEmail, messageId: pendingMessageId }})
         }});
         if (!res.ok) throw new Error('Could not send message.');
+        pendingMessageId = '';
         statusEl.className = 'ok';
         statusEl.textContent = 'Message sent.';
         window.location.reload();

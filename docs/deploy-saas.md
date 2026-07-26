@@ -4,6 +4,12 @@ Production deployment guide for the hosted SaaS version on Hetzner or another Li
 
 This document describes the current controlled single-node architecture. It does not claim high availability, horizontal SQLite writes, point-in-time recovery, or zero-downtime failover. The supported capacity and evolution triggers are documented separately in the scaling-boundaries decision package.
 
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
+
 ## Prerequisites
 
 - Linux VPS with Docker and Docker Compose v2

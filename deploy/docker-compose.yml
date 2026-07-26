@@ -29,7 +29,7 @@ services:
     restart: unless-stopped
 
   pocketbase:
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-pocketbase:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase:${VERSION:-latest}
     environment:
       PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
@@ -46,7 +46,7 @@ services:
       retries: 3
 
   app:
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     environment:
       REQUIRE_AUTH: "true"
       IS_SAAS: "false"
@@ -155,7 +155,7 @@ services:
 
   support-bridge:
     profiles: ["support-bridge"]
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     command: ["python", "-m", "automail.support.bridge_app"]
     environment:
       SUPPORT_BRIDGE_CORE_URL: "http://app:8080"
@@ -187,7 +187,7 @@ services:
 
   discord-gateway:
     profiles: ["discord-gateway"]
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     command: ["python", "-m", "automail.support.discord_gateway"]
     environment:
       SUPPORT_BRIDGE_CORE_URL: "http://app:8080"

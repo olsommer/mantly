@@ -2,12 +2,12 @@
 # release-onprem.sh — Build and push multi-arch on-prem images to GHCR.
 #
 # Usage:
-#   ./scripts/release-onprem.sh 1.0.0          # tagged release
+#   ./scripts/release-onprem.sh 0.1.0          # tagged release
 #   ./scripts/release-onprem.sh                 # :latest only
 #
 # Prerequisites:
 #   - docker buildx (included in Docker Desktop)
-#   - ghcr.io login: echo $GITHUB_TOKEN | docker login ghcr.io -u isarai-de --password-stdin
+#   - ghcr.io login: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
 set -euo pipefail
 
@@ -16,6 +16,26 @@ VERSION="${1:-}"
 PLATFORMS="linux/amd64,linux/arm64"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
+
+resolve_python() {
+    local candidate
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        "$PYTHON_BIN" --version >/dev/null 2>&1 || {
+            echo "Configured PYTHON_BIN is not executable: $PYTHON_BIN" >&2
+            exit 69
+        }
+        printf '%s\n' "$PYTHON_BIN"
+        return
+    fi
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    echo "Python 3 is required; set PYTHON_BIN to an executable interpreter." >&2
+    exit 69
+}
 
 validate_version() {
     if [ -n "$VERSION" ] && [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
@@ -33,10 +53,11 @@ validate_registry() {
 
 validate_version
 validate_registry
+PYTHON_COMMAND="$(resolve_python)"
 
 # Determine tags
-APP_IMAGE="$REGISTRY/isarai-email-agent"
-PB_IMAGE="$REGISTRY/isarai-pocketbase"
+APP_IMAGE="$REGISTRY/mantly-api"
+PB_IMAGE="$REGISTRY/mantly-pocketbase"
 
 TAGS=("--tag" "$APP_IMAGE:latest")
 PB_TAGS=("--tag" "$PB_IMAGE:latest")
@@ -60,11 +81,11 @@ echo "=== Checking support package readiness ==="
 if command -v uv >/dev/null 2>&1; then
     (cd "$ROOT/backend" && uv run python -m automail.support.package_gate --root "$ROOT")
 else
-    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -m automail.support.package_gate --root "$ROOT"
+    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" -m automail.support.package_gate --root "$ROOT"
 fi
 
 # Ensure buildx builder exists
-BUILDER_NAME="isarai-multiarch"
+BUILDER_NAME="mantly-multiarch"
 if ! docker buildx inspect "$BUILDER_NAME" > /dev/null 2>&1; then
     echo "Creating buildx builder: $BUILDER_NAME"
     docker buildx create --name "$BUILDER_NAME" --use --bootstrap

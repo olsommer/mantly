@@ -1,0 +1,37 @@
+schema_version: "1.0"
+pilot_id: "replace-with-pilot-id"
+eligible_ticket_count: 200
+kpis:
+  verified_full_automation_rate: 0.20
+  recurring_cost_reduction_rate: 0.15
+  unsafe_or_materially_incorrect_outcome_rate: 0.00
+  customer_continuation_score: 1
+  runbook_match_precision: 0.95
+  runbook_match_coverage: 0.50
+  draft_acceptance_rate: 0.70
+  human_escalation_rate: 0.80
+  first_response_time_p90_seconds: 3600
+  resolution_time_p90_seconds: 86400
+  failed_action_rate: 0.05
+  manual_recovery_rate: 0.02
+  variable_ai_and_delivery_cost_per_eligible_ticket_eur: 1.00
+  variable_ai_and_delivery_cost_per_verified_autonomous_ticket_eur: 5.00
+  quality_review_pass_rate: 0.95
+guards:
+  critical_outcome_count: 0
+  unsafe_or_materially_incorrect_outcome_count: 0
+  tenant_isolation_incident_count: 0
+  duplicate_irreversible_side_effect_count: 0
+  schema_validation_error_count: 0
+  semantic_validation_error_count: 0
+  missing_required_evidence_count: 0
+  unknown_outcome_count: 0
+  unresolved_eligible_ticket_count: 0
+  required_review_sample_completion_rate: 1.00
+customer_decision: "continue"
+evidence:
+  target_contract_approved: true
+  baseline_uses_same_population_rules: true
+  metric_records_schema_validated: true
+  metric_records_semantically_validated: true
+  results_reproducible: true

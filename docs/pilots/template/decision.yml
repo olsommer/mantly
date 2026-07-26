@@ -12,9 +12,8 @@ conditions: []
 commercial_terms_reference: null
 next_decision_date: null
 evidence_refs:
-  - "summary.json"
-  - "summary.md"
   - "report.md"
+  - "risk-register.md"
   - "customer-decision-evidence-reference"
 approvals:
   customer_economic_buyer: null

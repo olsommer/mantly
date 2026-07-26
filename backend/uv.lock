@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -198,7 +198,7 @@ wheels = [
 ]
 
 [[package]]
-name = "backend"
+name = "mantly-backend"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -214,6 +214,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "slowapi" },
     { name = "stripe" },
+    { name = "tzdata" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
@@ -228,6 +229,7 @@ postgres = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -250,6 +252,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "stripe", specifier = ">=12.0.0" },
+    { name = "tzdata", specifier = ">=2025.2" },
     { name = "uvicorn", specifier = ">=0.40.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
@@ -257,6 +260,7 @@ provides-extras = ["attachments", "postgres"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },

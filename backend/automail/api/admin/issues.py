@@ -60,6 +60,18 @@ from automail.models import CamelCaseModel
 router = APIRouter()
 
 
+def _record_from(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _records_from(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _list_from(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 class IssueUpdate(CamelCaseModel):
     status: str | None = None
     priority: str | None = None
@@ -710,8 +722,8 @@ def _clip_text(value: str, limit: int = 1800) -> str:
 
 
 def _issue_reply_by_id(issue: dict[str, Any], reply_id: str) -> dict[str, Any] | None:
-    for reply in issue.get("outboundMessages", []):
-        if isinstance(reply, dict) and _text_from(reply.get("id")) == reply_id:
+    for reply in _records_from(issue.get("outboundMessages")):
+        if _text_from(reply.get("id")) == reply_id:
             return reply
     return None
 
@@ -728,7 +740,7 @@ def _require_reply_knowledge_access(reply: dict[str, Any], *, actor_role: str) -
 
 
 def _reply_knowledge_output_admin_only(reply: dict[str, Any]) -> bool:
-    metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+    metadata = _record_from(reply.get("metadata"))
     policy = metadata.get("knowledgeAccessPolicy")
     if isinstance(policy, dict) and policy.get("outputAdminOnly") is True:
         return True
@@ -736,7 +748,7 @@ def _reply_knowledge_output_admin_only(reply: dict[str, Any]) -> bool:
         isinstance(citation, dict)
         and _text_from(citation.get("visibility")).lower() == "private"
         and citation.get("automationAllowed") is not True
-        for citation in metadata.get("citations", [])
+        for citation in _records_from(metadata.get("citations"))
     )
 
 
@@ -812,7 +824,7 @@ def _reply_revision_question(reply: dict[str, Any], note: str) -> str:
 
 
 def _reply_requires_approval(reply: dict[str, Any]) -> bool:
-    metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+    metadata = _record_from(reply.get("metadata"))
     review_status = str(metadata.get("reviewStatus") or "pending")
     return (
         metadata.get("approvalRequired") is True
@@ -823,13 +835,13 @@ def _reply_requires_approval(reply: dict[str, Any]) -> bool:
 
 def _pending_approval_replies(issue: dict[str, Any]) -> list[dict[str, Any]]:
     return [
-        reply for reply in issue.get("outboundMessages", [])
+        reply for reply in _records_from(issue.get("outboundMessages"))
         if reply.get("status") != "sent" and _reply_requires_approval(reply)
     ]
 
 
 def _action_execution_requires_approval(execution: dict[str, Any]) -> bool:
-    metadata = execution.get("metadata") if isinstance(execution.get("metadata"), dict) else {}
+    metadata = _record_from(execution.get("metadata"))
     review_status = str(metadata.get("reviewStatus") or "pending")
     return (
         execution.get("status") == "pending"
@@ -840,7 +852,7 @@ def _action_execution_requires_approval(execution: dict[str, Any]) -> bool:
 
 def _pending_approval_actions(issue: dict[str, Any]) -> list[dict[str, Any]]:
     return [
-        execution for execution in issue.get("actionExecutions", [])
+        execution for execution in _records_from(issue.get("actionExecutions"))
         if _action_execution_requires_approval(execution)
     ]
 
@@ -1324,7 +1336,7 @@ async def get_issue_for_chat(chat_id: str, ctx: ProjectViewerDep, auth: AuthDep)
     if not issue:
         chat = get_chat(chat_id, tenant_id=ctx.tenant_id, project_id=ctx.project_id)
         if chat:
-            metadata = chat.get("metadata") if isinstance(chat.get("metadata"), dict) else {}
+            metadata = _record_from(chat.get("metadata"))
             source = str(metadata.get("source") or chat.get("source") or "addin").strip() or "addin"
             issue = upsert_issue_from_chat(
                 chat,
@@ -1635,7 +1647,7 @@ async def revise_issue_reply(
     ctx: ProjectEditorDep,
     auth: AuthDep,
 ) -> dict[str, Any]:
-    issue, reply = _issue_reply_for_actor(
+    _issue, reply = _issue_reply_for_actor(
         issue_id,
         reply_id,
         ctx=ctx,
@@ -1649,11 +1661,10 @@ async def revise_issue_reply(
     if _text_from(reply.get("status")) == "sent":
         raise HTTPException(status_code=400, detail="Sent replies cannot be revised")
 
-    metadata = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+    metadata = _record_from(reply.get("metadata"))
     lineage = [
         item
-        for item in metadata.get("knowledgeLineage", [])
-        if isinstance(item, dict)
+        for item in _records_from(metadata.get("knowledgeLineage"))
     ]
     if not lineage:
         lineage = [
@@ -1663,9 +1674,8 @@ async def revise_issue_reply(
                 "public": citation.get("public") is True,
                 "automationAllowed": citation.get("automationAllowed") is True,
             }
-            for citation in metadata.get("citations", [])
-            if isinstance(citation, dict)
-            and _text_from(citation.get("id") or citation.get("articleId"))
+            for citation in _records_from(metadata.get("citations"))
+            if _text_from(citation.get("id") or citation.get("articleId"))
         ]
     knowledge_article_ids = sorted(
         {
@@ -1675,7 +1685,7 @@ async def revise_issue_reply(
                 "knowledgeAccessedArticleIds",
                 "knowledgeContextArticleIds",
             )
-            for article_id in (metadata.get(key) if isinstance(metadata.get(key), list) else [])
+            for article_id in _list_from(metadata.get(key))
             if _text_from(article_id)
         }
         | {

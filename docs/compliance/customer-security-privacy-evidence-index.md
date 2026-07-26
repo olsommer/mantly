@@ -2,6 +2,10 @@
 
 Status: **Answer framework; complete per deployment and customer**
 
+Readiness status: **Not customer-ready.** Provider/legal approvals and the
+synthetic lifecycle exercise are incomplete. This framework does not close
+issue #7.
+
 This document prevents unsupported questionnaire claims. Replace every
 `customer-specific` value and attach current evidence before sending it to a
 customer, auditor, or procurement team.

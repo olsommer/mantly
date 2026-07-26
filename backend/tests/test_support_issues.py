@@ -3619,6 +3619,7 @@ def test_create_manual_issue_creates_email_ticket_message_and_assignment(monkeyp
     assert issue_post["assignee_email"] == "agent@example.com"
     assert issue_post["queue_key"] == "support"
     assert issue_post["queue_name"] == "Support"
+    assert issue_post["metadata"] == {"channelKey": "email:admin_inbox"}
     assert message_post["issue"] == "issue1"
     assert message_post["source_message_id"] == "manual:issue1:initial"
     assert message_post["message_kind"] == "manual_message"

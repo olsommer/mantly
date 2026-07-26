@@ -31,10 +31,30 @@ MANTLY_INSTANCE_ID=<stable-instance-name>
 ```
 
 `backend/sitecustomize.py` validates this topology before the Python process
-runs. Multiple replicas or an unimplemented storage/worker mode stop startup.
-This is deliberate: silently accepting an unsupported topology could create
-multiple SQLite writers, duplicate schedulers, duplicate external actions, or
-inconsistent local files.
+runs. It rejects a **declared** replica count above one and unimplemented
+storage/worker modes. That declaration is not proof of the actual replica count:
+every process could claim `MANTLY_API_REPLICAS=1`.
+
+Deployment acceptance therefore requires an external observation:
+
+```bash
+python scripts/runtime_topology_inventory.py \
+  --compose-file docker-compose.yml \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --output evidence/runtime-topology.json
+```
+
+The inventory queries `docker compose ps --all` and `docker inspect`, requires
+exactly one running `app`, `caddy`, and `pocketbase`, verifies app/PocketBase
+health, and verifies each required writable durable mount. It records image and
+container identities without copying environment variables, secrets, or host
+paths. A self-declared environment value or application health response cannot
+replace this evidence. Re-run it after every deploy, rollback, scale command, or
+volume change.
+
+Silently accepting an unsupported topology could create multiple SQLite
+writers, duplicate schedulers, duplicate external actions, or inconsistent
+local files.
 
 The current topology is recoverable through encrypted backup and restore. It is
 not highly available and does not provide point-in-time recovery, automatic
@@ -42,19 +62,34 @@ failover, or zero-data-loss guarantees.
 
 ## 2. Background-process inventory
 
-| Process | Current implementation | Durable state | Multi-instance status |
+“Process lock” below means a Python lock protects only one process. It provides
+no cross-replica exclusion.
+
+| Executor / loop | Trigger and default | Durable ownership or recovery | Multi-instance classification |
 | --- | --- | --- | --- |
-| Channel/email sync | Optional thread in API process | Provider cursor, events/messages in PocketBase | **Single instance only** until external worker and lease/fencing are proven |
-| Outbound delivery | Optional thread in API process | Queue, attempts, delivery runs, claim/fence records | Claims are tested, but scheduler duplication is not an approved deployment topology |
-| CRM/external sync | Optional thread in API process | Connector/sync records | **Single instance only** |
-| SLA escalation | Optional thread in API process | Ticket/SLA/events | **Single instance only** |
-| Model/runbook execution | Request/task path and durable run/action records | AI runs, action executions, audit | Concurrency must remain bounded; no distributed queue contract yet |
-| Backup | Host operator job | Encrypted off-host bundle | One backup writer; services stopped for consistent SQLite snapshot |
-| Retention/deletion | Operator/customer procedure | Primary/derived/provider and deletion replay evidence | No distributed deletion coordinator yet |
+| Channel/email sync scheduler | API daemon thread; `SUPPORT_SYNC_INTERVAL_SECONDS`, default off | Provider cursor plus sync/event/message records; process lock only | **Single instance only.** No distributed lease/fence for the scheduler. |
+| Outbound delivery scheduler | API daemon thread; `SUPPORT_DELIVERY_INTERVAL_SECONDS`, default off | Durable queue, attempt, claim token, claim expiry, fence/idempotency and delivery-run records | Delivery claims reduce duplicate sends, but unknown provider outcomes and scheduler ownership still make the supported topology **single instance only**. |
+| CRM/external sync scheduler | API daemon thread; `SUPPORT_CRM_SYNC_INTERVAL_SECONDS`, default off | Connector cursor and sync records; process lock only | **Single instance only.** |
+| SLA escalation scheduler | API daemon thread; `SUPPORT_SLA_INTERVAL_SECONDS`, default off | Ticket/SLA/event records; process lock only | **Single instance only.** |
+| Abandoned-processing expiry scheduler | API daemon thread; `SUPPORT_PROCESSING_EXPIRY_INTERVAL_SECONDS`, default 60 seconds | Durable ticket/message processing timestamps; process lock only | **Single instance only.** Recovery sweep can overlap across replicas. |
+| Admin channel-test recovery scheduler | API daemon thread; `SUPPORT_CHANNEL_TEST_JOB_INTERVAL_SECONDS`, default 5 seconds | Durable webhook-job status, claim token and claim expiry; process lock plus record claims | Claims fence a job attempt, but this release approves only **one scheduler instance**. |
+| Per-job channel-test worker | Request-triggered daemon thread | Same durable webhook-job claim and expiry; the active-job set is process-local | **Single API instance only.** Recovery may repeat computation; provider-event completion must hold the current claim. |
+| Evaluation run worker | Request-triggered daemon thread in `api/admin/evals.py` | Eval run/results; startup marks orphaned running work failed | **Single instance only.** No durable worker lease, resume, or distributed concurrency limit. |
+| Learning-proposal evaluation worker | Request-triggered daemon thread in `api/admin/learning_proposals.py` | Proposal plus eval run/results; orphan recovery | **Single instance only.** No distributed worker lease. |
+| Non-critical I/O worker | Lazy API daemon thread in `core/background.py` | In-memory queue only | **Never use for critical work or side effects.** Work can be lost on restart and no cross-instance ownership exists. |
+| Model/runbook/grounding execution | Request threads with process-local concurrency semaphores | Durable run/action/audit records; some provider calls can finish after request timeout | **Single instance envelope only.** Multiple replicas multiply concurrency and do not create a durable queue. |
+| On-prem license refresh | API daemon thread every 12 hours when licensed mode is configured | Signed local cache and remote validation result | The read/check is independently repeatable, but it does not make the rest of the API multi-instance safe. |
+| Discord gateway worker | Optional separate long-running process per configured bot/channel | Discord session/sequence in memory; forwarded events rely on downstream deduplication | **Exactly one per bot/channel.** Multiple gateway sessions can forward the same event. Not part of the standard three-service topology. |
+| Support bridge API sidecar | Optional separately deployed bridge process | Core API/PocketBase contains authoritative event state | Not part of the standard topology. Scale only after duplicate webhook/event tests and an approved inventory extension. |
+| Backup/restore job | Host operator or CI job | Encrypted bundle, manifest, checksum and restore evidence | **Exactly one.** Application and PocketBase stop for the consistent SQLite snapshot. |
+| Retention/deletion/export procedure | Operator/customer procedure | Primary, derived, provider and replay evidence | **Exactly one coordinator.** No distributed deletion coordinator exists. |
 
 No correctness decision may depend only on in-memory thread state. Durable
 records remain the source of truth, but this does not by itself make the current
-scheduler topology horizontally safe.
+scheduler topology horizontally safe. The runtime guard now inventories both
+default-off and default-on schedulers; `MANTLY_WORKER_MODE=disabled` is rejected
+unless every scheduler interval, including processing-expiry and channel-test
+recovery, is explicitly zero.
 
 ## 3. Conservative pilot admission envelope
 
@@ -96,12 +131,24 @@ A deployment may approve higher or lower values only after recording:
 ## 4. Required load-test scenarios
 
 `../../scripts/load_test.py` sends weighted synthetic HTTP scenarios and produces
-JSON containing throughput, error rate, status/error counts, and min/median/
-p90/p95/p99/max latency by route and overall. Sensitive headers are read from
-environment variables and are never written to the scenario or output.
+JSON containing successful throughput, attempted throughput, full wall-clock
+run time, error/status counts, and min/median/p90/p95/p99/max latency by route
+and overall. Sensitive headers are read from environment variables and are never
+written to the scenario or output.
 
-The example scenario checks liveness/readiness only. A production approval must
-extend it with deterministic synthetic routes or fixture-driven workflows for:
+The harness bounds duration, rate, concurrency, request count, body size, and
+in-flight futures. It does not “catch up” with an unbounded burst when the target
+falls behind. Throughput uses successful requests divided by the complete
+schedule-and-drain wall time. Redirects and environment proxies are disabled.
+The target must match an explicit host/port allowlist; link-local addresses are
+always blocked and private targets require an explicit isolated-environment
+flag. Every scenario must include non-vacuous error, latency, throughput,
+minimum-sample, and per-target-sample thresholds.
+
+The committed example scenario checks liveness/readiness only and is marked
+`kind: smoke`. It cannot support a capacity decision. A production capacity
+scenario must use `kind: capacity` and add deterministic synthetic routes or
+fixture-driven workflows for:
 
 1. authenticated Inbox list/read/update;
 2. ticket/message creation or replay-safe inbound ingestion;
@@ -114,6 +161,13 @@ extend it with deterministic synthetic routes or fixture-driven workflows for:
 8. attachment upload/extraction at representative sizes;
 9. scheduler catch-up after a controlled outage;
 10. backup during expected low-traffic operations and restore timing in isolation.
+
+Every scenario target declares one or more `workloads`. A `kind: capacity`
+scenario is rejected unless it covers `inbox-read`, `inbound-ingestion`,
+`runbook-match`, `knowledge-lookup`, `model-execution`, `tool-lookup`,
+`outbound-delivery`, and `attachment-processing`. Restart/catch-up,
+storage-growth, and recovery remain separate evidence exercises because an HTTP
+request generator cannot prove them.
 
 Run at least:
 
@@ -132,11 +186,16 @@ Example:
 ```bash
 cd backend
 uv run python ../scripts/load_test.py \
+  --release-id <immutable-commit-or-image-set> \
+  --environment-id isolated-pilot-capacity \
+  --run-kind steady \
   --base-url https://isolated-load.example.test \
-  --scenario ../docs/architecture/load-test.scenario.example.json \
+  --allowed-host isolated-load.example.test:443 \
+  --scenario ../evidence/pilot-critical.capacity.json \
   --duration 1800 \
   --concurrency 10 \
   --rate 5 \
+  --max-requests 10000 \
   --header-env Authorization=LOAD_TEST_AUTHORIZATION \
   --output ../evidence/load-test.json \
   --fail-on-threshold
@@ -144,7 +203,8 @@ uv run python ../scripts/load_test.py \
 
 Use synthetic tenants, disconnected real outbound providers, and an isolated
 capacity environment. Do not load-test a customer production mailbox without
-written authorization.
+written authorization. Add `--allow-private-target` only when the allowlisted
+host belongs to that isolated environment.
 
 ## 5. Capacity approval criteria
 
@@ -166,6 +226,35 @@ An approved operating point requires:
   leaving operational headroom.
 
 A single successful run is not a capacity certification.
+
+Operational acceptance is machine-gated:
+
+```bash
+python scripts/validate_capacity_evidence.py \
+  --manifest evidence/capacity-acceptance.json \
+  --output evidence/capacity-decision.json
+```
+
+The manifest format is illustrated by
+`capacity-acceptance.manifest.example.json`. The gate requires:
+
+- one externally observed, supported topology inventory;
+- three distinct 30-minute steady runs;
+- one 5-minute burst run;
+- one 4-hour soak run;
+- one 5-minute degraded-provider run;
+- the same immutable release, environment, and capacity-scenario digest across
+  those runs;
+- passing, non-vacuous thresholds in every run;
+- passed restart/catch-up, storage-growth, and recovery exercises;
+- CPU, memory, disk I/O/free space, SQLite locks, queue age, provider-error, and
+  cost evidence;
+- a complete numeric operating envelope with at least 30% headroom;
+- explicit architecture and operations approvals.
+
+Until this gate passes for the exact deployment artifact, Mantly has no approved
+measured capacity baseline. The conservative pilot caps in section 3 remain
+provisional admission limits, not proof that the system sustains them.
 
 ## 6. Evolution triggers
 

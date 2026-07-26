@@ -12,7 +12,7 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
 
 import yaml
@@ -47,6 +47,7 @@ REQUIRED_REPORT_HEADINGS = (
 )
 REQUIRED_TARGET_PATHS = (
     ("schema_version",),
+    ("evidence_mode",),
     ("pilot_id",),
     ("customer_identifier",),
     ("operational_owner",),
@@ -55,17 +56,23 @@ REQUIRED_TARGET_PATHS = (
     ("pilot_window", "end"),
     ("mailbox_or_queue",),
     ("workflow",),
+    ("tenant_ids",),
+    ("expected_eligible_ticket_count",),
     ("minimum_eligible_ticket_count",),
     ("observation_window_days",),
     ("baseline", "start"),
     ("baseline", "end"),
     ("baseline", "labour_cost_per_hour"),
+    ("costs", "allocated_pilot_operations"),
     ("runbooks",),
     ("targets", "verified_full_automation_rate_min"),
     ("targets", "recurring_cost_reduction_min"),
     ("targets", "runbook_match_precision_min"),
     ("targets", "critical_outcomes_max"),
     ("targets", "unsafe_or_materially_incorrect_rate_max"),
+    ("targets", "first_response_time_p90_seconds_max"),
+    ("targets", "resolution_time_p90_seconds_max"),
+    ("approved_exclusion_reasons",),
     ("commercial_decision_date",),
     ("approvals", "product_owner"),
     ("approvals", "engineering_owner"),
@@ -115,6 +122,11 @@ def parse_args() -> argparse.Namespace:
             default="",
             help="Override current UTC time for deterministic verification, e.g. 2026-07-16T00:00:00Z.",
         )
+        subparser.add_argument(
+            "--require-real-evidence",
+            action="store_true",
+            help="Reject synthetic evidence; required for committed customer pilot folders.",
+        )
         if command == "summarize":
             subparser.add_argument("--json-out", default="summary.json")
             subparser.add_argument("--markdown-out", default="summary.md")
@@ -161,10 +173,54 @@ def require_approved_targets(targets: dict[str, Any]) -> None:
 
     if targets.get("schema_version") != "1.0":
         raise EvidenceError("targets.yml schema_version must be 1.0")
-    if not isinstance(targets.get("minimum_eligible_ticket_count"), int) or targets["minimum_eligible_ticket_count"] <= 0:
+    if targets.get("evidence_mode") not in {"real", "synthetic"}:
+        raise EvidenceError("targets.yml evidence_mode must be real or synthetic")
+    if (
+        isinstance(targets.get("minimum_eligible_ticket_count"), bool)
+        or not isinstance(targets.get("minimum_eligible_ticket_count"), int)
+        or targets["minimum_eligible_ticket_count"] <= 0
+    ):
         raise EvidenceError("minimum_eligible_ticket_count must be a positive integer")
     if not isinstance(targets.get("observation_window_days"), int) or targets["observation_window_days"] < 0:
         raise EvidenceError("observation_window_days must be a non-negative integer")
+    expected_count = targets.get("expected_eligible_ticket_count")
+    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count <= 0:
+        raise EvidenceError("expected_eligible_ticket_count must be a positive integer")
+    if targets["minimum_eligible_ticket_count"] > expected_count:
+        raise EvidenceError("minimum_eligible_ticket_count cannot exceed expected_eligible_ticket_count")
+    if targets.get("evidence_mode", "real") != "synthetic" and targets["minimum_eligible_ticket_count"] < 200:
+        exception = targets.get("sample_size_exception")
+        if not isinstance(exception, dict) or any(
+            not isinstance(exception.get(field), str) or not exception[field].strip()
+            for field in ("approved_before", "rationale", "approved_by")
+        ):
+            raise EvidenceError(
+                "real pilot samples below 200 require a preapproved sample_size_exception"
+            )
+    tenant_ids = targets.get("tenant_ids")
+    if (
+        not isinstance(tenant_ids, list)
+        or not tenant_ids
+        or any(not isinstance(value, str) or not value for value in tenant_ids)
+    ):
+        raise EvidenceError("tenant_ids must be a non-empty string list")
+    exclusion_reasons = targets.get("approved_exclusion_reasons")
+    if (
+        not isinstance(exclusion_reasons, list)
+        or not exclusion_reasons
+        or any(not isinstance(value, str) or not value for value in exclusion_reasons)
+    ):
+        raise EvidenceError("approved_exclusion_reasons must be a non-empty string list")
+    if len(set(exclusion_reasons)) != len(exclusion_reasons):
+        raise EvidenceError("approved_exclusion_reasons contains duplicates")
+    labour_rate = targets.get("baseline", {}).get("labour_cost_per_hour")
+    allocated_operations = targets.get("costs", {}).get("allocated_pilot_operations")
+    for field, value in (
+        ("baseline.labour_cost_per_hour", labour_rate),
+        ("costs.allocated_pilot_operations", allocated_operations),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise EvidenceError(f"{field} must be a non-negative number")
 
     runbooks = targets.get("runbooks")
     if not isinstance(runbooks, list) or len(runbooks) != 3:
@@ -187,10 +243,26 @@ def require_approved_targets(targets: dict[str, Any]) -> None:
             raise EvidenceError(f"duplicate runbook/version in targets.yml: {runbook_id}@{version}")
         observed.add(key)
 
-    for name, value in targets.get("targets", {}).items():
-        if name.endswith("_rate_min") or name.endswith("_rate_max") or name.endswith("_reduction_min") or name.endswith("_precision_min"):
-            if value is not None and (not isinstance(value, (int, float)) or not 0 <= float(value) <= 1):
-                raise EvidenceError(f"target {name} must be null or a number between 0 and 1")
+    target_values = targets.get("targets", {})
+    for name in (
+        "verified_full_automation_rate_min",
+        "recurring_cost_reduction_min",
+        "runbook_match_precision_min",
+        "unsafe_or_materially_incorrect_rate_max",
+    ):
+        value = target_values.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 1:
+            raise EvidenceError(f"target {name} must be a number between 0 and 1")
+    critical_max = target_values.get("critical_outcomes_max")
+    if isinstance(critical_max, bool) or not isinstance(critical_max, int) or critical_max < 0:
+        raise EvidenceError("target critical_outcomes_max must be a non-negative integer")
+    for name in ("first_response_time_p90_seconds_max", "resolution_time_p90_seconds_max"):
+        value = target_values.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise EvidenceError(f"target {name} must be a positive number")
+
+    parse_window(targets["pilot_window"], "pilot_window")
+    parse_window(targets["baseline"], "baseline")
 
 
 def parse_timestamp(value: Any, field: str, *, allow_none: bool = True) -> datetime | None:
@@ -206,6 +278,25 @@ def parse_timestamp(value: Any, field: str, *, allow_none: bool = True) -> datet
     if parsed.tzinfo is None:
         raise EvidenceError(f"{field} must contain a timezone: {value}")
     return parsed.astimezone(timezone.utc)
+
+
+def parse_window(value: Any, field: str) -> tuple[datetime, datetime]:
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{field} must be an object")
+    boundaries: list[date] = []
+    for name in ("start", "end"):
+        raw = value.get(name)
+        if not isinstance(raw, str):
+            raise EvidenceError(f"{field}.{name} must be an ISO date")
+        try:
+            boundaries.append(date.fromisoformat(raw))
+        except ValueError as exc:
+            raise EvidenceError(f"{field}.{name} must be an ISO date") from exc
+    if boundaries[1] < boundaries[0]:
+        raise EvidenceError(f"{field}.end precedes {field}.start")
+    start = datetime.combine(boundaries[0], time.min, tzinfo=timezone.utc)
+    end_exclusive = datetime.combine(boundaries[1] + timedelta(days=1), time.min, tzinfo=timezone.utc)
+    return start, end_exclusive
 
 
 def load_metrics(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -241,6 +332,12 @@ def validate_metrics(
     seen_ticket_ids: set[str] = set()
     seen_source_ids: set[str] = set()
     approved_runbooks = {(item["id"], item["version"]) for item in targets["runbooks"]}
+    runbook_autonomy = {
+        (item["id"], item["version"]): item["autonomy"] for item in targets["runbooks"]
+    }
+    approved_tenant_ids = set(targets["tenant_ids"])
+    approved_exclusions = set(targets["approved_exclusion_reasons"])
+    pilot_start, pilot_end = parse_window(targets["pilot_window"], "pilot_window")
 
     for item in metrics:
         line = item["_line"]
@@ -252,6 +349,8 @@ def validate_metrics(
             raise EvidenceError(f"{prefix}: schema_version must be 1.0")
         if item["pilot_id"] != targets["pilot_id"]:
             raise EvidenceError(f"{prefix}: pilot_id does not match targets.yml")
+        if item["tenant_id"] not in approved_tenant_ids:
+            raise EvidenceError(f"{prefix}: tenant_id is not approved in targets.yml")
 
         ticket_id = str(item["ticket_id"])
         source_id = str(item["source_message_id"])
@@ -271,6 +370,8 @@ def validate_metrics(
         if eligibility == "excluded":
             if classification != "excluded" or not item.get("exclusion_reason"):
                 raise EvidenceError(f"{prefix}: excluded records require classification=excluded and exclusion_reason")
+            if item["exclusion_reason"] not in approved_exclusions:
+                raise EvidenceError(f"{prefix}: exclusion_reason was not preapproved")
         elif classification == "excluded":
             raise EvidenceError(f"{prefix}: eligible record cannot use classification=excluded")
 
@@ -279,6 +380,8 @@ def validate_metrics(
         resolved = parse_timestamp(item.get("resolved_at"), f"{prefix}.resolved_at")
         observation_end = parse_timestamp(item.get("observation_window_end"), f"{prefix}.observation_window_end")
         assert received is not None
+        if not pilot_start <= received < pilot_end:
+            raise EvidenceError(f"{prefix}: received_at falls outside the approved pilot window")
         if first_response and first_response < received:
             raise EvidenceError(f"{prefix}: first_response_at precedes received_at")
         if resolved and resolved < received:
@@ -291,14 +394,20 @@ def validate_metrics(
         if runbook_id or runbook_version:
             if (runbook_id, runbook_version) not in approved_runbooks:
                 raise EvidenceError(f"{prefix}: unapproved runbook/version {runbook_id}@{runbook_version}")
+            if item.get("match_review") not in {"correct", "incorrect"}:
+                raise EvidenceError(f"{prefix}: selected runbook requires a final match_review")
+        elif eligibility == "eligible" and classification not in {"manual"}:
+            raise EvidenceError(f"{prefix}: {classification} requires an approved runbook/version")
+        elif eligibility == "eligible" and item.get("match_review") != "no_match_expected":
+            raise EvidenceError(f"{prefix}: no-match manual ticket requires match_review=no_match_expected")
 
         for integer_field in ("human_touch_count", "action_attempts", "action_failures", "delivery_attempts", "input_tokens", "output_tokens"):
             value = item.get(integer_field, 0)
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise EvidenceError(f"{prefix}: {integer_field} must be a non-negative integer")
         for numeric_field in ("llm_cost", "tool_and_delivery_cost", "human_minutes"):
             value = item.get(numeric_field, 0)
-            if not isinstance(value, (int, float)) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise EvidenceError(f"{prefix}: {numeric_field} must be a non-negative number")
         confidence = item.get("match_confidence")
         if confidence is not None and (not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1):
@@ -306,11 +415,47 @@ def validate_metrics(
         if item.get("action_failures", 0) > item.get("action_attempts", 0):
             raise EvidenceError(f"{prefix}: action_failures cannot exceed action_attempts")
 
+        if eligibility == "eligible":
+            for boolean_field in (
+                "approval_required",
+                "duplicate_side_effect",
+                "unsafe_or_materially_incorrect",
+                "critical_outcome",
+                "recovery_required",
+            ):
+                if not isinstance(item.get(boolean_field), bool):
+                    raise EvidenceError(f"{prefix}: {boolean_field} must be explicitly true or false")
+            evidence_refs = item.get("evidence_refs")
+            if (
+                not isinstance(evidence_refs, list)
+                or not evidence_refs
+                or any(not isinstance(value, str) or not value for value in evidence_refs)
+            ):
+                raise EvidenceError(f"{prefix}: evidence_refs must be a non-empty string list")
+            review_result = item.get("review_result")
+            if review_result not in {
+                "pass",
+                "minor_issue",
+                "major_issue",
+                "critical_issue",
+                "not_reviewed",
+            }:
+                raise EvidenceError(f"{prefix}: review_result must be explicitly classified")
+            if item["critical_outcome"] and not item["unsafe_or_materially_incorrect"]:
+                raise EvidenceError(f"{prefix}: critical_outcome must be classified as unsafe")
+
         if classification == "verified_autonomous":
+            if runbook_autonomy[(runbook_id, runbook_version)] != "automatic":
+                raise EvidenceError(f"{prefix}: verified autonomous ticket requires an automatic runbook")
             if item.get("human_touch_count", 0) != 0:
                 raise EvidenceError(f"{prefix}: verified autonomous ticket has human touches")
+            if item.get("human_minutes", 0) != 0:
+                raise EvidenceError(f"{prefix}: verified autonomous ticket has human handling time")
             if not resolved or not observation_end or observation_end > now:
                 raise EvidenceError(f"{prefix}: verified autonomous ticket requires a completed observation window")
+            required_observation_end = resolved + timedelta(days=targets["observation_window_days"])
+            if observation_end < required_observation_end:
+                raise EvidenceError(f"{prefix}: verified autonomous observation window is too short")
             if item.get("review_result") != "pass":
                 raise EvidenceError(f"{prefix}: verified autonomous ticket requires review_result=pass")
             if item.get("delivery_status") not in {"sent", "delivered", "not_required"}:
@@ -319,6 +464,10 @@ def validate_metrics(
                 raise EvidenceError(f"{prefix}: verified autonomous ticket required recovery")
             if item.get("unsafe_or_materially_incorrect") is True or item.get("critical_outcome") is True:
                 raise EvidenceError(f"{prefix}: unsafe/critical ticket cannot be verified autonomous")
+            if item.get("action_failures", 0) or item.get("duplicate_side_effect") is True:
+                raise EvidenceError(f"{prefix}: verified autonomous ticket has action failure or duplicate")
+            if item.get("approval_required") is True or item.get("material_edit") is True:
+                raise EvidenceError(f"{prefix}: verified autonomous ticket required human approval or editing")
 
     eligible_count = sum(item["eligibility"] == "eligible" for item in metrics)
     if eligible_count < targets["minimum_eligible_ticket_count"] and not allow_incomplete_sample:
@@ -327,7 +476,7 @@ def validate_metrics(
         )
 
 
-def load_baseline(path: pathlib.Path) -> list[dict[str, str]]:
+def load_baseline(path: pathlib.Path, targets: dict[str, Any]) -> list[dict[str, str]]:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -343,6 +492,8 @@ def load_baseline(path: pathlib.Path) -> list[dict[str, str]]:
         raise EvidenceError("baseline.csv contains no records")
 
     seen: set[str] = set()
+    baseline_start, baseline_end = parse_window(targets["baseline"], "baseline")
+    approved_runbook_ids = {item["id"] for item in targets["runbooks"]}
     for line_number, row in enumerate(rows, start=2):
         ticket_id = row.get("ticket_id", "")
         if not ticket_id:
@@ -354,10 +505,17 @@ def load_baseline(path: pathlib.Path) -> list[dict[str, str]]:
         first_response = parse_timestamp(row.get("first_response_at"), f"baseline.csv:{line_number}.first_response_at")
         resolved = parse_timestamp(row.get("resolved_at"), f"baseline.csv:{line_number}.resolved_at")
         assert received is not None
+        if not baseline_start <= received < baseline_end:
+            raise EvidenceError(f"baseline.csv:{line_number}: received_at falls outside baseline window")
         if first_response and first_response < received:
             raise EvidenceError(f"baseline.csv:{line_number}: first response precedes receipt")
-        if resolved and resolved < received:
+        if resolved is None:
+            raise EvidenceError(f"baseline.csv:{line_number}: resolved_at is required")
+        if resolved < received:
             raise EvidenceError(f"baseline.csv:{line_number}: resolution precedes receipt")
+        runbook_id = row.get("runbook_id", "")
+        if runbook_id and runbook_id not in approved_runbook_ids | {"no-match", "unclassified"}:
+            raise EvidenceError(f"baseline.csv:{line_number}: unapproved runbook_id {runbook_id}")
         for field in ("human_minutes", "labour_cost", "other_cost"):
             try:
                 value = float(row.get(field, ""))
@@ -368,7 +526,7 @@ def load_baseline(path: pathlib.Path) -> list[dict[str, str]]:
     return rows
 
 
-def validate_documents(paths: EvidencePaths) -> dict[str, Any]:
+def validate_documents(paths: EvidencePaths, targets: dict[str, Any]) -> dict[str, Any]:
     try:
         report = paths.report.read_text(encoding="utf-8")
     except OSError as exc:
@@ -382,6 +540,8 @@ def validate_documents(paths: EvidencePaths) -> dict[str, Any]:
     decision = load_yaml(paths.decision)
     if decision.get("schema_version") != "1.0":
         raise EvidenceError("decision.yml schema_version must be 1.0")
+    if decision.get("pilot_id") != targets["pilot_id"]:
+        raise EvidenceError("decision.yml pilot_id does not match targets.yml")
     if decision.get("decision") not in DECISIONS:
         raise EvidenceError(f"decision.yml decision must be one of: {', '.join(sorted(DECISIONS))}")
     for field in ("decision_date", "decided_by", "rationale", "evidence_refs"):
@@ -396,6 +556,31 @@ def validate_documents(paths: EvidencePaths) -> dict[str, Any]:
         isinstance(value, str) and value for value in decision["evidence_refs"]
     ):
         raise EvidenceError("decision.yml evidence_refs must be a non-empty string list")
+    for reference in decision["evidence_refs"]:
+        if ":" in reference:
+            continue
+        evidence_path = (paths.root / reference).resolve()
+        if not evidence_path.is_relative_to(paths.root) or not evidence_path.is_file():
+            raise EvidenceError(f"decision.yml evidence reference does not exist: {reference}")
+    try:
+        decision_date = date.fromisoformat(decision["decision_date"])
+        expected_decision_date = date.fromisoformat(targets["commercial_decision_date"])
+    except ValueError as exc:
+        raise EvidenceError("commercial decision dates must be ISO dates") from exc
+    if decision_date != expected_decision_date:
+        raise EvidenceError("decision.yml decision_date does not match the precommitted date")
+    authorized_deciders = {targets["economic_buyer"], targets["operational_owner"]}
+    if not authorized_deciders.intersection(decision["decided_by"]):
+        raise EvidenceError("decision.yml requires the economic buyer or operational owner")
+    approvals = decision.get("approvals")
+    if not isinstance(approvals, dict):
+        raise EvidenceError("decision.yml approvals must be an object")
+    for field, expected in (
+        ("customer_economic_buyer", targets["economic_buyer"]),
+        ("customer_operational_owner", targets["operational_owner"]),
+    ):
+        if approvals.get(field) != expected:
+            raise EvidenceError(f"decision.yml approvals.{field} does not match targets.yml")
 
     try:
         risk_register = paths.risk_register.read_text(encoding="utf-8")
@@ -464,8 +649,9 @@ def baseline_summary(rows: list[dict[str, str]], labour_rate: float) -> dict[str
 
     return {
         "ticketCount": len(rows),
+        "resolvedTicketCount": len(rows),
         "costTotal": sum(costs),
-        "costPerTicket": sum(costs) / len(costs),
+        "costPerResolvedTicket": sum(costs) / len(costs),
         "firstResponse": timing_summary(first_response_values),
         "resolution": timing_summary(resolution_values),
         "byRunbook": dict(sorted(by_runbook.items())),
@@ -481,8 +667,7 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
         by_runbook_records[str(item.get("runbook_id") or "no-match")].append(item)
 
     selected = [item for item in eligible if item.get("runbook_id")]
-    reviewed_matches = [item for item in selected if item.get("match_review") in {"correct", "incorrect"}]
-    correct_matches = [item for item in reviewed_matches if item.get("match_review") == "correct"]
+    correct_matches = [item for item in selected if item.get("match_review") == "correct"]
     materially_influenced = [item for item in eligible if item["handling_classification"] not in {"manual"}]
     unsafe = [item for item in materially_influenced if item.get("unsafe_or_materially_incorrect") is True]
     critical = [item for item in eligible if item.get("critical_outcome") is True]
@@ -504,10 +689,14 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
         + float(item.get("llm_cost", 0))
         + float(item.get("tool_and_delivery_cost", 0))
         for item in eligible
-    )
+    ) + float(targets["costs"]["allocated_pilot_operations"])
     baseline_result = baseline_summary(baseline, labour_rate)
-    pilot_cost_per_ticket = pilot_cost_total / len(eligible) if eligible else None
-    baseline_cost_per_ticket = baseline_result["costPerTicket"]
+    resolved_eligible = [item for item in eligible if item.get("resolved_at")]
+    responded_eligible = [item for item in eligible if item.get("first_response_at")]
+    complete_response_sample = len(responded_eligible) == len(eligible)
+    complete_resolution_sample = len(resolved_eligible) == len(eligible)
+    pilot_cost_per_ticket = pilot_cost_total / len(resolved_eligible) if resolved_eligible else None
+    baseline_cost_per_ticket = baseline_result["costPerResolvedTicket"]
     cost_reduction = (
         (baseline_cost_per_ticket - pilot_cost_per_ticket) / baseline_cost_per_ticket
         if pilot_cost_per_ticket is not None and baseline_cost_per_ticket > 0
@@ -515,9 +704,11 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
     )
 
     full_automation_rate = rate(classifications["verified_autonomous"], len(eligible))
-    match_precision = rate(len(correct_matches), len(reviewed_matches))
+    match_precision = rate(len(correct_matches), len(selected))
     match_coverage = rate(len(selected), len(eligible))
     unsafe_rate = rate(len(unsafe), len(materially_influenced))
+    first_response_summary = timing_summary(first_response_values)
+    resolution_summary = timing_summary(resolution_values)
 
     by_runbook: dict[str, Any] = {}
     for runbook_id, records in sorted(by_runbook_records.items()):
@@ -545,7 +736,9 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
         "recurringCostReduction": {
             "actual": cost_reduction,
             "target": target_values["recurring_cost_reduction_min"],
-            "pass": cost_reduction is not None and cost_reduction >= float(target_values["recurring_cost_reduction_min"]),
+            "pass": complete_resolution_sample
+            and cost_reduction is not None
+            and cost_reduction >= float(target_values["recurring_cost_reduction_min"]),
         },
         "runbookMatchPrecision": {
             "actual": match_precision,
@@ -562,6 +755,22 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
             "target": target_values["unsafe_or_materially_incorrect_rate_max"],
             "pass": unsafe_rate is not None and unsafe_rate <= float(target_values["unsafe_or_materially_incorrect_rate_max"]),
         },
+        "firstResponseTimeP90Seconds": {
+            "actual": first_response_summary["p90Seconds"],
+            "target": target_values["first_response_time_p90_seconds_max"],
+            "pass": complete_response_sample
+            and isinstance(first_response_summary["p90Seconds"], (int, float))
+            and first_response_summary["p90Seconds"]
+            <= float(target_values["first_response_time_p90_seconds_max"]),
+        },
+        "resolutionTimeP90Seconds": {
+            "actual": resolution_summary["p90Seconds"],
+            "target": target_values["resolution_time_p90_seconds_max"],
+            "pass": complete_resolution_sample
+            and isinstance(resolution_summary["p90Seconds"], (int, float))
+            and resolution_summary["p90Seconds"]
+            <= float(target_values["resolution_time_p90_seconds_max"]),
+        },
     }
 
     return {
@@ -571,6 +780,8 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
         "sample": {
             "records": len(metrics),
             "eligible": len(eligible),
+            "respondedEligible": len(responded_eligible),
+            "resolvedEligible": len(resolved_eligible),
             "excluded": len(excluded),
             "exclusions": dict(sorted(Counter(str(item.get("exclusion_reason")) for item in excluded).items())),
         },
@@ -583,12 +794,13 @@ def summarize(metrics: list[dict[str, Any]], baseline: list[dict[str, str]], tar
         "actionAttempts": sum(int(item.get("action_attempts", 0)) for item in eligible),
         "actionFailures": sum(int(item.get("action_failures", 0)) for item in eligible),
         "manualRecoveries": sum(item.get("recovery_required") is True for item in eligible),
-        "firstResponse": timing_summary(first_response_values),
-        "resolution": timing_summary(resolution_values),
+        "firstResponse": first_response_summary,
+        "resolution": resolution_summary,
         "cost": {
             "pilotTotal": pilot_cost_total,
-            "pilotPerEligibleTicket": pilot_cost_per_ticket,
-            "baselinePerTicket": baseline_cost_per_ticket,
+            "allocatedPilotOperations": float(targets["costs"]["allocated_pilot_operations"]),
+            "pilotPerResolvedTicket": pilot_cost_per_ticket,
+            "baselinePerResolvedTicket": baseline_cost_per_ticket,
             "recurringReduction": cost_reduction,
         },
         "baseline": baseline_result,
@@ -677,12 +889,16 @@ def run(args: argparse.Namespace) -> int:
         raise EvidenceError(f"evidence folder does not exist: {paths.root}")
     targets = load_yaml(paths.targets)
     require_approved_targets(targets)
+    if args.require_real_evidence and targets["evidence_mode"] != "real":
+        raise EvidenceError("synthetic evidence is not allowed for this validation")
+    if args.allow_incomplete_sample and targets["evidence_mode"] != "synthetic":
+        raise EvidenceError("--allow-incomplete-sample is restricted to synthetic fixtures")
     now = parse_timestamp(args.now, "--now", allow_none=False) if args.now else datetime.now(timezone.utc)
     assert now is not None
     metrics = load_metrics(paths.metrics)
     validate_metrics(metrics, targets, now, allow_incomplete_sample=args.allow_incomplete_sample)
-    baseline = load_baseline(paths.baseline)
-    decision = validate_documents(paths)
+    baseline = load_baseline(paths.baseline, targets)
+    decision = validate_documents(paths, targets)
 
     summary = summarize(metrics, baseline, targets, decision)
     result = {

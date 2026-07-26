@@ -206,6 +206,13 @@ def ensure_app_collections_schema(
         projects, was_created = _ensure_collection(http_client, resolved_pb_url, token, projects_payload)
         if was_created:
             created.append("projects")
+        _ensure_field_on_collection(
+            http_client,
+            resolved_pb_url,
+            token,
+            "projects",
+            _text_field("description"),
+        )
         projects_id = projects["id"]
 
         agent_runs_payload = _base_collection_payload(

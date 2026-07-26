@@ -10741,7 +10741,7 @@ export function Inbox({ projectId }: InboxProps) {
                                         value={issueWorkflowStatus(selectedIssue)}
                                         onValueChange={(value) => void patchSelectedIssue({ status: value as SupportIssueStatus })}
                                     >
-                                        <SelectTrigger className="w-full">
+                                        <SelectTrigger className="w-full" data-ticket-status-select>
                                             <SelectValue />
                                         </SelectTrigger>
                                         <SelectContent>
@@ -12451,6 +12451,7 @@ export function Inbox({ projectId }: InboxProps) {
                                                                                 type="button"
                                                                                 size="sm"
                                                                                 variant="outline"
+                                                                                data-outbound-reply-edit={reply.id}
                                                                                 onClick={() => startEditingReply(reply)}
                                                                             >
                                                                                 <Pencil className="size-4" />
@@ -12489,6 +12490,7 @@ export function Inbox({ projectId }: InboxProps) {
                                                                                     type="button"
                                                                                     size="sm"
                                                                                     variant="outline"
+                                                                                    data-outbound-reply-approve={reply.id}
                                                                                     onClick={() => void approveReply(reply)}
                                                                                     disabled={Boolean(approvingReplyId || sendingReplyId || savingReplyEditId || requestingChangesReplyId || revisingReplyId)}
                                                                                 >
@@ -12621,6 +12623,7 @@ export function Inbox({ projectId }: InboxProps) {
                                                             <div className="space-y-2">
                                                                 <Textarea
                                                                     value={editingReplyBody}
+                                                                    data-outbound-reply-edit-body={reply.id}
                                                                     onChange={event => setEditingReplyBody(event.target.value)}
                                                                     rows={8}
                                                                     className="bg-background"
@@ -12639,6 +12642,7 @@ export function Inbox({ projectId }: InboxProps) {
                                                                     <Button
                                                                         type="button"
                                                                         size="sm"
+                                                                        data-outbound-reply-edit-save={reply.id}
                                                                         onClick={() => void saveEditedReply(reply)}
                                                                         disabled={savingReplyEditId === reply.id || !editingReplyBody.trim()}
                                                                     >
@@ -12858,7 +12862,7 @@ export function Inbox({ projectId }: InboxProps) {
                                                 value={issueWorkflowStatus(selectedIssue)}
                                                 onValueChange={(value) => void patchSelectedIssue({ status: value as SupportIssueStatus })}
                                             >
-                                                <SelectTrigger>
+                                                <SelectTrigger data-ticket-status-select>
                                                     <SelectValue />
                                                 </SelectTrigger>
                                                 <SelectContent>

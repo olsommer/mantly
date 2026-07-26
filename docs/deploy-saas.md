@@ -4,6 +4,12 @@ Production deployment guide for the hosted SaaS version on Hetzner or another Li
 
 This document describes the current controlled single-node architecture. It does not claim high availability, horizontal SQLite writes, point-in-time recovery, or zero-downtime failover. The supported capacity and evolution triggers are documented separately in the scaling-boundaries decision package.
 
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
+
 ## Prerequisites
 
 - Linux VPS with Docker and Docker Compose v2
@@ -98,7 +104,22 @@ The admin SPA is hosted at `app.mantly.io`, the Outlook add-in SPA at `addin.man
 Both SPAs call `https://api.mantly.io`; PocketBase is exposed as `https://api.mantly.io/pb` through the reverse proxy.
 The SaaS API image is backend-only and does not bundle admin/add-in/landing assets.
 
-The current deployment is one application instance and one PocketBase/SQLite instance. Do not run multiple API replicas with in-process schedulers until the distributed worker/lease boundary has been implemented and verified.
+The current deployment is one application instance and one PocketBase/SQLite
+instance. Do not run multiple API replicas with in-process schedulers until the
+distributed worker/lease boundary has been implemented and verified.
+`MANTLY_API_REPLICAS=1` is only a local declaration, not proof of the deployed
+count. After every deploy or topology change, capture the externally observed
+inventory:
+
+```bash
+python scripts/runtime_topology_inventory.py \
+  --compose-file docker-compose.yml \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --output evidence/runtime-topology.json
+```
+
+Set `COMPOSE_PROJECT_NAME` to the exact Coolify/Compose project. Any nonzero exit
+blocks pilot traffic.
 
 ## Coolify deployment
 
@@ -247,7 +268,10 @@ git pull --ff-only
 docker compose up -d --build
 ```
 
-After updating, run health checks, authentication, schema/package gates, and a synthetic ticket lifecycle. Roll back to a previously verified artifact rather than rebuilding an old commit with a changed dependency graph.
+After updating, capture a fresh external topology inventory, then run health
+checks, authentication, schema/package gates, and a synthetic ticket lifecycle.
+Roll back to a previously verified artifact rather than rebuilding an old commit
+with a changed dependency graph.
 
 ## 10. Backups and recovery
 
@@ -302,7 +326,10 @@ Before production-like customer processing, complete:
 - `security/incident-response.md` with real contacts and credential-rotation procedures;
 - `security/data-retention.md` with customer-specific periods;
 - a restore drill and incident tabletop;
-- production monitoring/alerting once the observability PR is merged.
+- production monitoring/alerting configured for the deployed environment;
+- a passing externally observed topology inventory;
+- a passing `scripts/validate_capacity_evidence.py` decision before increasing
+  the conservative pilot admission envelope.
 
 ## Troubleshooting
 

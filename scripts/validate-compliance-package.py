@@ -10,6 +10,7 @@ omitting a data recipient.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import pathlib
 import sys
@@ -60,6 +61,27 @@ REQUIRED_PROVIDER_TYPES = {
     "observability-provider",
     "backup-storage-provider",
 }
+REFERENCE_FIELDS = (
+    "contractReference",
+    "securityReference",
+    "deletionReference",
+    "incidentNotificationReference",
+)
+LIFECYCLE_APPROVAL_ROLES = {
+    "operator",
+    "independentVerifier",
+    "engineeringOwner",
+    "privacySecurityOwner",
+}
+PLACEHOLDER_MARKERS = (
+    "replace-with",
+    "customer-specific",
+    "provider-specific",
+    "legal-review-required",
+    "review required",
+    "to-be-reviewed",
+    "tbd",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +97,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow legalReviewComplete=true in the repository example. Normally forbidden.",
     )
+    parser.add_argument(
+        "--require-approved",
+        action="store_true",
+        help="Require deployment-specific provider, legal-review, and lifecycle evidence.",
+    )
+    parser.add_argument(
+        "--lifecycle-evidence",
+        default="docs/compliance/lifecycle-exercise-status.json",
+        help="Lifecycle exercise status relative to root.",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +121,25 @@ def require_string_list(value: Any, field: str, provider: str, errors: list[str]
         return
     if not allow_empty and not value:
         errors.append(f"provider {provider}: {field} must not be empty")
+
+
+def is_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    return not normalized or any(marker in normalized for marker in PLACEHOLDER_MARKERS)
+
+
+def require_timestamp(value: Any, field: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value:
+        errors.append(f"{field} must be an ISO-8601 timestamp")
+        return
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized)
+    except ValueError:
+        errors.append(f"{field} must be an ISO-8601 timestamp")
+        return
+    if parsed.tzinfo is None:
+        errors.append(f"{field} must include a timezone")
 
 
 def main() -> int:
@@ -114,8 +165,9 @@ def main() -> int:
     if inventory:
         if inventory.get("schemaVersion") != "1.0":
             errors.append("provider inventory schemaVersion must be 1.0")
-        if inventory.get("status") != "template-not-approved":
-            errors.append("repository example inventory must remain status=template-not-approved")
+        expected_status = "approved" if args.require_approved else "template-not-approved"
+        if inventory.get("status") != expected_status:
+            errors.append(f"provider inventory status must be {expected_status}")
 
         deployment = inventory.get("deployment")
         if not isinstance(deployment, dict):
@@ -124,8 +176,18 @@ def main() -> int:
             for field in ("name", "mode", "primaryProcessingRegion", "customer"):
                 require_nonempty_string(deployment.get(field), f"deployment.{field}", "inventory", errors)
             reviewers = deployment.get("reviewedBy")
-            if not isinstance(reviewers, list):
-                errors.append("deployment.reviewedBy must be a list")
+            if not isinstance(reviewers, list) or any(
+                not isinstance(reviewer, str) or not reviewer.strip() for reviewer in reviewers
+            ):
+                errors.append("deployment.reviewedBy must be a list of non-empty strings")
+            if args.require_approved:
+                for field in ("name", "mode", "primaryProcessingRegion", "customer"):
+                    value = deployment.get(field)
+                    if isinstance(value, str) and is_placeholder(value):
+                        errors.append(f"deployment.{field} still contains placeholder text")
+                if not reviewers:
+                    errors.append("deployment.reviewedBy must not be empty for approved evidence")
+                require_timestamp(deployment.get("lastReviewedAt"), "deployment.lastReviewedAt", errors)
 
         providers = inventory.get("providers")
         if not isinstance(providers, list) or not providers:
@@ -146,7 +208,16 @@ def main() -> int:
                 if key in observed_keys:
                     errors.append(f"duplicate provider key: {key}")
                 observed_keys.add(key)
-            for field in ("legalEntity", "service", "role", "retention", "trainingOrSecondaryUse", "transferMechanism", "customerAlternative", "owner"):
+            for field in (
+                "legalEntity",
+                "service",
+                "role",
+                "retention",
+                "trainingOrSecondaryUse",
+                "transferMechanism",
+                "customerAlternative",
+                "owner",
+            ):
                 require_nonempty_string(provider.get(field), field, provider_name, errors)
             for field in ("purpose", "dataCategories", "dataSubjects"):
                 require_string_list(provider.get(field), field, provider_name, errors)
@@ -155,14 +226,73 @@ def main() -> int:
             for field in ("enabled", "required", "legalReviewComplete"):
                 if not isinstance(provider.get(field), bool):
                     errors.append(f"provider {provider_name}: {field} must be boolean")
-            if provider.get("legalReviewComplete") is True and not args.allow_approved_template:
+            if (
+                provider.get("legalReviewComplete") is True
+                and not args.require_approved
+                and not args.allow_approved_template
+            ):
                 errors.append(
                     f"provider {provider_name}: repository example must not claim completed legal review"
                 )
+            if args.require_approved and (provider.get("enabled") is True or provider.get("required") is True):
+                if provider.get("required") is True and provider.get("enabled") is not True:
+                    errors.append(f"provider {provider_name}: required provider must be enabled")
+                if provider.get("legalReviewComplete") is not True:
+                    errors.append(f"provider {provider_name}: legal review is incomplete")
+                for field in (
+                    "legalEntity",
+                    "role",
+                    "retention",
+                    "trainingOrSecondaryUse",
+                    "transferMechanism",
+                    "owner",
+                ):
+                    value = provider.get(field)
+                    if isinstance(value, str) and is_placeholder(value):
+                        errors.append(f"provider {provider_name}: {field} still contains placeholder text")
+                for field in ("processingLocations", "supportAccessLocations"):
+                    value = provider.get(field)
+                    if not isinstance(value, list) or not value:
+                        errors.append(f"provider {provider_name}: {field} must not be empty when enabled")
+                for field in REFERENCE_FIELDS:
+                    value = provider.get(field)
+                    if not isinstance(value, str) or is_placeholder(value):
+                        errors.append(f"provider {provider_name}: {field} requires approved evidence")
 
         missing_types = sorted(REQUIRED_PROVIDER_TYPES - observed_keys)
         if missing_types:
             errors.append(f"provider inventory omits required categories: {', '.join(missing_types)}")
+
+    lifecycle_path = root / args.lifecycle_evidence
+    try:
+        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"cannot read lifecycle evidence {args.lifecycle_evidence}: {exc}")
+        lifecycle = {}
+    if lifecycle:
+        expected_lifecycle_status = "passed" if args.require_approved else "not-completed"
+        if lifecycle.get("schemaVersion") != "1.0":
+            errors.append("lifecycle evidence schemaVersion must be 1.0")
+        if lifecycle.get("status") != expected_lifecycle_status:
+            errors.append(f"lifecycle evidence status must be {expected_lifecycle_status}")
+        if args.require_approved:
+            require_timestamp(lifecycle.get("completedAt"), "lifecycle.completedAt", errors)
+            release_commit = lifecycle.get("releaseCommit")
+            if not isinstance(release_commit, str) or is_placeholder(release_commit):
+                errors.append("lifecycle.releaseCommit requires the tested release commit")
+            approvals = lifecycle.get("approvals")
+            if not isinstance(approvals, dict):
+                errors.append("lifecycle.approvals must be an object")
+            else:
+                for role in sorted(LIFECYCLE_APPROVAL_ROLES):
+                    value = approvals.get(role)
+                    if not isinstance(value, str) or is_placeholder(value):
+                        errors.append(f"lifecycle.approvals.{role} is required")
+            evidence_refs = lifecycle.get("evidenceRefs")
+            if not isinstance(evidence_refs, list) or not evidence_refs or any(
+                not isinstance(value, str) or is_placeholder(value) for value in evidence_refs
+            ):
+                errors.append("lifecycle.evidenceRefs must contain approved references")
 
     forbidden_claims = (
         "fully gdpr compliant",
@@ -185,6 +315,9 @@ def main() -> int:
         "ok": not errors,
         "checkedDocuments": sorted(checked),
         "inventory": args.inventory,
+        "lifecycleEvidence": args.lifecycle_evidence,
+        "mode": "approved-deployment" if args.require_approved else "repository-template",
+        "deploymentReady": args.require_approved and not errors,
         "errors": errors,
     }
     print(json.dumps(report, indent=2, sort_keys=True))

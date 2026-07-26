@@ -165,6 +165,20 @@ class CrmConnectorInput(CamelCaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+def _record_from(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _records_from(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _list_from(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _config_text(config: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = config.get(key)
@@ -707,8 +721,11 @@ def _config_int(config: dict[str, Any], *keys: str, default: int) -> int:
     for key in keys:
         if key not in config:
             continue
+        raw_value = config.get(key)
+        if raw_value is None:
+            continue
         try:
-            value = int(config.get(key))
+            value = int(raw_value)
         except (TypeError, ValueError):
             continue
         if value > 0:
@@ -1428,8 +1445,8 @@ def _setup_step(key: str, label: str, status: str, detail: str = "") -> dict[str
 
 
 def _setup_health_summary(setup: dict[str, Any]) -> dict[str, Any]:
-    checklist = setup.get("setupChecklist") if isinstance(setup.get("setupChecklist"), list) else []
-    env_vars = setup.get("envVars") if isinstance(setup.get("envVars"), list) else []
+    checklist = _records_from(setup.get("setupChecklist"))
+    env_vars = _records_from(setup.get("envVars"))
     missing_checks = [check for check in checklist if check.get("status") == "missing"]
     warning_checks = [check for check in checklist if check.get("status") == "warning"]
     configured_env = [env for env in env_vars if env.get("configured")]
@@ -1471,7 +1488,7 @@ def _channel_requires_attachment_lifecycle_smoke(channel_type: str) -> bool:
 
 
 def _run_ready_value(run: dict[str, Any]) -> bool:
-    result = run.get("result") if isinstance(run.get("result"), dict) else {}
+    result = _record_from(run.get("result"))
     return result.get("ready") is not False
 
 
@@ -1490,7 +1507,7 @@ def _run_failed_count(run: dict[str, Any]) -> int:
 
 
 def _run_result(run: dict[str, Any]) -> dict[str, Any]:
-    return run.get("result") if isinstance(run.get("result"), dict) else {}
+    return _record_from(run.get("result"))
 
 
 def _result_text(result: dict[str, Any], *keys: str) -> str:
@@ -1506,16 +1523,15 @@ def _run_issue_id(run: dict[str, Any]) -> str:
     issue_id = _result_text(result, "issueId", "issue_id")
     if issue_id:
         return issue_id
-    inbound = result.get("inbound") if isinstance(result.get("inbound"), dict) else {}
+    inbound = _record_from(result.get("inbound"))
     issue_id = _result_text(inbound, "issueId", "issue_id")
     if issue_id:
         return issue_id
-    items = result.get("items") if isinstance(result.get("items"), list) else []
+    items = _records_from(result.get("items"))
     for item in items:
-        if isinstance(item, dict):
-            issue_id = _result_text(item, "issueId", "issue_id")
-            if issue_id:
-                return issue_id
+        issue_id = _result_text(item, "issueId", "issue_id")
+        if issue_id:
+            return issue_id
     return ""
 
 
@@ -1524,7 +1540,7 @@ def _run_reply_id(run: dict[str, Any]) -> str:
     reply_id = _result_text(result, "replyId", "reply_id", "outboundMessageId", "outbound_message_id")
     if reply_id:
         return reply_id
-    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else {}
+    delivery = _record_from(result.get("delivery"))
     return _result_text(delivery, "id", "replyId", "reply_id", "outboundMessageId", "outbound_message_id")
 
 
@@ -1533,46 +1549,46 @@ def _run_provider_message_id(run: dict[str, Any]) -> str:
     provider_message_id = _result_text(result, "providerMessageId", "provider_message_id")
     if provider_message_id:
         return provider_message_id
-    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else {}
+    delivery = _record_from(result.get("delivery"))
     return _result_text(delivery, "providerMessageId", "provider_message_id")
 
 
 def _run_delivery_metadata(run: dict[str, Any]) -> dict[str, Any]:
     result = _run_result(run)
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else {}
-    delivery_metadata = delivery.get("metadata") if isinstance(delivery.get("metadata"), dict) else {}
+    metadata = _record_from(result.get("metadata"))
+    delivery = _record_from(result.get("delivery"))
+    delivery_metadata = _record_from(delivery.get("metadata"))
     return {**metadata, **delivery_metadata}
 
 
 def _run_delivery_route(run: dict[str, Any]) -> dict[str, Any]:
     result = _run_result(run)
-    route = result.get("deliveryRoute") if isinstance(result.get("deliveryRoute"), dict) else {}
+    route = _record_from(result.get("deliveryRoute"))
     if route:
         return route
-    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else {}
-    route = delivery.get("deliveryRoute") if isinstance(delivery.get("deliveryRoute"), dict) else {}
+    delivery = _record_from(result.get("delivery"))
+    route = _record_from(delivery.get("deliveryRoute"))
     if route:
         return route
     metadata = _run_delivery_metadata(run)
-    return metadata.get("deliveryRoute") if isinstance(metadata.get("deliveryRoute"), dict) else {}
+    return _record_from(metadata.get("deliveryRoute"))
 
 
 def _run_provider_response(run: dict[str, Any]) -> dict[str, Any]:
     result = _run_result(run)
-    response = result.get("providerResponse") if isinstance(result.get("providerResponse"), dict) else {}
+    response = _record_from(result.get("providerResponse"))
     if response:
         return response
-    delivery = result.get("delivery") if isinstance(result.get("delivery"), dict) else {}
-    response = delivery.get("providerResponse") if isinstance(delivery.get("providerResponse"), dict) else {}
+    delivery = _record_from(result.get("delivery"))
+    response = _record_from(delivery.get("providerResponse"))
     if response:
         return response
     metadata = _run_delivery_metadata(run)
-    return metadata.get("providerResponse") if isinstance(metadata.get("providerResponse"), dict) else {}
+    return _record_from(metadata.get("providerResponse"))
 
 
 def _webhook_event_result(event: dict[str, Any]) -> dict[str, Any]:
-    return event.get("result") if isinstance(event.get("result"), dict) else {}
+    return _record_from(event.get("result"))
 
 
 def _webhook_event_issue_id(event: dict[str, Any]) -> str:
@@ -1580,12 +1596,11 @@ def _webhook_event_issue_id(event: dict[str, Any]) -> str:
     issue_id = _result_text(result, "issueId", "issue_id")
     if issue_id:
         return issue_id
-    items = result.get("items") if isinstance(result.get("items"), list) else []
+    items = _records_from(result.get("items"))
     for item in items:
-        if isinstance(item, dict):
-            issue_id = _result_text(item, "issueId", "issue_id")
-            if issue_id:
-                return issue_id
+        issue_id = _result_text(item, "issueId", "issue_id")
+        if issue_id:
+            return issue_id
     return ""
 
 
@@ -1645,14 +1660,13 @@ def _launch_check_reply_id(check: dict[str, Any]) -> str:
 
 
 def _launch_with_real_channel_handoff(launch: dict[str, Any]) -> dict[str, Any]:
-    checklist = launch.get("checklist") if isinstance(launch.get("checklist"), list) else []
-    if any(isinstance(item, dict) and item.get("key") == "real_channel_handoff" for item in checklist):
+    checklist = _records_from(launch.get("checklist"))
+    if any(item.get("key") == "real_channel_handoff" for item in checklist):
         return launch
     inbound = next(
         (
             item for item in checklist
-            if isinstance(item, dict)
-            and item.get("key") == "inbound_ticket_event"
+            if item.get("key") == "inbound_ticket_event"
             and item.get("status") == "done"
             and _launch_check_issue_id(item)
         ),
@@ -1664,8 +1678,7 @@ def _launch_with_real_channel_handoff(launch: dict[str, Any]) -> dict[str, Any]:
     autopilot = next(
         (
             item for item in checklist
-            if isinstance(item, dict)
-            and item.get("key") == "channel_autopilot"
+            if item.get("key") == "channel_autopilot"
             and item.get("status") == "done"
             and _launch_check_issue_id(item) == issue_id
             and _launch_check_reply_id(item)
@@ -1701,20 +1714,19 @@ def _launch_with_real_channel_handoff(launch: dict[str, Any]) -> dict[str, Any]:
         "aiRunId": str(autopilot.get("aiRunId") or autopilot.get("ai_run_id") or ""),
     }
     updated_checklist = [step, *checklist]
-    blockers = launch.get("blockers") if isinstance(launch.get("blockers"), list) else []
-    passed = sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "done")
+    blockers = _records_from(launch.get("blockers"))
+    passed = sum(1 for item in updated_checklist if item.get("status") == "done")
     return {
         **launch,
         "checks": len(updated_checklist),
         "passed": passed,
-        "missing": sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "missing"),
-        "failed": sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "warning"),
+        "missing": sum(1 for item in updated_checklist if item.get("status") == "missing"),
+        "failed": sum(1 for item in updated_checklist if item.get("status") == "warning"),
         "ready": bool(launch.get("ready")) or (passed == len(updated_checklist) and not blockers),
         "lastCheckedAt": max(
             (
                 str(item.get("startedAt") or item.get("completedAt") or "")
                 for item in updated_checklist
-                if isinstance(item, dict)
             ),
             default=str(launch.get("lastCheckedAt") or ""),
         ),
@@ -1730,20 +1742,19 @@ def _launch_with_inbound_ticket_event(
     event = _latest_inbound_ticket_webhook_event(str(channel.get("id") or ""), webhook_events or [])
     if not event:
         return _launch_with_real_channel_handoff(launch)
-    checklist = launch.get("checklist") if isinstance(launch.get("checklist"), list) else []
-    if any(isinstance(item, dict) and item.get("key") == "inbound_ticket_event" for item in checklist):
+    checklist = _records_from(launch.get("checklist"))
+    if any(item.get("key") == "inbound_ticket_event" for item in checklist):
         return _launch_with_real_channel_handoff(launch)
     updated_checklist = [_inbound_ticket_event_step(event), *checklist]
-    passed = sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "done")
-    missing = sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "missing")
-    failed = sum(1 for item in updated_checklist if isinstance(item, dict) and item.get("status") == "warning")
-    blockers = launch.get("blockers") if isinstance(launch.get("blockers"), list) else []
+    passed = sum(1 for item in updated_checklist if item.get("status") == "done")
+    missing = sum(1 for item in updated_checklist if item.get("status") == "missing")
+    failed = sum(1 for item in updated_checklist if item.get("status") == "warning")
+    blockers = _records_from(launch.get("blockers"))
     all_done = passed == len(updated_checklist)
     last_checked = max(
         (
             str(item.get("startedAt") or item.get("completedAt") or "")
             for item in updated_checklist
-            if isinstance(item, dict)
         ),
         default=str(launch.get("lastCheckedAt") or ""),
     )
@@ -1764,7 +1775,7 @@ def _run_attachment_count(run: dict[str, Any]) -> int:
     result = _run_result(run)
     value = result.get("attachmentCount") or result.get("attachment_count")
     if value is None:
-        inbound = result.get("inbound") if isinstance(result.get("inbound"), dict) else {}
+        inbound = _record_from(result.get("inbound"))
         value = inbound.get("attachmentCount") or inbound.get("attachment_count")
     try:
         return max(0, int(value or 0))
@@ -1776,7 +1787,7 @@ def _run_file_only(run: dict[str, Any]) -> bool:
     result = _run_result(run)
     value = result.get("fileOnly") if "fileOnly" in result else result.get("file_only")
     if value is None:
-        inbound = result.get("inbound") if isinstance(result.get("inbound"), dict) else {}
+        inbound = _record_from(result.get("inbound"))
         value = inbound.get("fileOnly") if "fileOnly" in inbound else inbound.get("file_only")
     return bool(value)
 
@@ -1806,11 +1817,11 @@ def _smoke_transport(run: dict[str, Any]) -> str:
     transport = str(result.get("transport") or "").strip().lower()
     if transport:
         return transport
-    inbound = result.get("inbound") if isinstance(result.get("inbound"), dict) else {}
+    inbound = _record_from(result.get("inbound"))
     transport = str(inbound.get("transport") or "").strip().lower()
     if transport:
         return transport
-    http_result = result.get("http") if isinstance(result.get("http"), dict) else {}
+    http_result = _record_from(result.get("http"))
     if http_result:
         return "http"
     return ""
@@ -1821,7 +1832,7 @@ def _smoke_uses_provider_surface(run: dict[str, Any]) -> bool:
 
 
 def _signature_timestamp_required(channel: dict[str, Any]) -> bool:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     return _config_bool(
         config,
         "signatureTimestampRequired",
@@ -1832,7 +1843,7 @@ def _signature_timestamp_required(channel: dict[str, Any]) -> bool:
 
 
 def _signature_auth_mode_required(channel: dict[str, Any], runtime_secrets: dict[str, str] | None = None) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     channel_type = str(channel.get("type") or "").strip().lower()
     generic_signature = bool(
         config.get("signatureSecretEnv")
@@ -1880,9 +1891,9 @@ def _signature_auth_mode_required(channel: dict[str, Any], runtime_secrets: dict
 
 def _run_http_auth(run: dict[str, Any]) -> dict[str, Any]:
     result = _run_result(run)
-    http_result = result.get("http") if isinstance(result.get("http"), dict) else {}
-    inbound = result.get("inbound") if isinstance(result.get("inbound"), dict) else {}
-    inbound_http = inbound.get("http") if isinstance(inbound.get("http"), dict) else {}
+    http_result = _record_from(result.get("http"))
+    inbound = _record_from(result.get("inbound"))
+    inbound_http = _record_from(inbound.get("http"))
     for candidate in (
         result.get("auth"),
         http_result.get("auth"),
@@ -1920,7 +1931,7 @@ def _validation_run_passed(run: dict[str, Any]) -> bool:
     if not run or _run_processed(run) <= 0 or _run_failed_count(run) > 0:
         return False
     result = _run_result(run)
-    provider_validation = result.get("providerValidation") if isinstance(result.get("providerValidation"), dict) else {}
+    provider_validation = _record_from(result.get("providerValidation"))
     if not provider_validation:
         return False
     if provider_validation.get("checked") is False:
@@ -2222,7 +2233,7 @@ def _email_inbound_auth_launch_step(
     channel: dict[str, Any],
     runtime_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     signature_env = _config_text(config, "signatureSecretEnv", "webhookSignatureSecretEnv", "signature_secret_env")
     token_env = (
         _config_text(
@@ -2307,7 +2318,7 @@ def _provider_delivery_artifact_required(
     channel_type = str(channel.get("type") or "").strip().lower()
     if channel_type not in {"slack", "teams", "discord", "telegram", "line", "viber", "whatsapp", "messenger", "sms"}:
         return False
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     transport = str(config.get("outboundTransport") or config.get("outbound_transport") or "").strip().lower()
     if transport in {
         "bot",
@@ -2402,7 +2413,7 @@ def _live_smoke_target_value(value: str) -> bool:
 
 def _live_smoke_target_configured(channel: dict[str, Any]) -> tuple[bool, str]:
     channel_type = str(channel.get("type") or "").strip().lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
 
     def has_any(*keys: str) -> bool:
         return any(_live_smoke_target_value(_config_text(config, key)) for key in keys)
@@ -2565,7 +2576,7 @@ def _live_target_value(config: dict[str, Any], *keys: str) -> str:
 
 def _live_smoke_target_requirements(channel: dict[str, Any]) -> list[dict[str, str]]:
     channel_type = str(channel.get("type") or "").strip().lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     requirements: list[dict[str, str]] = []
 
     def add(key: str, label: str, value: str) -> None:
@@ -2783,7 +2794,7 @@ def _live_smoke_target_requirements(channel: dict[str, Any]) -> list[dict[str, s
 
 def _live_inbound_smoke_target_requirements(channel: dict[str, Any]) -> list[dict[str, str]]:
     channel_type = str(channel.get("type") or "").strip().lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     requirements: list[dict[str, str]] = []
 
     def add(key: str, label: str, value: str) -> None:
@@ -3295,11 +3306,9 @@ def _channel_launch_status(
 def _channel_launch_status_from_proof(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not item:
         return None
-    raw_checklist = item.get("checklist") if isinstance(item.get("checklist"), list) else []
-    checklist = []
+    raw_checklist = _records_from(item.get("checklist"))
+    checklist: list[dict[str, Any]] = []
     for check in raw_checklist:
-        if not isinstance(check, dict):
-            continue
         key = str(check.get("key") or "")
         checklist.append({
             "key": key,
@@ -3362,9 +3371,9 @@ def _channel_launch_status_from_proof(item: dict[str, Any] | None) -> dict[str, 
 
 
 def _channel_install_package(channel: dict[str, Any], ctx: ProjectViewerDep, setup: dict[str, Any]) -> dict[str, Any]:
-    env_vars = setup.get("envVars") if isinstance(setup.get("envVars"), list) else []
-    checklist = setup.get("setupChecklist") if isinstance(setup.get("setupChecklist"), list) else []
-    provider_steps = setup.get("providerSteps") if isinstance(setup.get("providerSteps"), list) else []
+    env_vars = _records_from(setup.get("envVars"))
+    checklist = _records_from(setup.get("setupChecklist"))
+    provider_steps = _list_from(setup.get("providerSteps"))
     package: dict[str, Any] = {
         "version": 1,
         "projectId": ctx.project_id,
@@ -3527,10 +3536,10 @@ def _channel_lifecycle_smoke_command(
 
 def _channel_launch_playbook(channel: dict[str, Any], setup: dict[str, Any], project_id: str = "<project-id>") -> list[dict[str, str]]:
     channel_type = str(channel.get("type") or "").strip().lower()
-    launch = setup.get("launch") if isinstance(setup.get("launch"), dict) else {}
-    launch_checklist = setup.get("launchChecklist") if isinstance(setup.get("launchChecklist"), list) else []
-    launch_blockers = launch.get("blockers") if isinstance(launch.get("blockers"), list) else []
-    setup_health = setup.get("health") if isinstance(setup.get("health"), dict) else {}
+    launch = _record_from(setup.get("launch"))
+    launch_checklist = _records_from(setup.get("launchChecklist"))
+    launch_blockers = _records_from(launch.get("blockers"))
+    setup_health = _record_from(setup.get("health"))
     missing_env_vars = setup_health.get("requiredMissingEnvVars")
     if not isinstance(missing_env_vars, list):
         missing_env_vars = []
@@ -3546,13 +3555,13 @@ def _channel_launch_playbook(channel: dict[str, Any], setup: dict[str, Any], pro
 
     def _launch_status(*keys: str) -> str:
         for check in launch_checklist:
-            if isinstance(check, dict) and str(check.get("key") or "") in keys:
+            if str(check.get("key") or "") in keys:
                 return str(check.get("status") or "")
         return ""
 
     def _has_blocker(*keys: str) -> bool:
         return any(
-            isinstance(blocker, dict) and str(blocker.get("key") or blocker.get("action") or "") in keys
+            str(blocker.get("key") or blocker.get("action") or "") in keys
             for blocker in launch_blockers
         )
 
@@ -3816,7 +3825,7 @@ def _channel_launch_playbook(channel: dict[str, Any], setup: dict[str, Any], pro
             run_action="lifecycle_smoke",
             smoke_command=_channel_lifecycle_smoke_command(channel, project_id),
         ))
-        if any(isinstance(check, dict) and str(check.get("key") or "") == "attachment_lifecycle_smoke" for check in launch_checklist):
+        if any(str(check.get("key") or "") == "attachment_lifecycle_smoke" for check in launch_checklist):
             playbook.append(_playbook_step(
                 "attachment_lifecycle_proof",
                 "Run attachment lifecycle smoke",
@@ -3860,7 +3869,7 @@ def _slack_app_manifest(
     ctx: ProjectViewerDep,
     secrets: dict[str, str] | None,
 ) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     scopes = _slack_manifest_scopes(config, secrets)
     bot_events = _slack_manifest_bot_events(config)
     if "app_mention" in bot_events and "app_mentions:read" not in scopes:
@@ -3908,7 +3917,7 @@ def _validation_url_template(url: str) -> str:
 
 
 def _teams_bridge_config(channel: dict[str, Any], setup: dict[str, Any], ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     app_id_env, app_password_env = _teams_app_credential_envs(config)
     activity_types = _config_list(config, "activityTypes", "activity_types") or ["message"]
     token_env = str(setup.get("providerTokenEnv") or setup.get("tokenEnv") or "SUPPORT_TEAMS_WEBHOOK_TOKEN")
@@ -3994,7 +4003,7 @@ def _teams_bridge_config(channel: dict[str, Any], setup: dict[str, Any], ctx: Pr
 
 
 def _discord_bridge_config(channel: dict[str, Any], setup: dict[str, Any], ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     bot_token_env = str(config.get("discordBotTokenEnv") or config.get("discord_bot_token_env") or "SUPPORT_DISCORD_BOT_TOKEN").strip()
     gateway_intents = _config_list(config, "gatewayIntents", "gateway_intents") or [
         "Guilds",
@@ -4094,7 +4103,7 @@ def _discord_bridge_config(channel: dict[str, Any], setup: dict[str, Any], ctx: 
 
 
 def _telegram_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     bot_token_env = _telegram_bot_token_env(config)
     secret_token_env = str(setup.get("providerSecretEnv") or _telegram_secret_token_env(config))
     secret_header = str(setup.get("providerSecretHeader") or "X-Telegram-Bot-Api-Secret-Token")
@@ -4149,7 +4158,7 @@ def _telegram_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ct
 
 
 def _line_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     channel_secret_env = _line_channel_secret_env(config)
     channel_access_token_env = _line_channel_access_token_env(config)
     provider_url = str(setup.get("providerWebhookUrl") or "")
@@ -4195,7 +4204,7 @@ def _line_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: P
 
 
 def _viber_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     auth_token_env = _viber_auth_token_env(config)
     provider_url = str(setup.get("providerWebhookUrl") or "")
     payload_example = {
@@ -4247,7 +4256,7 @@ def _viber_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: 
 
 
 def _whatsapp_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     verify_token_env = str(
         config.get("whatsappVerifyTokenEnv")
         or config.get("whatsapp_verify_token_env")
@@ -4322,7 +4331,7 @@ def _whatsapp_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ct
 
 
 def _messenger_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     verify_token_env = str(
         config.get("messengerVerifyTokenEnv")
         or config.get("messenger_verify_token_env")
@@ -4379,7 +4388,7 @@ def _messenger_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _c
 
 
 def _instagram_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     verify_token_env = str(
         config.get("instagramVerifyTokenEnv")
         or config.get("instagram_verify_token_env")
@@ -4435,7 +4444,7 @@ def _instagram_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _c
 
 
 def _twitter_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     consumer_secret_env = _twitter_consumer_secret_env(config)
     bearer_token_env = _twitter_bearer_token_env(config)
     user_access_token_env = _twitter_user_access_token_env(config)
@@ -4638,7 +4647,7 @@ def _meta_bridge_config(
 
 
 def _twilio_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     provider_url = str(setup.get("providerWebhookUrl") or "")
     sms_url = str(setup.get("smsWebhookUrl") or "")
     payload_example = {
@@ -4702,7 +4711,7 @@ def _twilio_webhook_config(channel: dict[str, Any], setup: dict[str, Any], _ctx:
 
 
 def _email_webhook_config(channel: dict[str, Any], setup: dict[str, Any], ctx: ProjectViewerDep) -> dict[str, Any]:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     provider_url = str(setup.get("providerWebhookUrl") or setup.get("emailWebhookUrl") or "")
     payload_example = {
         "projectId": ctx.project_id,
@@ -4765,7 +4774,7 @@ def _channel_setup(
     encoded_key = quote(channel_key, safe="")
     query = _scoped_query(ctx)
     channel_type = str(channel.get("type") or "").strip().lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     runtime_secrets = load_runtime_secrets(ctx.tenant_id, ctx.project_id) or {}
     signature_header = str(config.get("signatureHeader") or config.get("signature_header") or "X-Support-Signature").strip()
     signature_env = str(
@@ -5547,7 +5556,7 @@ def _channel_setup(
         )
         bearer_token_env = _twitter_bearer_token_env(config)
         user_access_token_env = _twitter_user_access_token_env(config)
-        user_id, user_id_env = _twitter_user_id(config, runtime_secrets)
+        _user_id, user_id_env = _twitter_user_id(config, runtime_secrets)
         auth_configured = (
             _env_present(twitter_signature_env, runtime_secrets)
             if twitter_signature_configured
@@ -5822,12 +5831,10 @@ def _safe_support_launch_items(ctx: ProjectViewerDep) -> dict[str, dict[str, Any
         proof = support_launch_proof(tenant_id=ctx.tenant_id, project_id=ctx.project_id)
     except Exception:
         return {}
-    channels = proof.get("channels") if isinstance(proof.get("channels"), dict) else {}
-    items = channels.get("items") if isinstance(channels.get("items"), list) else []
+    channels = _record_from(proof.get("channels"))
+    items = _records_from(channels.get("items"))
     result: dict[str, dict[str, Any]] = {}
     for item in items:
-        if not isinstance(item, dict):
-            continue
         channel_id = str(item.get("channelId") or "")
         if channel_id:
             result[channel_id] = item
@@ -5873,7 +5880,7 @@ def _activation_target_row(
 
 def _activation_live_target_rows(channel: dict[str, Any]) -> list[dict[str, Any]]:
     channel_type = _surface_channel_type(str(channel.get("type") or ""))
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     if channel_type == "slack":
         return [
             _activation_target_row(
@@ -5995,8 +6002,8 @@ def _activation_live_target_rows(channel: dict[str, Any]) -> list[dict[str, Any]
 
 
 def _activation_env_vars(channel: dict[str, Any] | None, preset: dict[str, Any]) -> list[dict[str, Any]]:
-    setup = channel.get("setup") if isinstance(channel, dict) and isinstance(channel.get("setup"), dict) else {}
-    env_vars = setup.get("envVars") if isinstance(setup.get("envVars"), list) else []
+    setup = _record_from(channel.get("setup")) if channel is not None else {}
+    env_vars = _records_from(setup.get("envVars"))
     if env_vars:
         return [
             {
@@ -6006,12 +6013,11 @@ def _activation_env_vars(channel: dict[str, Any] | None, preset: dict[str, Any])
                 "configured": bool(item.get("configured")),
             }
             for item in env_vars
-            if isinstance(item, dict) and str(item.get("name") or "").strip()
+            if str(item.get("name") or "").strip()
         ]
     preset_envs = []
     for key in ("authEnvVars", "outboundEnvVars"):
-        values = preset.get(key) if isinstance(preset.get(key), list) else []
-        preset_envs.extend(item for item in values if isinstance(item, dict))
+        preset_envs.extend(_records_from(preset.get(key)))
     return [
         {
             "name": str(item.get("name") or ""),
@@ -6046,7 +6052,7 @@ def _activation_setup_package(setup: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _activation_provider_steps(surface_type: str, config: dict[str, Any], setup: dict[str, Any]) -> list[str]:
-    setup_steps = setup.get("providerSteps") if isinstance(setup.get("providerSteps"), list) else []
+    setup_steps = _list_from(setup.get("providerSteps"))
     steps = [str(item).strip() for item in setup_steps if str(item).strip()]
     return steps or _provider_steps(surface_type, config)
 
@@ -6117,9 +6123,9 @@ def _activation_runbook_phase(
 
 def _activation_surface_item(surface_type: str, label: str, channel: dict[str, Any] | None) -> dict[str, Any]:
     preset = _channel_preset("web_chat" if surface_type == "chat" else surface_type)
-    setup = channel.get("setup") if isinstance(channel, dict) and isinstance(channel.get("setup"), dict) else {}
-    config = channel.get("config") if isinstance(channel, dict) and isinstance(channel.get("config"), dict) else {}
-    health = setup.get("health") if isinstance(setup.get("health"), dict) else {}
+    setup = _record_from(channel.get("setup")) if channel is not None else {}
+    config = _record_from(channel.get("config")) if channel is not None else {}
+    health = _record_from(setup.get("health"))
     ticket_mode = str(setup.get("ticketCreationMode") or config.get("ticketCreationMode") or config.get("ticket_creation_mode") or preset.get("ticketCreationMode") or "per_message")
     inbound_ready = bool(health.get("inboundReady")) if "inboundReady" in health else bool(setup.get("inboundReady"))
     outbound_ready = bool(health.get("outboundReady")) if "outboundReady" in health else bool(setup.get("outboundReady"))
@@ -6130,7 +6136,7 @@ def _activation_surface_item(surface_type: str, label: str, channel: dict[str, A
     agent_auto_send = bool(setup.get("agentAutoSend")) if "agentAutoSend" in setup else _config_bool(config, "agentAutoSend", "agent_auto_send")
     human_review = not agent_auto_send
     owner_routing = bool(_config_text(config, "defaultAssigneeEmail", "default_assignee_email") or _config_text(config, "defaultQueueKey", "default_queue_key") or preset.get("defaultQueueKey"))
-    launch = setup.get("launch") if isinstance(setup.get("launch"), dict) else {}
+    launch = _record_from(setup.get("launch"))
     launch_required = bool(launch.get("required")) if "required" in launch else (bool(channel) and _channel_requires_launch_smoke(surface_type))
     launch_ready = (not launch_required) or bool(launch.get("ready"))
     channel_status = str(channel.get("status") or "") if isinstance(channel, dict) else ""
@@ -6138,9 +6144,9 @@ def _activation_surface_item(surface_type: str, label: str, channel: dict[str, A
     missing_live_targets = [row["configKey"] for row in live_targets if row.get("required") and not row.get("configured")]
     automation_ready = auto_prepare_triage and auto_prepare_custom_fields and auto_draft and auto_follow_up and human_review
     ready = bool(channel and channel_status == "active" and inbound_ready and outbound_ready and automation_ready and ticket_mode == "per_message" and owner_routing and launch_ready)
-    launch_blockers = launch.get("blockers") if isinstance(launch.get("blockers"), list) else []
+    launch_blockers = _records_from(launch.get("blockers"))
     launch_blocker_detail = next(
-        (str(item.get("detail") or item.get("label") or "") for item in launch_blockers if isinstance(item, dict) and (item.get("detail") or item.get("label"))),
+        (str(item.get("detail") or item.get("label") or "") for item in launch_blockers if item.get("detail") or item.get("label")),
         "",
     )
     blockers = [
@@ -6160,22 +6166,22 @@ def _activation_surface_item(surface_type: str, label: str, channel: dict[str, A
     env_vars = _activation_env_vars(channel, preset)
     missing_env_vars = [item["name"] for item in env_vars if not item["configured"]]
     required_missing_env_vars = [item["name"] for item in env_vars if item["required"] and not item["configured"]]
-    setup_checklist = setup.get("setupChecklist") if isinstance(setup.get("setupChecklist"), list) else []
-    launch_checklist = setup.get("launchChecklist") if isinstance(setup.get("launchChecklist"), list) else launch.get("checklist") if isinstance(launch.get("checklist"), list) else []
-    playbook = setup.get("launchPlaybook") if isinstance(setup.get("launchPlaybook"), list) else []
+    setup_checklist = _records_from(setup.get("setupChecklist"))
+    launch_checklist = _records_from(setup.get("launchChecklist") or launch.get("checklist"))
+    playbook = _records_from(setup.get("launchPlaybook"))
     setup_package = _activation_setup_package(setup)
     all_blockers = [
         {"key": "channel_surface", "label": detail, "detail": detail, "status": "missing", "action": ""}
         for detail in blockers
         if detail
     ]
-    all_blockers.extend(item for item in launch_blockers if isinstance(item, dict))
-    all_blockers.extend(item for item in launch_checklist if isinstance(item, dict) and item.get("status") != "done")
-    all_blockers.extend(item for item in setup_checklist if isinstance(item, dict) and item.get("status") != "done")
+    all_blockers.extend(launch_blockers)
+    all_blockers.extend(item for item in launch_checklist if item.get("status") != "done")
+    all_blockers.extend(item for item in setup_checklist if item.get("status") != "done")
     launch_commands = [
         {"key": str(item.get("key") or ""), "label": str(item.get("label") or ""), "command": str(item.get("smokeCommand") or "")}
         for item in playbook
-        if isinstance(item, dict) and str(item.get("smokeCommand") or "").strip()
+        if str(item.get("smokeCommand") or "").strip()
     ]
     config_blockers = [
         blocker
@@ -6300,7 +6306,7 @@ def _activation_surface_item(surface_type: str, label: str, channel: dict[str, A
 
 
 def _activation_next_action(item: dict[str, Any], index: int) -> dict[str, Any] | None:
-    surface = item.get("surface") if isinstance(item.get("surface"), dict) else {}
+    surface = _record_from(item.get("surface"))
     channel = item.get("channel") if isinstance(item.get("channel"), dict) else None
     label = str(surface.get("label") or surface.get("type") or "Channel")
     surface_type = str(surface.get("type") or "")
@@ -6322,7 +6328,7 @@ def _activation_next_action(item: dict[str, Any], index: int) -> dict[str, Any] 
             "liveTargets": [],
         }
 
-    env = item.get("environment") if isinstance(item.get("environment"), dict) else {}
+    env = _record_from(item.get("environment"))
     missing_env = list(dict.fromkeys(str(name) for name in env.get("requiredMissing", []) if name))
     if missing_env:
         shown = ", ".join(missing_env[:3])
@@ -6338,7 +6344,7 @@ def _activation_next_action(item: dict[str, Any], index: int) -> dict[str, Any] 
             "liveTargets": [],
         }
 
-    launch = item.get("launch") if isinstance(item.get("launch"), dict) else {}
+    launch = _record_from(item.get("launch"))
     missing_targets = [str(name) for name in launch.get("missingLiveTargets", []) if name]
     if missing_targets:
         return {
@@ -6352,8 +6358,8 @@ def _activation_next_action(item: dict[str, Any], index: int) -> dict[str, Any] 
             "liveTargets": missing_targets,
         }
 
-    ticketing = item.get("ticketing") if isinstance(item.get("ticketing"), dict) else {}
-    automation = item.get("automation") if isinstance(item.get("automation"), dict) else {}
+    ticketing = _record_from(item.get("ticketing"))
+    automation = _record_from(item.get("automation"))
     config_gaps = [
         "ticketCreationMode" if not ticketing.get("everyMessage") else "",
         "ownerRouting" if not ticketing.get("ownerRouting") else "",
@@ -6432,7 +6438,7 @@ def _channel_activation_backlog(
         phase: sum(1 for action in next_actions if action["phase"] == phase)
         for phase in ("create", "secrets", "targets", "config", "activate", "proof")
     }
-    payload = {
+    payload: dict[str, Any] = {
         "kind": "support_channel_activation_backlog",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "projectId": project_id,
@@ -6496,14 +6502,14 @@ def _channel_activation_adapter_matrix(backlog: dict[str, Any]) -> list[dict[str
     for item in backlog.get("surfaces", []):
         if not isinstance(item, dict):
             continue
-        surface = item.get("surface") if isinstance(item.get("surface"), dict) else {}
-        channel = item.get("channel") if isinstance(item.get("channel"), dict) else {}
-        ticketing = item.get("ticketing") if isinstance(item.get("ticketing"), dict) else {}
-        automation = item.get("automation") if isinstance(item.get("automation"), dict) else {}
-        inbound = item.get("inbound") if isinstance(item.get("inbound"), dict) else {}
-        outbound = item.get("outbound") if isinstance(item.get("outbound"), dict) else {}
-        environment = item.get("environment") if isinstance(item.get("environment"), dict) else {}
-        launch = item.get("launch") if isinstance(item.get("launch"), dict) else {}
+        surface = _record_from(item.get("surface"))
+        channel = _record_from(item.get("channel"))
+        ticketing = _record_from(item.get("ticketing"))
+        automation = _record_from(item.get("automation"))
+        inbound = _record_from(item.get("inbound"))
+        outbound = _record_from(item.get("outbound"))
+        environment = _record_from(item.get("environment"))
+        launch = _record_from(item.get("launch"))
         surface_type = str(surface.get("type") or "")
         next_action = next_by_surface.get(surface_type, {})
         rows.append({
@@ -6564,8 +6570,8 @@ def _channel_activation_adapter_matrix(backlog: dict[str, Any]) -> list[dict[str
 def _channel_activation_secret_groups(surfaces: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
     for item in surfaces:
-        surface = item.get("surface") if isinstance(item.get("surface"), dict) else {}
-        environment = item.get("environment") if isinstance(item.get("environment"), dict) else {}
+        surface = _record_from(item.get("surface"))
+        environment = _record_from(item.get("environment"))
         env_vars: list[str] = []
         seen: set[str] = set()
         for name in _activation_text_list(environment.get("requiredMissing")):
@@ -6609,14 +6615,14 @@ def _channel_activation_plan(*, project_id: str, backlog: dict[str, Any]) -> dic
     })
     surfaces: list[dict[str, Any]] = []
     for item in backlog_surfaces:
-        surface = item.get("surface") if isinstance(item.get("surface"), dict) else {}
-        channel = item.get("channel") if isinstance(item.get("channel"), dict) else {}
-        ticketing = item.get("ticketing") if isinstance(item.get("ticketing"), dict) else {}
-        automation = item.get("automation") if isinstance(item.get("automation"), dict) else {}
-        inbound = item.get("inbound") if isinstance(item.get("inbound"), dict) else {}
-        outbound = item.get("outbound") if isinstance(item.get("outbound"), dict) else {}
-        environment = item.get("environment") if isinstance(item.get("environment"), dict) else {}
-        launch = item.get("launch") if isinstance(item.get("launch"), dict) else {}
+        surface = _record_from(item.get("surface"))
+        channel = _record_from(item.get("channel"))
+        ticketing = _record_from(item.get("ticketing"))
+        automation = _record_from(item.get("automation"))
+        inbound = _record_from(item.get("inbound"))
+        outbound = _record_from(item.get("outbound"))
+        environment = _record_from(item.get("environment"))
+        launch = _record_from(item.get("launch"))
         surface_type = str(surface.get("type") or "")
         surfaces.append({
             "surfaceType": surface_type,
@@ -6682,7 +6688,7 @@ def _channel_activation_plan(*, project_id: str, backlog: dict[str, Any]) -> dic
 
 
 def _preset_bootstrap_config(preset: dict[str, Any], actor_email: str) -> dict[str, Any]:
-    config = dict(preset.get("config") if isinstance(preset.get("config"), dict) else {})
+    config = dict(_record_from(preset.get("config")))
     config["ticketCreationMode"] = "per_message"
     config["autoPrepareTriage"] = True
     config["autoPrepareCustomFields"] = True
@@ -6907,7 +6913,7 @@ def _activate_ready_channel_surface_setups(
                 "reason": "not_found",
             })
             continue
-        config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+        config = _record_from(channel.get("config"))
         updated = upsert_channel(
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
@@ -7055,7 +7061,7 @@ def _provider_validation_remediation(
     provider = str(provider_validation.get("provider") or "provider")
     detail = str(provider_validation.get("detail") or "").strip()
     lower_detail = detail.lower()
-    env_vars = provider_validation.get("envVars") if isinstance(provider_validation.get("envVars"), list) else []
+    env_vars = _list_from(provider_validation.get("envVars"))
     token_env = str(provider_validation.get("tokenEnv") or "").strip()
     env_names = [str(name) for name in [*env_vars, token_env] if str(name).strip()]
     items: list[dict[str, str]] = []
@@ -7178,7 +7184,7 @@ def _setup_remediation(
                     setup.get("outboundWebhookUrlEnv"),
                     setup.get("outboundWebhookTokenEnv"),
                     setup.get("outboundBotTokenEnv"),
-                    *(setup.get("outboundBotCredentialEnvVars") if isinstance(setup.get("outboundBotCredentialEnvVars"), list) else []),
+                    *_list_from(setup.get("outboundBotCredentialEnvVars")),
                 ]
                 if str(value or "").strip()
             )
@@ -7198,8 +7204,8 @@ def _setup_remediation(
 
 
 def _smoke_remediation(result: dict[str, Any], *, phase: str) -> list[dict[str, str]]:
-    validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
-    items = list(validation.get("remediation") if isinstance(validation.get("remediation"), list) else [])
+    validation = _record_from(result.get("validation"))
+    items = _records_from(validation.get("remediation"))
     error = str(result.get("error") or "")
     if phase == "inbound" and not str(result.get("issueId") or ""):
         items.append(_remediation_step(
@@ -7309,7 +7315,7 @@ def _telegram_provider_validation(config: dict[str, Any], secrets: dict[str, str
     if not isinstance(data, dict) or data.get("ok") is not True:
         detail = data.get("description") or data.get("error") if isinstance(data, dict) else "Telegram auth failed"
         return _provider_validation_error("telegram", str(detail))
-    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    result = _record_from(data.get("result"))
     identity = {
         key: result.get(key)
         for key in ("id", "username", "first_name")
@@ -7753,7 +7759,7 @@ def _twilio_provider_validation(config: dict[str, Any], secrets: dict[str, str] 
 
 def _provider_validation(channel: dict[str, Any], setup: dict[str, Any], secrets: dict[str, str] | None) -> dict[str, Any]:
     channel_type = str(channel.get("type") or "").strip().lower()
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     if channel_type == "slack":
         return _slack_provider_validation(config, setup, secrets)
     if channel_type == "teams":
@@ -7822,9 +7828,9 @@ def _slack_oauth_success_page(team_name: str, channel_key: str) -> HTMLResponse:
 
 
 def _merge_slack_channel_config(existing: dict[str, Any] | None, install: dict[str, Any], channel_key: str) -> dict[str, Any]:
-    existing_config = existing.get("config") if isinstance(existing, dict) and isinstance(existing.get("config"), dict) else {}
-    team = install.get("team") if isinstance(install.get("team"), dict) else {}
-    enterprise = install.get("enterprise") if isinstance(install.get("enterprise"), dict) else {}
+    existing_config = _record_from(existing.get("config")) if existing is not None else {}
+    team = _record_from(install.get("team"))
+    enterprise = _record_from(install.get("enterprise"))
     return {
         **existing_config,
         "adapter": "slack",
@@ -7868,7 +7874,7 @@ def _store_slack_install(
     update_project_secrets(project_id, {**current_secrets, "SUPPORT_SLACK_BOT_TOKEN": access_token})
     existing = get_channel_by_key(channel_key, tenant_id=tenant_id, project_id=project_id)
     config = _merge_slack_channel_config(existing, install, channel_key)
-    team = install.get("team") if isinstance(install.get("team"), dict) else {}
+    team = _record_from(install.get("team"))
     channel_name = name.strip() or str(team.get("name") or "Slack")
     return upsert_channel(
         tenant_id=tenant_id,
@@ -7926,8 +7932,8 @@ def _channel_setup_validation(channel: dict[str, Any], ctx: ProjectViewerDep, re
     )
     runtime_secrets = load_runtime_secrets(ctx.tenant_id, ctx.project_id) or {}
     provider_validation = _provider_validation(channel, setup, runtime_secrets)
-    checks = setup.get("setupChecklist") if isinstance(setup.get("setupChecklist"), list) else []
-    env_vars = setup.get("envVars") if isinstance(setup.get("envVars"), list) else []
+    checks = _records_from(setup.get("setupChecklist"))
+    env_vars = _records_from(setup.get("envVars"))
     missing_checks = [check for check in checks if check.get("status") == "missing"]
     warning_checks = [check for check in checks if check.get("status") == "warning"]
     manual_checks = [check for check in checks if check.get("status") == "manual"]
@@ -7982,16 +7988,8 @@ def _record_validation_run(
     channel_id = str(channel.get("id") or validation.get("channelId") or "")
     if not channel_id:
         return ""
-    provider_validation = (
-        validation.get("providerValidation")
-        if isinstance(validation.get("providerValidation"), dict)
-        else {}
-    )
-    remediation = (
-        validation.get("remediation")
-        if isinstance(validation.get("remediation"), list)
-        else []
-    )
+    provider_validation = _record_from(validation.get("providerValidation"))
+    remediation = _records_from(validation.get("remediation"))
     ready = bool(validation.get("ready"))
     detail = str(provider_validation.get("detail") or "").strip()
     result = {
@@ -8004,7 +8002,7 @@ def _record_validation_run(
         "error": "" if ready else detail,
         "providerValidation": provider_validation,
         "remediation": remediation,
-        "summary": validation.get("summary") if isinstance(validation.get("summary"), dict) else {},
+        "summary": _record_from(validation.get("summary")),
         "proof": {
             "kind": "provider_validation",
             "channelId": channel_id,
@@ -8046,7 +8044,7 @@ def _smoke_attachments(items: list[dict[str, Any]] | None) -> list[dict[str, Any
         base64_payload = str(raw.get("base64") or raw.get("contentBase64") or raw.get("content_base64") or "").strip()
         size_value = raw.get("size") or raw.get("sizeBytes") or raw.get("size_bytes") or raw.get("fileSize") or raw.get("file_size")
         try:
-            size = int(size_value)
+            size = int(size_value) if size_value is not None else 0
         except (TypeError, ValueError):
             size = 0
         if not filename and attachment_id:
@@ -8167,7 +8165,7 @@ def _generic_test_message_payload(channel_key: str, channel_type: str, body: Cha
     message_id = body.message_id.strip() or event_id
     provider = body.provider.strip() or channel_type or "webhook"
     attachments = _smoke_attachments(body.attachments)
-    payload = {
+    payload: dict[str, Any] = {
         "eventId": event_id,
         "eventType": "message_created",
         "provider": provider,
@@ -8268,7 +8266,7 @@ def _provider_smoke_payload(channel_key: str, channel_type: str, body: ChannelTe
             message_id,
         )
     if channel_type == "discord":
-        data = {
+        data: dict[str, Any] = {
             "id": message_id,
             "channel_id": channel_ref or f"discord-channel-{channel_key}",
             "guild_id": "discord-guild-admin-smoke",
@@ -8914,7 +8912,7 @@ async def configure_telegram_webhook(
         raise HTTPException(status_code=404, detail="Channel not found")
     if str(channel.get("type") or "").strip().lower() != "telegram":
         raise HTTPException(status_code=400, detail="Channel is not a Telegram channel")
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record_from(channel.get("config"))
     runtime_secrets = load_runtime_secrets(ctx.tenant_id, ctx.project_id) or {}
     setup = _channel_setup(channel, ctx, request)
     webhook_url = str(setup.get("providerWebhookUrl") or "").strip()
@@ -9195,7 +9193,7 @@ def _run_channel_smoke(
     if transport == "http":
         result, http_result = _post_smoke_http(
             provider,
-            validation.get("setup") if isinstance(validation.get("setup"), dict) else {},
+            _record_from(validation.get("setup")),
             payload,
             load_runtime_secrets(ctx.tenant_id, ctx.project_id) or {},
         )
@@ -9702,7 +9700,7 @@ def _email_lifecycle_result(
 ) -> dict[str, Any]:
     failed = not sent and not deferred
     delivery = delivery if isinstance(delivery, dict) else {}
-    delivery_metadata = delivery.get("metadata") if isinstance(delivery.get("metadata"), dict) else {}
+    delivery_metadata = _record_from(delivery.get("metadata"))
     result = {
         "channelId": channel.get("id", ""),
         "channelKey": str(channel.get("channelKey") or ""),
@@ -9754,7 +9752,7 @@ def _run_email_channel_lifecycle_smoke(
         raise ValueError("Reply body is required")
 
     validation = _channel_setup_validation(channel, ctx, request)
-    setup = validation.get("setup") if isinstance(validation.get("setup"), dict) else {}
+    setup = _record_from(validation.get("setup"))
     if not bool(setup.get("authConfigured")):
         raise ValueError("Configure email inbound webhook token, fallback sync token, or HMAC signature before lifecycle proof")
     message_id = body.message_id.strip() or f"admin-email-lifecycle-{uuid4().hex}"
@@ -9782,12 +9780,10 @@ def _run_email_channel_lifecycle_smoke(
             },
         },
     )
-    items = inbound.get("items") if isinstance(inbound.get("items"), list) else []
+    items = _records_from(inbound.get("items"))
     issue_id = ""
     result_message_id = message_id
     for item in items:
-        if not isinstance(item, dict):
-            continue
         issue_id = issue_id or str(item.get("issueId") or "").strip()
         result_message_id = str(item.get("messageId") or result_message_id)
     if not issue_id:
@@ -9956,9 +9952,9 @@ def _run_channel_lifecycle_smoke(
     )
     issue_id = str(inbound.get("issueId") or "").strip()
     if not issue_id:
-        inbound_items = inbound.get("items") if isinstance(inbound.get("items"), list) else []
+        inbound_items = _records_from(inbound.get("items"))
         for item in inbound_items:
-            if isinstance(item, dict) and str(item.get("issueId") or "").strip():
+            if str(item.get("issueId") or "").strip():
                 issue_id = str(item.get("issueId") or "").strip()
                 break
     base_result: dict[str, Any] = {
@@ -10056,7 +10052,7 @@ def _run_channel_lifecycle_smoke(
     deferred = status == "queued"
     failed = status not in {"sent", "queued"}
     error = str(delivered.get("error") or "")
-    delivery_metadata = delivered.get("metadata") if isinstance(delivered.get("metadata"), dict) else {}
+    delivery_metadata = _record_from(delivered.get("metadata"))
     result = {
         **base_result,
         "replyId": reply_id,

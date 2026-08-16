@@ -6,13 +6,18 @@ name: mantly-community
 services:
   pocketbase-volume-permissions:
     image: ghcr.io/olsommer/mantly-pocketbase:${MANTLY_VERSION:-local}
+    # Same build as the pocketbase service. The shipped MANTLY_VERSION default
+    # is "local", which is built here and never published to the registry.
+    build:
+      context: .
+      dockerfile: pocketbase/Dockerfile
     user: "0:0"
     entrypoint: ["/usr/bin/chown"]
     command: ["-R", "10001:10001", "/pb/pb_data"]
     network_mode: "none"
     read_only: true
     cap_drop: ["ALL"]
-    cap_add: ["CHOWN"]
+    cap_add: ["CHOWN", "DAC_READ_SEARCH"]
     security_opt: ["no-new-privileges:true"]
     volumes:
       - community_pb_data:/pb/pb_data

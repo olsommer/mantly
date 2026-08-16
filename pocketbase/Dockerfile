@@ -30,7 +30,10 @@ COPY THIRD_PARTY_NOTICES.md /usr/share/doc/mantly/THIRD_PARTY_NOTICES.md
 COPY third_party/pocketbase/LICENSE /usr/share/licenses/pocketbase/LICENSE
 
 COPY pocketbase/start.sh /start.sh
-RUN chmod +x /start.sh && chown -R mantly:mantly /pb/pb_data
+# Own all of /pb, not just pb_data. PocketBase runs with automigrate enabled
+# and writes new files into /pb/pb_migrations as uid 10001, which fails with
+# EACCES while that directory is still root-owned.
+RUN chmod +x /start.sh && chown -R mantly:mantly /pb
 
 USER mantly:mantly
 

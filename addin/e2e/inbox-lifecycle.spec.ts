@@ -44,18 +44,15 @@ test.describe('Admin Inbox lifecycle', () => {
     expect(createdIssue.id).toBeTruthy();
     await expect(page.getByRole('heading', { name: 'Deterministic delivery request' })).toBeVisible();
 
-    // A freshly created ticket is already unassigned, so Unassign is correctly
-    // disabled. Assert that starting state instead of trying to unassign twice.
-    await expect(page.locator('[data-ticket-assignee-current=""]').last()).toBeVisible();
+    // Creating a ticket claims it: POST /issues falls back to the caller when
+    // no assignee is supplied, and the dialog does not set one. Both assignment
+    // controls are correctly inert in that state, because an open ticket
+    // requires an assignee and this one is already assigned to the current user.
+    await expect(
+      page.locator(`[data-ticket-assignee-current="${AUTH_E2E.bootstrapAdminEmail}"]`).last(),
+    ).toBeVisible();
     await expect(page.getByRole('button', { name: 'Unassign' }).last()).toBeDisabled();
-
-    const claimRequest = page.waitForResponse((response) => (
-      response.url().endsWith(`/issues/${createdIssue.id}`)
-      && response.request().method() === 'PATCH'
-    ));
-    await page.getByRole('button', { name: 'Assign to me' }).last().click();
-    expect((await claimRequest).status()).toBe(200);
-    await expect(page.locator(`[data-ticket-assignee-current="${AUTH_E2E.bootstrapAdminEmail}"]`).last()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Assign to me' }).last()).toBeDisabled();
 
     const replyDraft = page.locator('[data-ticket-reply-draft]').last();
     await replyDraft.fill('Initial response awaiting human approval.');

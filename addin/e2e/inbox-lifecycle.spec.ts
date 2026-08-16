@@ -44,13 +44,10 @@ test.describe('Admin Inbox lifecycle', () => {
     expect(createdIssue.id).toBeTruthy();
     await expect(page.getByRole('heading', { name: 'Deterministic delivery request' })).toBeVisible();
 
-    const unassignRequest = page.waitForResponse((response) => (
-      response.url().endsWith(`/issues/${createdIssue.id}`)
-      && response.request().method() === 'PATCH'
-    ));
-    await page.getByRole('button', { name: 'Unassign' }).last().click();
-    expect((await unassignRequest).status()).toBe(200);
+    // A freshly created ticket is already unassigned, so Unassign is correctly
+    // disabled. Assert that starting state instead of trying to unassign twice.
     await expect(page.locator('[data-ticket-assignee-current=""]').last()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Unassign' }).last()).toBeDisabled();
 
     const claimRequest = page.waitForResponse((response) => (
       response.url().endsWith(`/issues/${createdIssue.id}`)

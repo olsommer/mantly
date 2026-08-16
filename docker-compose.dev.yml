@@ -15,7 +15,7 @@
 #   cd admin    && npm run dev   → http://localhost:5174
 
 services:
-  isarai:
+  mantly:
     build: .
     ports:
       - "8080:8080"   # FastAPI
@@ -48,7 +48,7 @@ services:
     volumes:
       # Mount source so uvicorn --reload picks up Python changes immediately
       - ./backend/automail:/app/backend/automail:ro
-      - isarai_dev_data:/app/data
+      - mantly_dev_data:/app/data
 
 volumes:
-  isarai_dev_data:
+  mantly_dev_data:

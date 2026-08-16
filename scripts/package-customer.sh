@@ -12,6 +12,26 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 VERSION="${1:-}"
 REGISTRY="${REGISTRY:-ghcr.io/isarlabs}"
 
+resolve_python() {
+    local candidate
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        "$PYTHON_BIN" --version >/dev/null 2>&1 || {
+            echo "Configured PYTHON_BIN is not executable: $PYTHON_BIN" >&2
+            exit 69
+        }
+        printf '%s\n' "$PYTHON_BIN"
+        return
+    fi
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    echo "Python 3 is required; set PYTHON_BIN to an executable interpreter." >&2
+    exit 69
+}
+
 validate_version() {
     if [ -n "$VERSION" ] && [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
         echo "Invalid VERSION '$VERSION'. Use a Docker tag: letters, numbers, underscore, dot, or dash; max 128 chars." >&2
@@ -28,6 +48,7 @@ validate_registry() {
 
 validate_version
 validate_registry
+PYTHON_COMMAND="$(resolve_python)"
 
 if [ -n "$VERSION" ]; then
     PACKAGE_NAME="mantly-${VERSION}"
@@ -43,11 +64,11 @@ echo "=== Checking support package readiness ==="
 if command -v uv >/dev/null 2>&1; then
     (cd "$ROOT/backend" && uv run python -m automail.support.package_gate --root "$ROOT")
 else
-    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -m automail.support.package_gate --root "$ROOT"
+    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" -m automail.support.package_gate --root "$ROOT"
 fi
 
 SUPPORT_PACKAGE_GATE_JSON="$(
-    ROOT="$ROOT" PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+    ROOT="$ROOT" PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" - <<'PY'
 import json
 import os
 
@@ -58,11 +79,11 @@ print(json.dumps({"ready": result.ok, "checked": result.checked}, separators=(",
 PY
 )"
 
-# Clean and create staging directory
+# Clean and create staging directory.
 rm -rf "$STAGING"
-mkdir -p "$STAGING"
+mkdir -p "$STAGING/scripts" "$STAGING/docs/operations"
 
-# Copy delivery files
+# Copy deployment and support files.
 cp "$ROOT/deploy/docker-compose.yml"  "$STAGING/docker-compose.yml"
 cp "$ROOT/deploy/.env.example"        "$STAGING/.env.example"
 cp "$ROOT/deploy/Caddyfile"           "$STAGING/Caddyfile"
@@ -70,7 +91,15 @@ install -m 755 "$ROOT/deploy/support-launch-gate.sh" "$STAGING/support-launch-ga
 install -m 755 "$ROOT/deploy/support-schema-gate.sh" "$STAGING/support-schema-gate.sh"
 install -m 755 "$ROOT/deploy/support-channel-lifecycle-smoke.sh" "$STAGING/support-channel-lifecycle-smoke.sh"
 install -m 755 "$ROOT/deploy/support-channel-activation-plan.sh" "$STAGING/support-channel-activation-plan.sh"
-cp "$ROOT/docs/deploy-onprem.md"      "$STAGING/README.md"
+cp "$ROOT/docs/deploy-onprem.md" "$STAGING/README.md"
+
+# Recovery is part of the production customer handoff, not an optional source-only tool.
+install -m 755 "$ROOT/scripts/backup.sh" "$STAGING/scripts/backup.sh"
+install -m 755 "$ROOT/scripts/restore.sh" "$STAGING/scripts/restore.sh"
+install -m 755 "$ROOT/scripts/verify-restore.py" "$STAGING/scripts/verify-restore.py"
+cp "$ROOT/docs/deploy-onprem-recovery.md" "$STAGING/BACKUP-AND-RECOVERY.md"
+cp "$ROOT/docs/operations/backup-and-recovery.md" "$STAGING/docs/operations/backup-and-recovery.md"
+cp "$ROOT/docs/operations/restore-drill-template.md" "$STAGING/docs/operations/restore-drill-template.md"
 
 IMAGE_TAG="${VERSION:-latest}"
 GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -82,8 +111,8 @@ cat > "$STAGING/release-manifest.json" <<EOF
   "imageTag": "$IMAGE_TAG",
   "generatedAt": "$GENERATED_AT",
   "images": {
-    "app": "$REGISTRY/isarai-email-agent:$IMAGE_TAG",
-    "pocketbase": "$REGISTRY/isarai-pocketbase:$IMAGE_TAG"
+    "app": "$REGISTRY/mantly-api:$IMAGE_TAG",
+    "pocketbase": "$REGISTRY/mantly-pocketbase:$IMAGE_TAG"
   },
   "supportScripts": [
     "support-launch-gate.sh",
@@ -91,6 +120,15 @@ cat > "$STAGING/release-manifest.json" <<EOF
     "support-channel-lifecycle-smoke.sh",
     "support-channel-activation-plan.sh"
   ],
+  "recovery": {
+    "backupScript": "scripts/backup.sh",
+    "restoreScript": "scripts/restore.sh",
+    "verifyScript": "scripts/verify-restore.py",
+    "runbook": "docs/operations/backup-and-recovery.md",
+    "drillTemplate": "docs/operations/restore-drill-template.md",
+    "encryptedByDefault": true,
+    "formatVersion": "1"
+  },
   "supportLaunchProof": {
     "firstRun": "./support-launch-gate.sh --run",
     "steadyStateGate": "./support-launch-gate.sh",
@@ -109,9 +147,8 @@ cat > "$STAGING/release-manifest.json" <<EOF
 }
 EOF
 
-# If version specified, pin it in the compose file
+# If version specified, pin it in the compose file.
 if [ -n "$VERSION" ]; then
-    # Uncomment the VERSION line in .env.example and set the value
     sed -i.bak "s/^# VERSION=.*/VERSION=$VERSION/" "$STAGING/.env.example"
     rm -f "$STAGING/.env.example.bak"
 fi
@@ -119,7 +156,7 @@ fi
 sed -i.bak "s|^REGISTRY=.*|REGISTRY=$REGISTRY|" "$STAGING/.env.example"
 rm -f "$STAGING/.env.example.bak"
 
-# Create the tarball
+# Create the tarball.
 cd "$OUT_DIR"
 tar czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
 rm -rf "$STAGING"

@@ -11,6 +11,20 @@
 
 services:
 
+  pocketbase-volume-permissions:
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase:${VERSION:-latest}
+    user: "0:0"
+    entrypoint: ["/usr/bin/chown"]
+    command: ["-R", "10001:10001", "/pb/pb_data"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - pb_data:/pb/pb_data
+    restart: "no"
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -29,12 +43,15 @@ services:
     restart: unless-stopped
 
   pocketbase:
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-pocketbase:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase:${VERSION:-latest}
     environment:
       PB_ADMIN_EMAIL: "${PB_ADMIN_EMAIL:?PB_ADMIN_EMAIL is required}"
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
     volumes:
       - pb_data:/pb/pb_data
+    depends_on:
+      pocketbase-volume-permissions:
+        condition: service_completed_successfully
     expose:
       - "8090"
     restart: unless-stopped
@@ -46,7 +63,7 @@ services:
       retries: 3
 
   app:
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     environment:
       REQUIRE_AUTH: "true"
       IS_SAAS: "false"
@@ -155,7 +172,7 @@ services:
 
   support-bridge:
     profiles: ["support-bridge"]
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     command: ["python", "-m", "automail.support.bridge_app"]
     environment:
       SUPPORT_BRIDGE_CORE_URL: "http://app:8080"
@@ -187,7 +204,7 @@ services:
 
   discord-gateway:
     profiles: ["discord-gateway"]
-    image: ${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent:${VERSION:-latest}
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-api:${VERSION:-latest}
     command: ["python", "-m", "automail.support.discord_gateway"]
     environment:
       SUPPORT_BRIDGE_CORE_URL: "http://app:8080"

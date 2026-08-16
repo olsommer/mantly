@@ -135,7 +135,8 @@ def _fallback_field_values(
         if not key or (only_missing and key in current_fields):
             continue
         field_type = _string_from(definition.get("type") or "text")
-        options = definition.get("options") if isinstance(definition.get("options"), list) else []
+        raw_options = definition.get("options")
+        options: list[Any] = raw_options if isinstance(raw_options, list) else []
         if field_type == "select":
             for option in options:
                 clean_option = _string_from(option)

@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Validate the repository's DACH compliance evidence package.
+
+This is a structural and claim-discipline gate, not a legal compliance opinion.
+It ensures the required evidence files exist and that the provider inventory is
+complete enough to force deployment-specific review rather than silently
+omitting a data recipient.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import pathlib
+from typing import Any
+
+REQUIRED_DOCUMENTS = (
+    "docs/compliance/data-processing-overview.md",
+    "docs/compliance/dpa-and-security-schedule-checklist.md",
+    "docs/compliance/data-export-and-tenant-deletion.md",
+    "docs/compliance/customer-security-privacy-evidence-index.md",
+    "docs/compliance/lifecycle-exercise-template.md",
+    "docs/security/data-retention.md",
+    "docs/security/threat-model.md",
+    "docs/security/incident-response.md",
+    "docs/operations/backup-and-recovery.md",
+)
+
+REQUIRED_PROVIDER_KEYS = {
+    "key",
+    "enabled",
+    "required",
+    "legalEntity",
+    "service",
+    "role",
+    "purpose",
+    "dataCategories",
+    "dataSubjects",
+    "processingLocations",
+    "supportAccessLocations",
+    "retention",
+    "trainingOrSecondaryUse",
+    "transferMechanism",
+    "contractReference",
+    "securityReference",
+    "deletionReference",
+    "incidentNotificationReference",
+    "customerAlternative",
+    "owner",
+    "legalReviewComplete",
+}
+
+REQUIRED_PROVIDER_TYPES = {
+    "infrastructure-host",
+    "managed-model-provider",
+    "email-or-channel-provider",
+    "smtp-transactional-email",
+    "payment-provider",
+    "observability-provider",
+    "backup-storage-provider",
+}
+REFERENCE_FIELDS = (
+    "contractReference",
+    "securityReference",
+    "deletionReference",
+    "incidentNotificationReference",
+)
+LIFECYCLE_APPROVAL_ROLES = {
+    "operator",
+    "independentVerifier",
+    "engineeringOwner",
+    "privacySecurityOwner",
+}
+PLACEHOLDER_MARKERS = (
+    "replace-with",
+    "customer-specific",
+    "provider-specific",
+    "legal-review-required",
+    "review required",
+    "to-be-reviewed",
+    "tbd",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=".", help="Repository root")
+    parser.add_argument(
+        "--inventory",
+        default="docs/compliance/subprocessors.example.json",
+        help="Provider inventory relative to root",
+    )
+    parser.add_argument(
+        "--allow-approved-template",
+        action="store_true",
+        help="Allow legalReviewComplete=true in the repository example. Normally forbidden.",
+    )
+    parser.add_argument(
+        "--require-approved",
+        action="store_true",
+        help="Require deployment-specific provider, legal-review, and lifecycle evidence.",
+    )
+    parser.add_argument(
+        "--lifecycle-evidence",
+        default="docs/compliance/lifecycle-exercise-status.json",
+        help="Lifecycle exercise status relative to root.",
+    )
+    return parser.parse_args()
+
+
+def require_nonempty_string(value: Any, field: str, provider: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"provider {provider}: {field} must be a non-empty string")
+
+
+def require_string_list(value: Any, field: str, provider: str, errors: list[str], *, allow_empty: bool = False) -> None:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        errors.append(f"provider {provider}: {field} must be a list of non-empty strings")
+        return
+    if not allow_empty and not value:
+        errors.append(f"provider {provider}: {field} must not be empty")
+
+
+def is_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    return not normalized or any(marker in normalized for marker in PLACEHOLDER_MARKERS)
+
+
+def load_json_object(path: Path, label: str, errors: list[str]) -> dict[str, Any] | None:
+    """Read a JSON object, or record why it is unusable and return None.
+
+    Returning None is what tells the caller to skip the per-field checks, so an
+    empty or non-object document can never be mistaken for evidence that
+    silently passed. UnicodeDecodeError is a ValueError, not an OSError, so a
+    non-UTF-8 file has to be caught here rather than aborting the whole run.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        errors.append(f"cannot read {label}: {exc}")
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        errors.append(f"cannot parse {label}: {exc}")
+        return None
+    if not isinstance(document, dict):
+        errors.append(f"{label} must be a JSON object")
+        return None
+    if not document:
+        errors.append(f"{label} is empty")
+        return None
+    return document
+
+
+def require_timestamp(value: Any, field: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value:
+        errors.append(f"{field} must be an ISO-8601 timestamp")
+        return
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized)
+    except ValueError:
+        errors.append(f"{field} must be an ISO-8601 timestamp")
+        return
+    if parsed.tzinfo is None:
+        errors.append(f"{field} must include a timezone")
+
+
+def main() -> int:
+    args = parse_args()
+    root = pathlib.Path(args.root).resolve()
+    errors: list[str] = []
+    checked: list[str] = []
+
+    for relative in REQUIRED_DOCUMENTS:
+        path = root / relative
+        if not path.is_file() or path.stat().st_size == 0:
+            errors.append(f"missing or empty required document: {relative}")
+            continue
+        checked.append(relative)
+
+    inventory_path = root / args.inventory
+    inventory = load_json_object(inventory_path, f"provider inventory {args.inventory}", errors)
+
+    if inventory is not None:
+        if inventory.get("schemaVersion") != "1.0":
+            errors.append("provider inventory schemaVersion must be 1.0")
+        expected_status = "approved" if args.require_approved else "template-not-approved"
+        if inventory.get("status") != expected_status:
+            errors.append(f"provider inventory status must be {expected_status}")
+
+        deployment = inventory.get("deployment")
+        if not isinstance(deployment, dict):
+            errors.append("provider inventory deployment must be an object")
+        else:
+            for field in ("name", "mode", "primaryProcessingRegion", "customer"):
+                require_nonempty_string(deployment.get(field), f"deployment.{field}", "inventory", errors)
+            reviewers = deployment.get("reviewedBy")
+            if not isinstance(reviewers, list) or any(
+                not isinstance(reviewer, str) or not reviewer.strip() for reviewer in reviewers
+            ):
+                errors.append("deployment.reviewedBy must be a list of non-empty strings")
+            if args.require_approved:
+                for field in ("name", "mode", "primaryProcessingRegion", "customer"):
+                    value = deployment.get(field)
+                    if isinstance(value, str) and is_placeholder(value):
+                        errors.append(f"deployment.{field} still contains placeholder text")
+                if not reviewers:
+                    errors.append("deployment.reviewedBy must not be empty for approved evidence")
+                elif isinstance(reviewers, list):
+                    for reviewer in reviewers:
+                        if isinstance(reviewer, str) and is_placeholder(reviewer):
+                            errors.append(
+                                "deployment.reviewedBy still contains placeholder text"
+                            )
+                            break
+                require_timestamp(deployment.get("lastReviewedAt"), "deployment.lastReviewedAt", errors)
+
+        providers = inventory.get("providers")
+        if not isinstance(providers, list) or not providers:
+            errors.append("provider inventory must contain a non-empty providers list")
+            providers = []
+
+        observed_keys: set[str] = set()
+        for index, provider in enumerate(providers):
+            if not isinstance(provider, dict):
+                errors.append(f"provider at index {index} must be an object")
+                continue
+            key = provider.get("key")
+            provider_name = key if isinstance(key, str) and key else f"index-{index}"
+            missing = sorted(REQUIRED_PROVIDER_KEYS - provider.keys())
+            if missing:
+                errors.append(f"provider {provider_name}: missing fields {', '.join(missing)}")
+            if isinstance(key, str):
+                if key in observed_keys:
+                    errors.append(f"duplicate provider key: {key}")
+                observed_keys.add(key)
+            for field in (
+                "legalEntity",
+                "service",
+                "role",
+                "retention",
+                "trainingOrSecondaryUse",
+                "transferMechanism",
+                "customerAlternative",
+                "owner",
+            ):
+                require_nonempty_string(provider.get(field), field, provider_name, errors)
+            for field in ("purpose", "dataCategories", "dataSubjects"):
+                require_string_list(provider.get(field), field, provider_name, errors)
+            for field in ("processingLocations", "supportAccessLocations"):
+                require_string_list(provider.get(field), field, provider_name, errors, allow_empty=True)
+            for field in ("enabled", "required", "legalReviewComplete"):
+                if not isinstance(provider.get(field), bool):
+                    errors.append(f"provider {provider_name}: {field} must be boolean")
+            if (
+                provider.get("legalReviewComplete") is True
+                and not args.require_approved
+                and not args.allow_approved_template
+            ):
+                errors.append(
+                    f"provider {provider_name}: repository example must not claim completed legal review"
+                )
+            if args.require_approved and (provider.get("enabled") is True or provider.get("required") is True):
+                if provider.get("required") is True and provider.get("enabled") is not True:
+                    errors.append(f"provider {provider_name}: required provider must be enabled")
+                if provider.get("legalReviewComplete") is not True:
+                    errors.append(f"provider {provider_name}: legal review is incomplete")
+                for field in (
+                    "legalEntity",
+                    "role",
+                    "retention",
+                    "trainingOrSecondaryUse",
+                    "transferMechanism",
+                    "owner",
+                ):
+                    value = provider.get(field)
+                    if isinstance(value, str) and is_placeholder(value):
+                        errors.append(f"provider {provider_name}: {field} still contains placeholder text")
+                for field in ("processingLocations", "supportAccessLocations"):
+                    value = provider.get(field)
+                    if not isinstance(value, list) or not value:
+                        errors.append(f"provider {provider_name}: {field} must not be empty when enabled")
+                for field in REFERENCE_FIELDS:
+                    value = provider.get(field)
+                    if not isinstance(value, str) or is_placeholder(value):
+                        errors.append(f"provider {provider_name}: {field} requires approved evidence")
+
+        missing_types = sorted(REQUIRED_PROVIDER_TYPES - observed_keys)
+        if missing_types:
+            errors.append(f"provider inventory omits required categories: {', '.join(missing_types)}")
+
+    lifecycle_path = root / args.lifecycle_evidence
+    lifecycle = load_json_object(
+        lifecycle_path, f"lifecycle evidence {args.lifecycle_evidence}", errors
+    )
+    if lifecycle is not None:
+        expected_lifecycle_status = "passed" if args.require_approved else "not-completed"
+        if lifecycle.get("schemaVersion") != "1.0":
+            errors.append("lifecycle evidence schemaVersion must be 1.0")
+        if lifecycle.get("status") != expected_lifecycle_status:
+            errors.append(f"lifecycle evidence status must be {expected_lifecycle_status}")
+        if args.require_approved:
+            require_timestamp(lifecycle.get("completedAt"), "lifecycle.completedAt", errors)
+            release_commit = lifecycle.get("releaseCommit")
+            if not isinstance(release_commit, str) or is_placeholder(release_commit):
+                errors.append("lifecycle.releaseCommit requires the tested release commit")
+            approvals = lifecycle.get("approvals")
+            if not isinstance(approvals, dict):
+                errors.append("lifecycle.approvals must be an object")
+            else:
+                for role in sorted(LIFECYCLE_APPROVAL_ROLES):
+                    value = approvals.get(role)
+                    if not isinstance(value, str) or is_placeholder(value):
+                        errors.append(f"lifecycle.approvals.{role} is required")
+            evidence_refs = lifecycle.get("evidenceRefs")
+            if not isinstance(evidence_refs, list) or not evidence_refs or any(
+                not isinstance(value, str) or is_placeholder(value) for value in evidence_refs
+            ):
+                errors.append("lifecycle.evidenceRefs must contain approved references")
+
+    forbidden_claims = (
+        "fully gdpr compliant",
+        "fully fadp compliant",
+        "100% compliant",
+        "zero risk",
+        "guaranteed compliant",
+    )
+    for relative in REQUIRED_DOCUMENTS:
+        path = root / relative
+        if not path.is_file():
+            continue
+        try:
+            normalized = path.read_text(encoding="utf-8").lower()
+        except (OSError, ValueError) as exc:
+            errors.append(f"cannot read {relative}: {exc}")
+            continue
+        for claim in forbidden_claims:
+            if claim in normalized:
+                errors.append(f"unsupported absolute compliance claim in {relative}: {claim!r}")
+
+    report = {
+        "schemaVersion": "1.0",
+        "ok": not errors,
+        "checkedDocuments": sorted(checked),
+        "inventory": args.inventory,
+        "lifecycleEvidence": args.lifecycle_evidence,
+        "mode": "approved-deployment" if args.require_approved else "repository-template",
+        "deploymentReady": args.require_approved and not errors,
+        "errors": errors,
+    }
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if not errors else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

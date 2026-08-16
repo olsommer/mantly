@@ -4,7 +4,17 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from automail.support import channel_lifecycle_smoke, launch_gate, package_gate, schema_gate
+
+
+def _bash_executable() -> str:
+    if os.name == "nt":
+        git_bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+        if git_bash.is_file():
+            return str(git_bash)
+    return "bash"
 
 
 def test_evaluate_launch_proof_ready():
@@ -1039,8 +1049,8 @@ def test_package_gate_covers_pylon_release_invariants():
         "SUPPORT_CHANNEL_ACTIVATION_WRITE_SECRETS",
     }.issubset(requirements["deploy/.env.example"])
     assert {
-        "${REGISTRY:-ghcr.io/isarlabs}/isarai-email-agent",
-        "${REGISTRY:-ghcr.io/isarlabs}/isarai-pocketbase",
+        "${REGISTRY:-ghcr.io/isarlabs}/mantly-api",
+        "${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase",
     }.issubset(requirements["deploy/docker-compose.yml"])
     assert {
         "release-manifest.json",
@@ -1118,7 +1128,7 @@ def test_package_customer_manifest_includes_package_gate_evidence():
     tar_path.unlink(missing_ok=True)
 
     result = subprocess.run(
-        ["bash", str(root / "scripts/package-customer.sh"), version],
+        [_bash_executable(), str(root / "scripts/package-customer.sh"), version],
         cwd=root,
         env={**os.environ, "REGISTRY": "ghcr.io/isarlabs"},
         capture_output=True,
@@ -1159,7 +1169,7 @@ def test_package_customer_rejects_invalid_version_before_packaging():
     root = Path(__file__).resolve().parents[2]
 
     result = subprocess.run(
-        ["bash", str(root / "scripts/package-customer.sh"), "bad tag"],
+        [_bash_executable(), str(root / "scripts/package-customer.sh"), "bad tag"],
         cwd=root,
         env={**os.environ, "REGISTRY": "ghcr.io/isarlabs"},
         capture_output=True,
@@ -1176,7 +1186,7 @@ def test_release_onprem_rejects_invalid_registry_before_build():
     root = Path(__file__).resolve().parents[2]
 
     result = subprocess.run(
-        ["bash", str(root / "scripts/release-onprem.sh"), "1.2.3"],
+        [_bash_executable(), str(root / "scripts/release-onprem.sh"), "1.2.3"],
         cwd=root,
         env={**os.environ, "REGISTRY": "bad registry"},
         capture_output=True,
@@ -1217,7 +1227,7 @@ def test_package_gate_reports_missing_content(tmp_path):
     assert result.ok is False
     assert {
         "category": "admin-entrypoint",
-        "path": str(Path("admin/src/App.tsx")),
+        "path": Path("admin/src/App.tsx").as_posix(),
         "missing": [
             "./routes/Accounts",
             "./routes/Knowledge",
@@ -1234,6 +1244,7 @@ def test_package_gate_reports_missing_content(tmp_path):
     } in result.missing_content
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX executable mode bits")
 def test_package_gate_reports_non_executable_release_helpers(tmp_path):
     for requirement in package_gate.REQUIRED_FILES:
         target = tmp_path / requirement.path

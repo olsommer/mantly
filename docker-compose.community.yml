@@ -4,6 +4,20 @@ name: mantly-community
 # No license key or license server is configured; this stack does not enable
 # Mantly's commercial phone-home license middleware.
 services:
+  pocketbase-volume-permissions:
+    image: ghcr.io/olsommer/mantly-pocketbase:${MANTLY_VERSION:-local}
+    user: "0:0"
+    entrypoint: ["/usr/bin/chown"]
+    command: ["-R", "10001:10001", "/pb/pb_data"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - community_pb_data:/pb/pb_data
+    restart: "no"
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -33,6 +47,9 @@ services:
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?Set PB_ADMIN_PASSWORD in .env.community}"
     volumes:
       - community_pb_data:/pb/pb_data
+    depends_on:
+      pocketbase-volume-permissions:
+        condition: service_completed_successfully
     expose:
       - "8090"
     restart: unless-stopped

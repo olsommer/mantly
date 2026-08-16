@@ -1,0 +1,7 @@
+ticket_id,received_at,first_response_at,resolved_at,human_minutes,labour_cost,other_cost,runbook_id
+baseline-001,2026-06-01T08:00:00Z,2026-06-01T08:10:00Z,2026-06-01T08:30:00Z,20,20,0,delivery-status
+baseline-002,2026-06-02T08:00:00Z,2026-06-02T08:12:00Z,2026-06-02T08:35:00Z,20,20,0,delivery-status
+baseline-003,2026-06-03T08:00:00Z,2026-06-03T08:15:00Z,2026-06-03T08:45:00Z,20,20,0,delivery-address-change
+baseline-004,2026-06-04T08:00:00Z,2026-06-04T08:14:00Z,2026-06-04T08:50:00Z,20,20,0,cancellation-or-refund-eligibility
+baseline-005,2026-06-05T08:00:00Z,2026-06-05T08:11:00Z,2026-06-05T08:40:00Z,20,20,0,delivery-address-change
+baseline-006,2026-06-06T08:00:00Z,2026-06-06T08:20:00Z,2026-06-06T09:00:00Z,20,20,0,no-match

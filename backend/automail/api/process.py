@@ -26,7 +26,7 @@ from automail.db.pocketbase.email_processing_claims import (
     owns_email_processing_claim,
     wait_for_email_processing_claim,
 )
-from automail.models import EmailResponse, Message, ProcessEmailRequest, TokenUsage
+from automail.models import Email, EmailResponse, Message, ProcessEmailRequest, TokenUsage
 from automail.monitoring import (
     RunRecorder,
     actions_from_intent,
@@ -111,7 +111,7 @@ def _decoded_attachment_size(raw_base64: str) -> int:
 
 
 def _email_attachment_metadata(
-    email,
+    email: Email,
     parsed_attachments: dict[str, str] | None = None,
 ) -> list[dict]:
     attachments = getattr(email, "attachments", None) or []
@@ -151,7 +151,7 @@ def _email_attachment_metadata(
 
 
 def _email_thread_metadata(
-    email,
+    email: Email,
     parsed_attachments: dict[str, str] | None = None,
 ) -> dict:
     refs = [str(item).strip() for item in (email.references or []) if str(item).strip()]
@@ -213,6 +213,12 @@ def _resolve_process_project_id(body: ProcessEmailRequest, payload: Optional[Tok
         return str(projects[0]["id"])
 
     return None
+
+
+def _required_claim_project_id(project_id: str | None) -> str:
+    if not project_id:
+        raise RuntimeError("Email processing claim requires project scope")
+    return project_id
 
 
 def process_email_for_context(
@@ -328,7 +334,7 @@ def process_email_for_context(
                 if not complete_email_processing_claim(
                     processing_claim,
                     email_id=email_id,
-                    project_id=project_id,
+                    project_id=_required_claim_project_id(project_id),
                 ):
                     raise HTTPException(status_code=409, detail="Email processing ownership changed")
                 processing_claim_completed = True
@@ -437,12 +443,12 @@ def process_email_for_context(
         if processing_claim and not owns_email_processing_claim(
             processing_claim,
             email_id=email_id,
-            project_id=project_id,
+            project_id=_required_claim_project_id(project_id),
         ):
             completed_record = wait_for_email_processing_claim(
                 email_id=email_id,
                 tenant_id=tenant_id,
-                project_id=project_id,
+                project_id=_required_claim_project_id(project_id),
             )
             processing_claim = None
             if completed_record:
@@ -528,7 +534,7 @@ def process_email_for_context(
             if not complete_email_processing_claim(
                 processing_claim,
                 email_id=email_id,
-                project_id=project_id,
+                project_id=_required_claim_project_id(project_id),
             ):
                 raise HTTPException(status_code=409, detail="Email processing ownership changed")
             processing_claim_completed = True

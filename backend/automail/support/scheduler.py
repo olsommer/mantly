@@ -60,7 +60,9 @@ def _delivery_run_error_summary(result: dict[str, Any]) -> str:
 
     errors: list[str] = []
     seen: set[str] = set()
-    for item in result.get("items") if isinstance(result.get("items"), list) else []:
+    raw_items = result.get("items")
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
+    for item in items:
         if not isinstance(item, dict):
             continue
         error = str(item.get("error") or "").strip()

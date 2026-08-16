@@ -4,19 +4,22 @@ Status: Draft
 
 Last updated: 2026-07-15
 
-This document defines Mantly's product direction. It describes the intended
-product, not only the behavior implemented today. The
-[Email-First Support System RFC](./pylon-pivot-rfc.md) remains the detailed
-current implementation contract. Where the two conflict, this vision guides
-future product decisions unless a later decision supersedes it.
+This document defines Mantly's long-term product direction. The
+[active email-first V1 scope](./v1-scope.md) is the implementation and
+validation contract for the first design-partner release. The
+[Email-First Support System RFC](./pylon-pivot-rfc.md) describes current
+implementation detail, including broader functionality already present in the
+repository. When these documents conflict about what the first validated
+release must prove, the active V1 scope controls.
 
 ## How to read this document
 
 - **Vision** describes the intended product direction.
-- **V1** describes the first product slice Mantly should validate, not a claim
-  that every capability already ships.
+- **Active V1** is defined by `docs/v1-scope.md`: one DACH design-partner
+  segment, one email-based order-and-delivery workflow, and exactly three
+  production-quality runbooks.
 - **Current implementation** remains documented in the linked RFC and source
-  code.
+  code. Existing breadth is not automatically a V1 commitment.
 - **Later** and **open research** are directions, not commitments.
 
 ## Positioning
@@ -116,6 +119,12 @@ draft a customer-facing response. The Inbox composer owns the single final
 reply so duplicated greetings, conflicting promises, and fragmented answers do
 not leak to the customer.
 
+This is the broader product architecture, not the active pilot acceptance
+boundary. During the first pilot, an eligible ticket must safely match exactly
+one of the three published V1 runbooks or route to manual handling. Existing
+multi-concern execution remains usable outside that contract but is retained and
+frozen for V1 validation.
+
 When no runbook matches, Mantly can queue the ticket for manual work and, when
 enabled, prepare a knowledge-backed answer. The company controls whether that
 answer remains a draft or may be sent automatically.
@@ -127,8 +136,10 @@ which knowledge and tools it may use, and which actions it can expose or
 execute. It returns concern-scoped evidence, obligations, and action outcomes
 to the Inbox response composer.
 
-The agent finds the best runbook, activates it, then follows the behavior
-configured by the company. V1 supports three practical outcomes:
+For the active pilot, the agent finds one best runbook, activates it, then
+follows the behavior configured by the company. Broader concern-scoped matching
+may remain in the product, but it does not expand the pilot contract. V1
+supports three practical outcomes:
 
 These outcomes define the target product contract. Existing runbook flags and
 runtime behavior may approximate them, but they are not the final configuration
@@ -157,8 +168,8 @@ schema.
 - No human participates unless execution fails.
 
 Response delivery is a ticket/Inbox policy: no response, prepare a draft, or
-send automatically when every selected runbook, required action, grounding
-check, and approval rule permits it.
+send automatically when the selected V1 runbook, every required action,
+grounding check, and approval rule permits it.
 
 V1 does not need a general conditional-policy engine. Runbook configuration
 should remain understandable: human review, automatic versus human-triggered
@@ -298,7 +309,7 @@ runbooks or improvements.
 
 ### Autonomous delivery exception
 
-A customer writes through email, embedded web chat, or WhatsApp:
+A customer writes through the selected pilot email mailbox:
 
 > My order is delayed. Please change the delivery address.
 
@@ -306,7 +317,7 @@ Mantly:
 
 1. Normalizes the message into a ticket.
 2. Identifies the customer and order.
-3. Matches the delivery-exception runbook.
+3. Matches the published delivery-address-change runbook.
 4. Searches permitted policy knowledge.
 5. Checks the shipment API.
 6. Changes the address or opens a carrier case as configured.
@@ -333,35 +344,42 @@ Mantly:
 
 ## V1 scope
 
-V1 should prove both golden paths and the system-of-record foundation around
-them.
+The [active V1 scope](./v1-scope.md) controls this section. V1 proves the
+email-based order-and-delivery workflow for one DACH design partner using
+exactly three published runbooks. Existing omnichannel and broad platform
+capabilities remain product inventory until pilot evidence supports expansion.
 
 ### Required product slice
 
-- Inbox as the ticket system of record.
-- Runbook Agent and ticket-scoped Knowledge Agent as independent modules.
-- Launch channel priorities, not current readiness claims:
-  - Email.
-  - Embedded website chat/add-on.
-  - WhatsApp.
-  - Discord.
-- Manual runbook authoring by an operations specialist.
+- Email ingestion and reply delivery through the selected pilot mailbox.
+- Outlook add-in for founder-led onboarding, review, and draft assistance.
+- Admin Inbox as the tenant-isolated ticket system of record.
+- Exactly three published runbooks: delivery status, delivery address change,
+  and cancellation or refund eligibility.
+- One best-matching runbook per eligible ticket or explicit manual routing.
+- Ticket-scoped permitted knowledge and approved order, shipment, or policy
+  tools needed by those runbooks.
 - Runbook simulation/evaluation and explicit publication.
 - Explicit behavior selection rather than a silent automation default.
-- Permission-aware shared knowledge.
-- Shared reviewer queue and manual ticket drawer.
-- Execution traces, failure visibility, and individual action retry.
-- Configurable language and AI-disclosure policies.
-- Flexible Inbox filters and views.
+- Human approval for configured high-risk, financial, destructive, or
+  irreversible actions.
+- Execution traces, idempotent delivery, visible failure state, and pilot metric
+  capture.
+
+Implemented non-pilot surfaces—Gmail add-on, embedded web chat, WhatsApp,
+Slack, Teams, Discord, Telegram, Messenger, LINE, Viber, Instagram DM, X DM,
+SMS, and generic webhooks—may remain usable, but they are frozen for V1
+validation unless the scope-change process in `docs/v1-scope.md` is completed.
+Voice remains deferred.
 
 ### Same-day activation target
 
 A new customer should achieve the first successful autonomous resolution on the
 same day:
 
-1. Connect one channel.
+1. Connect the selected email mailbox.
 2. Add knowledge.
-3. Create the runbooks needed for the concerns you support.
+3. Create and publish the three V1 runbooks.
 4. Connect one tool.
 5. Replay a test ticket.
 6. Publish.
@@ -379,6 +397,8 @@ same day:
 
 - Do not expand existing automation features into a general workflow builder.
 - No visual DAGs, arbitrary nested orchestration, or runbook resume engine.
+- Existing multi-concern execution does not expand the V1 acceptance contract;
+  multi-concern pilot tickets route to manual handling.
 - No voice or phone channel.
 - No standalone internal Knowledge Agent.
 - No runbook or connector marketplace.

@@ -1,0 +1,46 @@
+services:
+  volume-permissions:
+    image: alpine:3.21
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - |
+        chown -R 10001:10001 /pb/pb_data
+        chown -R 1000:1000 /app/data
+    volumes:
+      - pocketbase_data:/pb/pb_data
+      - application_data:/app/data
+
+  pocketbase:
+    image: python:3.12-alpine
+    user: "10001:10001"
+    command: ["python", "/fixture/fake-service.py", "pocketbase"]
+    environment:
+      PB_ADMIN_EMAIL: restore@example.test
+      PB_ADMIN_PASSWORD: restore-fixture-password
+    ports:
+      - "18090:8090"
+    volumes:
+      - pocketbase_data:/pb/pb_data
+      - ./fake-service.py:/fixture/fake-service.py:ro
+    depends_on:
+      volume-permissions:
+        condition: service_completed_successfully
+
+  app:
+    image: python:3.12-alpine
+    user: "1000:1000"
+    command: ["python", "/fixture/fake-service.py", "app"]
+    ports:
+      - "18080:8080"
+    volumes:
+      - application_data:/app/data
+      - ./fake-service.py:/fixture/fake-service.py:ro
+    depends_on:
+      volume-permissions:
+        condition: service_completed_successfully
+
+volumes:
+  pocketbase_data:
+  application_data:

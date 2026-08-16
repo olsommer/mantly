@@ -40,8 +40,20 @@ The default Python runtime includes these direct dependencies:
 - Apache-2.0: just-bash and python-multipart.
 
 Their locked transitive dependencies use permissive, Python Software
-Foundation, CNRI, or MPL-2.0 terms. Refer to the backend CycloneDX SBOM for the
-exact dependency-level inventory and bundled license texts.
+Foundation, CNRI, or MPL-2.0 terms. The expressions present in the locked
+production graph are:
+
+- Apache-2.0 AND CNRI-Python: regex.
+- Apache-2.0 OR BSD-2-Clause: packaging.
+- Apache-2.0 OR MIT: ormsgpack.
+- MIT OR Apache-2.0: sniffio.
+- MPL-2.0 AND MIT: tqdm.
+- MPL-2.0 AND (Apache-2.0 OR MIT): orjson.
+
+Where a dependency offers a choice of licenses, Mantly does not elect one on a
+downstream recipient's behalf; every offered license remains available. Refer
+to the backend CycloneDX SBOM for the exact dependency-level inventory and
+bundled license texts.
 
 The optional `attachments` dependency group, including Docling and its machine
 learning stack, is not installed in the default Community images. It requires

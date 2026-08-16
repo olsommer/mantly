@@ -127,6 +127,33 @@ def is_placeholder(value: str) -> bool:
     return not normalized or any(marker in normalized for marker in PLACEHOLDER_MARKERS)
 
 
+def load_json_object(path: Path, label: str, errors: list[str]) -> dict[str, Any] | None:
+    """Read a JSON object, or record why it is unusable and return None.
+
+    Returning None is what tells the caller to skip the per-field checks, so an
+    empty or non-object document can never be mistaken for evidence that
+    silently passed. UnicodeDecodeError is a ValueError, not an OSError, so a
+    non-UTF-8 file has to be caught here rather than aborting the whole run.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        errors.append(f"cannot read {label}: {exc}")
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        errors.append(f"cannot parse {label}: {exc}")
+        return None
+    if not isinstance(document, dict):
+        errors.append(f"{label} must be a JSON object")
+        return None
+    if not document:
+        errors.append(f"{label} is empty")
+        return None
+    return document
+
+
 def require_timestamp(value: Any, field: str, errors: list[str]) -> None:
     if not isinstance(value, str) or not value:
         errors.append(f"{field} must be an ISO-8601 timestamp")
@@ -155,13 +182,9 @@ def main() -> int:
         checked.append(relative)
 
     inventory_path = root / args.inventory
-    try:
-        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        errors.append(f"cannot read provider inventory {args.inventory}: {exc}")
-        inventory = {}
+    inventory = load_json_object(inventory_path, f"provider inventory {args.inventory}", errors)
 
-    if inventory:
+    if inventory is not None:
         if inventory.get("schemaVersion") != "1.0":
             errors.append("provider inventory schemaVersion must be 1.0")
         expected_status = "approved" if args.require_approved else "template-not-approved"
@@ -186,6 +209,13 @@ def main() -> int:
                         errors.append(f"deployment.{field} still contains placeholder text")
                 if not reviewers:
                     errors.append("deployment.reviewedBy must not be empty for approved evidence")
+                elif isinstance(reviewers, list):
+                    for reviewer in reviewers:
+                        if isinstance(reviewer, str) and is_placeholder(reviewer):
+                            errors.append(
+                                "deployment.reviewedBy still contains placeholder text"
+                            )
+                            break
                 require_timestamp(deployment.get("lastReviewedAt"), "deployment.lastReviewedAt", errors)
 
         providers = inventory.get("providers")
@@ -263,12 +293,10 @@ def main() -> int:
             errors.append(f"provider inventory omits required categories: {', '.join(missing_types)}")
 
     lifecycle_path = root / args.lifecycle_evidence
-    try:
-        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        errors.append(f"cannot read lifecycle evidence {args.lifecycle_evidence}: {exc}")
-        lifecycle = {}
-    if lifecycle:
+    lifecycle = load_json_object(
+        lifecycle_path, f"lifecycle evidence {args.lifecycle_evidence}", errors
+    )
+    if lifecycle is not None:
         expected_lifecycle_status = "passed" if args.require_approved else "not-completed"
         if lifecycle.get("schemaVersion") != "1.0":
             errors.append("lifecycle evidence schemaVersion must be 1.0")
@@ -304,7 +332,11 @@ def main() -> int:
         path = root / relative
         if not path.is_file():
             continue
-        normalized = path.read_text(encoding="utf-8").lower()
+        try:
+            normalized = path.read_text(encoding="utf-8").lower()
+        except (OSError, ValueError) as exc:
+            errors.append(f"cannot read {relative}: {exc}")
+            continue
         for claim in forbidden_claims:
             if claim in normalized:
                 errors.append(f"unsupported absolute compliance claim in {relative}: {claim!r}")

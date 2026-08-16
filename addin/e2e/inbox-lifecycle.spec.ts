@@ -113,11 +113,15 @@ test.describe('Admin Inbox lifecycle', () => {
     expect(deliveryEvidence.items[0].messageId).toBe(draft.id);
     expect(deliveryEvidence.items[0].body.body).toContain('Edited and approved');
 
-    // The open ticket is client-side state, so a plain reload returns to the
-    // list. Reload straight into the ticket route to check the sent state
-    // survives a fresh page load.
-    await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox/${createdIssue.id}?view=list`);
+    // Load the inbox fresh and reopen the ticket from the list, so the sent
+    // state is read back from the server rather than from the state this test
+    // already had in memory.
+    await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox?view=list`);
+    await page.getByRole('button', { name: 'Deterministic delivery request' }).first().click();
     await expect(page.getByRole('heading', { name: 'Deterministic delivery request' })).toBeVisible();
+    await expect(
+      page.locator(`[data-outbound-reply="${draft.id}"][data-outbound-reply-status="sent"]`).last(),
+    ).toBeVisible();
     const closeRequest = page.waitForResponse((response) => (
       response.url().endsWith(`/issues/${createdIssue.id}`)
       && response.request().method() === 'PATCH'

@@ -99,7 +99,7 @@ repository_contract() {
       exit 1
     fi
   done
-  if grep -R --line-number --exclude-dir=.git --exclude='merge-order.md' 'isarai-test' "$ROOT"; then
+  if grep -R --line-number --exclude-dir=.git --exclude='check-quality.sh' --exclude='merge-order.md' 'isarai-test' "$ROOT"; then
     echo "Legacy isarai-test image name is forbidden." >&2
     exit 1
   fi

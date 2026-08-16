@@ -1,6 +1,29 @@
 services:
 
+  caddy-volume-permissions:
+    image: mantly-caddy:${MANTLY_VERSION:-local}
+    # Same build as the caddy service. Without it Compose treats this tag as
+    # an image to pull, and it is only ever built locally.
+    build:
+      context: .
+      dockerfile: caddy/Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/chown"]
+    command: ["-R", "10001:10001", "/data", "/config"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    # DAC_READ_SEARCH is required to re-enter the 0700 /data/caddy and
+    # /config/caddy directories Caddy creates as uid 10001 on first run.
+    cap_add: ["CHOWN", "DAC_READ_SEARCH"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: "no"
+
   caddy:
+    image: mantly-caddy:${MANTLY_VERSION:-local}
     build:
       context: .
       dockerfile: caddy/Dockerfile
@@ -12,15 +35,37 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
+      caddy-volume-permissions:
+        condition: service_completed_successfully
       app:
-        condition: service_started
+        condition: service_healthy
       pocketbase:
         condition: service_healthy
     expose:
       - "80"
     restart: unless-stopped
 
+  pocketbase-volume-permissions:
+    image: mantly-pocketbase:${MANTLY_VERSION:-local}
+    # Same build as the pocketbase service, so Compose does not try to pull
+    # a tag that only ever exists locally.
+    build:
+      context: .
+      dockerfile: pocketbase/Dockerfile
+    user: "0:0"
+    entrypoint: ["/usr/bin/chown"]
+    command: ["-R", "10001:10001", "/pb/pb_data"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_READ_SEARCH"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - mantly_pb_data:/pb/pb_data
+    restart: "no"
+
   pocketbase:
+    image: mantly-pocketbase:${MANTLY_VERSION:-local}
     build:
       context: .
       dockerfile: pocketbase/Dockerfile
@@ -29,7 +74,10 @@ services:
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
       PB_CORS_ORIGINS: "${PB_CORS_ORIGINS:-}"
     volumes:
-      - isarai_pb_data:/pb/pb_data
+      - mantly_pb_data:/pb/pb_data
+    depends_on:
+      pocketbase-volume-permissions:
+        condition: service_completed_successfully
     expose:
       - "8090"
     restart: unless-stopped
@@ -51,6 +99,13 @@ services:
       IS_SAAS: "${VITE_IS_SAAS:-true}"
       MANTLY_DEPLOYMENT_MODE: "${MANTLY_DEPLOYMENT_MODE:-cloud}"
       MANTLY_EDITION: "${MANTLY_EDITION:-community}"
+      # Local declaration only. Operational acceptance separately observes the
+      # actual container count with scripts/runtime_topology_inventory.py.
+      MANTLY_API_REPLICAS: "1"
+      MANTLY_STORAGE_MODE: "pocketbase-sqlite"
+      MANTLY_WORKER_MODE: "in-process"
+      MANTLY_LOCAL_APPLICATION_DATA: "true"
+      MANTLY_INSTANCE_ID: "${MANTLY_INSTANCE_ID:-mantly-api-primary}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       CORS_ORIGINS: "${CORS_ORIGINS:-${PUBLIC_URL}}"
       MANIFEST_BASE_URL: "${PUBLIC_URL}"
@@ -105,9 +160,13 @@ services:
       SETUP_ADMIN_PASSWORD: "${SETUP_ADMIN_PASSWORD:-}"
       COMPANY_NAME: "${COMPANY_NAME:-}"
 
-      # ── Observability (optional) ───────────────────────────────────────
+      # ── Observability ──────────────────────────────────────────────────
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      LOG_REDACT_EMAILS: "${LOG_REDACT_EMAILS:-true}"
+      OBSERVABILITY_SLOW_REQUEST_MS: "${OBSERVABILITY_SLOW_REQUEST_MS:-2000}"
+      OBSERVABILITY_TOKEN: "${OBSERVABILITY_TOKEN:-}"
+      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-false}"
       LANGSMITH_ENDPOINT: "${LANGSMITH_ENDPOINT:-}"
       LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:-}"
       LANGSMITH_PROJECT: "${LANGSMITH_PROJECT:-}"
@@ -121,11 +180,23 @@ services:
     expose:
       - "8080"
     volumes:
-      - isarai_app_data:/app/data
+      - mantly_app_data:/app/data
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 7s
+      start_period: 90s
+      retries: 5
 
 volumes:
   caddy_data:
   caddy_config:
-  isarai_pb_data:
-  isarai_app_data:
+  mantly_pb_data:
+  mantly_app_data:

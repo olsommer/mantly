@@ -12,6 +12,30 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 VERSION="${1:-}"
 REGISTRY="${REGISTRY:-ghcr.io/isarlabs}"
 
+python_is_supported() {
+    "$1" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1
+}
+
+resolve_python() {
+    local candidate
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        python_is_supported "$PYTHON_BIN" || {
+            echo "Configured PYTHON_BIN must be executable Python 3.11+: $PYTHON_BIN" >&2
+            exit 69
+        }
+        printf '%s\n' "$PYTHON_BIN"
+        return
+    fi
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    echo "Python 3.11+ is required; set PYTHON_BIN to a compatible interpreter." >&2
+    exit 69
+}
+
 validate_version() {
     if [ -n "$VERSION" ] && [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
         echo "Invalid VERSION '$VERSION'. Use a Docker tag: letters, numbers, underscore, dot, or dash; max 128 chars." >&2
@@ -28,6 +52,7 @@ validate_registry() {
 
 validate_version
 validate_registry
+PYTHON_COMMAND="$(resolve_python)"
 
 if [ -n "$VERSION" ]; then
     PACKAGE_NAME="mantly-${VERSION}"
@@ -37,17 +62,18 @@ fi
 
 OUT_DIR="$ROOT/dist"
 STAGING="$OUT_DIR/$PACKAGE_NAME"
+LICENSE_EVIDENCE_DIR="$OUT_DIR/license-evidence/$PACKAGE_NAME"
 
 echo "=== Packaging customer delivery: $PACKAGE_NAME ==="
 echo "=== Checking support package readiness ==="
 if command -v uv >/dev/null 2>&1; then
     (cd "$ROOT/backend" && uv run python -m automail.support.package_gate --root "$ROOT")
 else
-    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -m automail.support.package_gate --root "$ROOT"
+    PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" -m automail.support.package_gate --root "$ROOT"
 fi
 
 SUPPORT_PACKAGE_GATE_JSON="$(
-    ROOT="$ROOT" PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+    ROOT="$ROOT" PYTHONPATH="$ROOT/backend${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_COMMAND" - <<'PY'
 import json
 import os
 
@@ -58,11 +84,35 @@ print(json.dumps({"ready": result.ok, "checked": result.checked}, separators=(",
 PY
 )"
 
-# Clean and create staging directory
-rm -rf "$STAGING"
-mkdir -p "$STAGING"
+echo "=== Generating locked license evidence ==="
+rm -rf "$LICENSE_EVIDENCE_DIR"
+mkdir -p "$LICENSE_EVIDENCE_DIR"
+# generate_third_party_notice.py shells out to "uv export" itself, so uv is a
+# hard requirement here. Fail with that reason rather than falling through to a
+# plain-python branch that is only reachable when uv is missing and therefore
+# can only ever die inside the generator.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required to generate locked license evidence: generate_third_party_notice.py exports the frozen Python environment with 'uv export'." >&2
+    exit 66
+fi
+(
+    cd "$ROOT/backend"
+    # --no-sync reads the environment as it stands. --frozen --no-dev would
+    # exact-sync backend/.venv and uninstall pytest out from under the test
+    # session that invokes this script, and would strip a developer's dev
+    # environment on any manual run.
+    uv run --no-sync python ../scripts/generate_third_party_notice.py \
+        --root "$ROOT" \
+        --check \
+        --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \
+        --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
+)
 
-# Copy delivery files
+# Clean and create staging directory.
+rm -rf "$STAGING"
+mkdir -p "$STAGING/scripts" "$STAGING/docs/operations" "$STAGING/legal"
+
+# Copy deployment and support files.
 cp "$ROOT/deploy/docker-compose.yml"  "$STAGING/docker-compose.yml"
 cp "$ROOT/deploy/.env.example"        "$STAGING/.env.example"
 cp "$ROOT/deploy/Caddyfile"           "$STAGING/Caddyfile"
@@ -70,7 +120,38 @@ install -m 755 "$ROOT/deploy/support-launch-gate.sh" "$STAGING/support-launch-ga
 install -m 755 "$ROOT/deploy/support-schema-gate.sh" "$STAGING/support-schema-gate.sh"
 install -m 755 "$ROOT/deploy/support-channel-lifecycle-smoke.sh" "$STAGING/support-channel-lifecycle-smoke.sh"
 install -m 755 "$ROOT/deploy/support-channel-activation-plan.sh" "$STAGING/support-channel-activation-plan.sh"
-cp "$ROOT/docs/deploy-onprem.md"      "$STAGING/README.md"
+cp "$ROOT/docs/deploy-onprem.md" "$STAGING/README.md"
+
+# Recovery is part of the production customer handoff, not an optional source-only tool.
+install -m 755 "$ROOT/scripts/backup.sh" "$STAGING/scripts/backup.sh"
+install -m 755 "$ROOT/scripts/restore.sh" "$STAGING/scripts/restore.sh"
+install -m 755 "$ROOT/scripts/verify-restore.py" "$STAGING/scripts/verify-restore.py"
+cp "$ROOT/docs/deploy-onprem-recovery.md" "$STAGING/BACKUP-AND-RECOVERY.md"
+cp "$ROOT/docs/operations/backup-and-recovery.md" "$STAGING/docs/operations/backup-and-recovery.md"
+cp "$ROOT/docs/operations/restore-drill-template.md" "$STAGING/docs/operations/restore-drill-template.md"
+
+cp "$ROOT/LICENSE" "$STAGING/LICENSE"
+cp "$ROOT/NOTICE.md" "$STAGING/NOTICE.md"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGING/THIRD_PARTY_NOTICES.md"
+cp "$ROOT/TRADEMARKS.md" "$STAGING/TRADEMARKS.md"
+cp "$ROOT/docs/decisions/0002-licensing-and-distribution.md" "$STAGING/legal/licensing-decision.md"
+cp "$ROOT/docs/legal/commercial-distribution-checklist.md" "$STAGING/legal/release-checklist.md"
+cp "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" "$STAGING/legal/third-party-inventory.json"
+cp "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md" "$STAGING/legal/THIRD_PARTY_INVENTORY.md"
+
+if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]; then
+    echo "Refusing to package a dirty worktree: source archive would not match the built release." >&2
+    exit 65
+fi
+SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+# --prefix keeps the tarball self-contained. Without it the archive unpacks
+# repo paths straight into the current directory and overwrites the README.md
+# and LICENSE shipped next to it in this same package.
+git -C "$ROOT" archive \
+    --format=tar.gz \
+    --prefix="mantly-community-source/" \
+    --output="$STAGING/mantly-community-source.tar.gz" \
+    "$SOURCE_REVISION"
 
 IMAGE_TAG="${VERSION:-latest}"
 GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -82,8 +163,8 @@ cat > "$STAGING/release-manifest.json" <<EOF
   "imageTag": "$IMAGE_TAG",
   "generatedAt": "$GENERATED_AT",
   "images": {
-    "app": "$REGISTRY/isarai-email-agent:$IMAGE_TAG",
-    "pocketbase": "$REGISTRY/isarai-pocketbase:$IMAGE_TAG"
+    "app": "$REGISTRY/mantly-api:$IMAGE_TAG",
+    "pocketbase": "$REGISTRY/mantly-pocketbase:$IMAGE_TAG"
   },
   "supportScripts": [
     "support-launch-gate.sh",
@@ -91,6 +172,15 @@ cat > "$STAGING/release-manifest.json" <<EOF
     "support-channel-lifecycle-smoke.sh",
     "support-channel-activation-plan.sh"
   ],
+  "recovery": {
+    "backupScript": "scripts/backup.sh",
+    "restoreScript": "scripts/restore.sh",
+    "verifyScript": "scripts/verify-restore.py",
+    "runbook": "docs/operations/backup-and-recovery.md",
+    "drillTemplate": "docs/operations/restore-drill-template.md",
+    "encryptedByDefault": true,
+    "formatVersion": "1"
+  },
   "supportLaunchProof": {
     "firstRun": "./support-launch-gate.sh --run",
     "steadyStateGate": "./support-launch-gate.sh",
@@ -105,13 +195,21 @@ cat > "$STAGING/release-manifest.json" <<EOF
     "planFile": "support-channel-activation-plan.json",
     "secretTemplateFile": "support-channel-activation-secrets.env"
   },
+  "licensing": {
+    "repositoryLicense": "AGPL-3.0-only",
+    "licenseFile": "LICENSE",
+    "noticeFile": "NOTICE.md",
+    "thirdPartyNoticeFile": "THIRD_PARTY_NOTICES.md",
+    "thirdPartyInventory": "legal/third-party-inventory.json",
+    "correspondingSourceArchive": "mantly-community-source.tar.gz",
+    "sourceRevision": "$SOURCE_REVISION"
+  },
   "supportPackageGate": $SUPPORT_PACKAGE_GATE_JSON
 }
 EOF
 
-# If version specified, pin it in the compose file
+# If version specified, pin it in the compose file.
 if [ -n "$VERSION" ]; then
-    # Uncomment the VERSION line in .env.example and set the value
     sed -i.bak "s/^# VERSION=.*/VERSION=$VERSION/" "$STAGING/.env.example"
     rm -f "$STAGING/.env.example.bak"
 fi
@@ -119,7 +217,7 @@ fi
 sed -i.bak "s|^REGISTRY=.*|REGISTRY=$REGISTRY|" "$STAGING/.env.example"
 rm -f "$STAGING/.env.example.bak"
 
-# Create the tarball
+# Create the tarball.
 cd "$OUT_DIR"
 tar czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
 rm -rf "$STAGING"

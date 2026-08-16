@@ -18,10 +18,14 @@ direct runtime dependencies:
 - Apache-2.0: class-variance-authority.
 - Apache-2.0 AND MIT: posthog-js.
 - ISC: Lucide and yaml.
+- OFL-1.1: the Fontsource webfont packages bundled by the Landing application
+  (`@fontsource/inter`, `@fontsource/inter-tight`, and
+  `@fontsource/playfair-display`). The SIL Open Font License applies to the
+  font files themselves, which travel with the built assets.
 
 Reviewed licenses in their locked transitive production graphs also include
-0BSD, BSD-3-Clause, MIT AND ISC, MPL-2.0, Python-2.0, and
-MPL-2.0 OR Apache-2.0. The legacy `format@0.2.2` package declares MIT through
+0BSD, BSD-2-Clause, BSD-3-Clause, MIT AND ISC, MPL-2.0, PSF-2.0, Python-2.0,
+and MPL-2.0 OR Apache-2.0. The legacy `format@0.2.2` package declares MIT through
 its `licenses` metadata. The installed `posthog-js@1.406.2` distribution
 declares Apache-2.0 AND MIT and includes both sets of notices in its `LICENSE`
 file.
@@ -36,8 +40,20 @@ The default Python runtime includes these direct dependencies:
 - Apache-2.0: just-bash and python-multipart.
 
 Their locked transitive dependencies use permissive, Python Software
-Foundation, CNRI, or MPL-2.0 terms. Refer to the backend CycloneDX SBOM for the
-exact dependency-level inventory and bundled license texts.
+Foundation, CNRI, or MPL-2.0 terms. The expressions present in the locked
+production graph are:
+
+- Apache-2.0 AND CNRI-Python: regex.
+- Apache-2.0 OR BSD-2-Clause: packaging.
+- Apache-2.0 OR MIT: ormsgpack.
+- MIT OR Apache-2.0: sniffio.
+- MPL-2.0 AND MIT: tqdm.
+- MPL-2.0 AND (Apache-2.0 OR MIT): orjson.
+
+Where a dependency offers a choice of licenses, Mantly does not elect one on a
+downstream recipient's behalf; every offered license remains available. Refer
+to the backend CycloneDX SBOM for the exact dependency-level inventory and
+bundled license texts.
 
 The optional `attachments` dependency group, including Docling and its machine
 learning stack, is not installed in the default Community images. It requires
@@ -49,6 +65,8 @@ a separate license and distribution review before release.
   `/usr/share/licenses/pocketbase/LICENSE` in the Mantly PocketBase image and
   is stored in `third_party/pocketbase/LICENSE` in this repository.
 - Caddy is Apache-2.0 licensed.
+- NGINX Open Source is distributed under the 2-clause BSD license. The
+  `nginx/docker-nginx-unprivileged` image wrapper is Apache-2.0 licensed.
 - CPython is distributed under the Python Software Foundation License and
   other historical notices included by the upstream Python image.
 - Node.js is MIT licensed and is used by the application build stages.

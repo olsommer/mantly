@@ -16,6 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify repository license contract
+        run: |
+          set -euo pipefail
+          test -s LICENSE
+          test -s NOTICE.md
+          test -s THIRD_PARTY_NOTICES.md
+          test -s TRADEMARKS.md
+          test -s CONTRIBUTING.md
+          test -s docs/decisions/0002-licensing-and-distribution.md
+          test -s docs/legal/dependency-license-policy.json
+          grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" LICENSE
+          grep -q "AGPL-3.0-only" README.md
+          grep -q "AGPL-3.0-only" CONTRIBUTING.md
+          grep -q "Existing grants stay in force" docs/decisions/0002-licensing-and-distribution.md
+          test ! -e LICENSE.md
+          test ! -e .github/workflows/apply-branding-cleanup.yml
+          test ! -e .github/workflows/finalize-branding-cleanup.yml
+          test ! -e .github/workflows/apply-distribution-boundary.yml
+          test ! -e .github/workflows/finalize-distribution-branch.yml
+          test ! -e .github/workflows/fix-capacity-branch.yml
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,7 +62,64 @@ jobs:
           npm ci --prefix landing
 
       - name: Enforce reviewed license policy
-        run: node scripts/check-dependency-licenses.mjs
+        run: |
+          set -euo pipefail
+          node scripts/check-dependency-licenses.mjs
+          mkdir -p artifacts/licenses
+          (
+            cd backend
+            uv run --frozen --no-dev python ../scripts/generate_third_party_notice.py \
+              --root .. \
+              --check \
+              --json-out ../artifacts/licenses/third-party-inventory.json \
+              --markdown-out ../artifacts/licenses/THIRD_PARTY_INVENTORY.md
+          )
+          python -m json.tool artifacts/licenses/third-party-inventory.json >/dev/null
+
+      - name: Reconcile THIRD_PARTY_NOTICES.md with the generated inventory
+        run: |
+          set -euo pipefail
+          python3 - artifacts/licenses/third-party-inventory.json THIRD_PARTY_NOTICES.md <<'PY'
+          import json
+          import sys
+
+          inventory_path, notices_path = sys.argv[1], sys.argv[2]
+          with open(inventory_path, encoding="utf-8") as handle:
+              report = json.load(handle)
+          with open(notices_path, encoding="utf-8") as handle:
+              notices = handle.read()
+
+          # THIRD_PARTY_NOTICES.md is hand-maintained and ships in every image
+          # and in the customer source archive, so it carries the notice
+          # obligation. It cannot be regenerated from this inventory, but a
+          # license family entering the graph without ever being named here is
+          # the drift that actually matters.
+          def normalize(text: str) -> str:
+              # The policy records "(Apache-2.0 AND MIT)" while the prose writes
+              # it unparenthesised; the parentheses carry no meaning here.
+              return text.replace("(", "").replace(")", "")
+
+          normalized_notices = normalize(notices)
+          missing = sorted(
+              {
+                  component["spdx"]
+                  for component in report["components"]
+                  if component.get("spdx")
+                  and normalize(component["spdx"]) not in normalized_notices
+              }
+          )
+          if missing:
+              print("THIRD_PARTY_NOTICES.md does not mention these license expressions:", file=sys.stderr)
+              for expression in missing:
+                  packages = sorted(
+                      f"{item['ecosystem']}:{item['package']}@{item['version']}"
+                      for item in report["components"]
+                      if item.get("spdx") == expression
+                  )
+                  print(f"  - {expression}: {', '.join(packages[:5])}", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"THIRD_PARTY_NOTICES.md covers all {report['summary']['components']} inventoried components")
+          PY
 
       - name: Generate ecosystem SBOMs
         run: |
@@ -62,10 +140,14 @@ jobs:
           done
 
       - name: Upload SBOMs and reviewed notices
+        # A license-policy failure is exactly when this evidence is worth
+        # having, so upload it even when an earlier step failed.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: community-dependency-sboms
           path: |
             artifacts/sbom/*.cdx.json
+            artifacts/licenses/*
             THIRD_PARTY_NOTICES.md
           if-no-files-found: error

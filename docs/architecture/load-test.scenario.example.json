@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "scenarioId": "single-node-health-smoke-v1",
+  "kind": "smoke",
+  "description": "Connectivity smoke only. This file is deliberately ineligible for capacity approval; create an authenticated capacity scenario for the documented pilot-critical workflows.",
+  "targets": [
+    {
+      "name": "liveness",
+      "method": "GET",
+      "path": "/api/health",
+      "workloads": ["health"],
+      "weight": 1,
+      "expectedStatuses": [200]
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/api/ready",
+      "workloads": ["readiness"],
+      "weight": 1,
+      "expectedStatuses": [200]
+    }
+  ],
+  "thresholds": {
+    "errorRateMax": 0.01,
+    "p95MsMax": 500,
+    "p99MsMax": 1000,
+    "throughputPerSecondMin": 4.5,
+    "minimumRequests": 100,
+    "minimumRequestsPerTarget": 20
+  }
+}

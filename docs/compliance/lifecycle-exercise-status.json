@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1.0",
+  "status": "not-completed",
+  "completedAt": null,
+  "releaseCommit": null,
+  "approvals": {},
+  "evidenceRefs": [],
+  "note": "Repository tooling and templates are not evidence of a completed lifecycle exercise. Issue #7 remains open."
+}

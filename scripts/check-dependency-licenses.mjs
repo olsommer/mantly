@@ -6,33 +6,28 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const applications = ["admin", "addin", "landing"];
+const policyPath = join(root, "docs", "legal", "dependency-license-policy.json");
+const policy = JSON.parse(readFileSync(policyPath, "utf8"));
 
-// Keep this list narrow and reviewed. A new expression must be inspected before
-// it is accepted, even when it represents an OSI-approved license.
-const allowedLicenseExpressions = new Set([
-  "0BSD",
-  "Apache-2.0",
-  "(Apache-2.0 AND MIT)",
-  "BSD-3-Clause",
-  "ISC",
-  "MIT",
-  "MIT AND ISC",
-  "MPL-2.0",
-  "(MPL-2.0 OR Apache-2.0)",
-  "Python-2.0",
-]);
+if (policy.schemaVersion !== "1.0") {
+  throw new Error(`${policyPath}: unsupported schemaVersion`);
+}
+if (!Array.isArray(policy.acceptedSpdxExpressions)) {
+  throw new Error(`${policyPath}: acceptedSpdxExpressions must be an array`);
+}
 
-// Old package metadata that has been checked against the installed license.
-// Pin the version so an update requires a fresh review.
-const reviewedLicenseOverrides = new Map([
-  ["format@0.2.2", "MIT"],
-]);
-
-const prohibitedPackages = new Set([
-  "@codesandbox/nodebox",
-  "@codesandbox/sandpack-client",
-  "@codesandbox/sandpack-react",
-]);
+// One shared policy feeds the npm gate and the deterministic all-ecosystem
+// inventory. Expressions are exact values; no substring inference is allowed.
+const allowedLicenseExpressions = new Set(policy.acceptedSpdxExpressions);
+const reviewedLicenseOverrides = new Map(
+  Object.entries(policy.nodeOverrides ?? {}).map(([key, record]) => {
+    if (!record || typeof record.spdx !== "string" || typeof record.evidence !== "string") {
+      throw new Error(`${policyPath}: invalid node override ${key}`);
+    }
+    return [key, record.spdx];
+  }),
+);
+const prohibitedPackages = new Set(policy.prohibitedNodePackages ?? []);
 
 function packageName(lockPath) {
   const marker = "node_modules/";

@@ -1,14 +1,23 @@
-# Deploy Mantly — Commercial On-Premises
+# Deploy Mantly — Commercially Supported On-Premises
 
-This guide covers Mantly's separately licensed commercial distribution. It
-ships as pre-built Docker images with compiled Python and validates a commercial
-license against the Mantly SaaS server. Contract terms govern that distribution.
+This guide covers a commercially supported delivery of Mantly Community. The
+covered source and corresponding container code remain `AGPL-3.0-only`;
+commercial terms cover registry access, updates, support, warranties, and other
+services. A service-entitlement key does not revoke or narrow rights already
+granted under the AGPL. No separately licensed component is included unless a
+release manifest identifies it explicitly.
 
 For the AGPL-3.0 Community edition, build from source using
 [`docker-compose.community.yml`](https://github.com/olsommer/mantly/blob/main/docker-compose.community.yml)
 and follow the
 [Community deployment guide](https://github.com/olsommer/mantly/blob/main/docs/deploy-community.md).
 Community self-hosting uses no Mantly license key or license-server check.
+
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
 
 ## Prerequisites
 
@@ -31,6 +40,11 @@ support-schema-gate.sh # Standalone PocketBase support schema gate
 support-channel-lifecycle-smoke.sh # Focused per-channel proof runner
 support-channel-activation-plan.sh # Channel setup handoff export
 release-manifest.json # Image tag, support scripts, package-gate, and launch-proof handoff metadata
+LICENSE               # AGPL-3.0-only terms for covered Community code
+NOTICE.md              # Repository, third-party, and trademark notices
+THIRD_PARTY_NOTICES.md # Reviewed human-readable dependency notices
+legal/                 # Locked inventory and release/legal evidence
+mantly-community-source.tar.gz # Corresponding source revision for the images
 README.md             # This file
 ```
 
@@ -372,7 +386,7 @@ Store backups off-server. PocketBase's `data.db` contains tenant data, users, ch
 | Outbound  | `ghcr.io`           | 443  | Pull Docker images               |
 | Inbound   | Your server         | 80, 443 | HTTP/HTTPS from users         |
 | Inbound   | Your server         | 8095 | Optional channel bridge |
-| Outbound  | `api.mantly.io`     | 443  | License validation (every 12h)   |
+| Outbound  | `api.mantly.io`     | 443  | Commercial registry/support entitlement validation |
 | Outbound  | Google APIs         | 443  | Gemini AI model calls            |
 | Outbound  | Let's Encrypt       | 80   | TLS certificate issuance (ACME)  |
 
@@ -380,8 +394,8 @@ Store backups off-server. PocketBase's `data.db` contains tenant data, users, ch
 
 | Symptom | Likely cause |
 |---------|-------------|
-| `503 License validation failed` | License expired, revoked, or server unreachable for >48h. Contact support@mantly.io |
-| `503` after server migration | License is bound to the previous machine. Contact Mantly for a key reset |
+| `503 License validation failed` | Commercial image/support entitlement is unavailable. Contact support or deploy the AGPL Community source; Community rights are not revoked. |
+| `503` after server migration | Commercial service entitlement is bound to the previous machine. Contact Mantly for a key reset; the Community deployment remains available. |
 | `502 Bad Gateway` | App container not ready — check `docker compose logs app` |
 | Add-in not visible in Outlook | Manifest not uploaded in admin centre, or wrong `ADDIN_ID` |
 | TLS certificate not issued | DNS not pointing to server, or ports 80/443 blocked |

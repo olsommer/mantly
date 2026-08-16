@@ -166,9 +166,15 @@ browser_e2e() {
 
 production_images() {
   require_command docker
+  require_command curl
   run "Combined production image" docker build -t mantly-quality "$ROOT"
   run "SaaS API image" docker build -f "$ROOT/Dockerfile.api" -t mantly-api-quality "$ROOT"
+  run "Caddy production image" docker build -f "$ROOT/caddy/Dockerfile" -t mantly-caddy-quality "$ROOT"
   run "PocketBase production image" docker build -f "$ROOT/pocketbase/Dockerfile" -t mantly-pocketbase-quality "$ROOT"
+  run "Admin production image" docker build -f "$ROOT/deploy/admin.Dockerfile" -t mantly-admin-quality "$ROOT"
+  run "Add-in production image" docker build -f "$ROOT/deploy/addin.Dockerfile" -t mantly-addin-quality "$ROOT"
+  run "Landing production image" docker build -f "$ROOT/deploy/landing.Dockerfile" -t mantly-landing-quality "$ROOT"
+  run "Production image non-root runtime and upgrade smoke" bash "$ROOT/scripts/smoke-production-images.sh"
 }
 
 security_policy() {

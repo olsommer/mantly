@@ -78,6 +78,11 @@ async function createUserRecord(
       tenant: tenantId,
       is_root: isRoot,
       must_change_password: mustChangePassword,
+      // /api/auth/login-method only returns "password" for accounts with
+      // password login explicitly enabled, and the sign-in form renders the
+      // password field from that response. Both the on-prem bootstrap and
+      // admin-provisioned users set this, so the seeded admin must too.
+      password_login_enabled: true,
       verified: true,
     }),
   });

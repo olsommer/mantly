@@ -48,12 +48,15 @@ jobs:
       - name: Seed representative PocketBase and application state
         run: |
           set -euo pipefail
-          docker compose run --rm pocketbase python - <<'PY'
+          docker compose exec -T pocketbase python - <<'PY'
+          import os
           import pathlib
           import hashlib
           import json
           import sqlite3
 
+          assert os.getuid() == 10001, os.getuid()
+          assert os.getgid() == 10001, os.getgid()
           database = pathlib.Path('/pb/pb_data/data.db')
           database.parent.mkdir(parents=True, exist_ok=True)
           connection = sqlite3.connect(database)
@@ -103,8 +106,17 @@ jobs:
               json.dumps(fixture), encoding='utf-8'
           )
           PY
-          docker compose run --rm app sh -ec \
-            "mkdir -p /app/data/nested; printf 'application-before-backup\n' > /app/data/nested/state.txt"
+          docker compose exec -T app sh -ec \
+            'test "$(id -u)" = 1000; test "$(id -g)" = 1000; mkdir -p /app/data/nested; printf "application-before-backup\n" > /app/data/nested/state.txt; ln -s /etc /app/data/external-link'
+
+      - name: Simulate legacy root-owned backup data
+        run: |
+          set -euo pipefail
+          docker compose stop app pocketbase
+          docker compose run --rm --no-deps --user 0:0 pocketbase \
+            sh -ec 'chown -hRP 0:0 /pb/pb_data'
+          docker compose run --rm --no-deps --user 0:0 app \
+            sh -ec 'chown -hRP 0:0 /app/data'
 
       - name: Create consistent backup bundle
         run: |
@@ -124,7 +136,7 @@ jobs:
       - name: Mutate and delete durable state after backup
         run: |
           set -euo pipefail
-          docker compose run --rm pocketbase python - <<'PY'
+          docker compose run --rm --no-deps --user 0:0 pocketbase python - <<'PY'
           import pathlib
           import sqlite3
 
@@ -138,7 +150,7 @@ jobs:
           pathlib.Path('/pb/pb_data/attachment.txt').unlink()
           pathlib.Path('/pb/pb_data/unwanted-after-backup.txt').write_text('must disappear\n', encoding='utf-8')
           PY
-          docker compose run --rm app sh -ec \
+          docker compose run --rm --no-deps --user 0:0 app sh -ec \
             "printf 'after-backup-corruption\n' > /app/data/nested/state.txt; printf 'must disappear\n' > /app/data/unwanted.txt"
           docker compose stop app pocketbase
 
@@ -148,24 +160,35 @@ jobs:
       - name: Prove restored database, attachment, and application state
         run: |
           set -euo pipefail
-          docker compose run --rm pocketbase python - <<'PY'
+          docker compose exec -T pocketbase python - <<'PY'
+          import os
           import pathlib
           import sqlite3
 
+          assert os.getuid() == 10001, os.getuid()
+          assert os.getgid() == 10001, os.getgid()
           database = pathlib.Path('/pb/pb_data/data.db')
-          connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+          connection = sqlite3.connect(database)
           try:
               value = connection.execute('SELECT value FROM restore_fixture').fetchone()[0]
               integrity = connection.execute('PRAGMA integrity_check').fetchone()[0]
+              connection.execute('BEGIN IMMEDIATE')
+              connection.execute(
+                  'UPDATE restore_fixture SET value = value WHERE id = 1'
+              )
+              connection.rollback()
           finally:
               connection.close()
           assert value == 'before-backup', value
           assert integrity == 'ok', integrity
           assert pathlib.Path('/pb/pb_data/attachment.txt').read_text(encoding='utf-8') == 'attachment-before-backup\n'
           assert not pathlib.Path('/pb/pb_data/unwanted-after-backup.txt').exists()
+          probe = pathlib.Path('/pb/pb_data/post-restore-write-check')
+          probe.write_text('writable\n', encoding='utf-8')
+          probe.unlink()
           PY
-          docker compose run --rm app sh -ec \
-            "test \"$(cat /app/data/nested/state.txt)\" = 'application-before-backup'; test ! -e /app/data/unwanted.txt"
+          docker compose exec -T app sh -ec \
+            'test "$(id -u)" = 1000; test "$(id -g)" = 1000; grep -Fxq "application-before-backup" /app/data/nested/state.txt; test ! -e /app/data/unwanted.txt; test -L /app/data/external-link; test "$(readlink /app/data/external-link)" = /etc; printf "writable\n" > /app/data/nested/post-restore-write-check; rm /app/data/nested/post-restore-write-check'
 
       - name: Prove missing required attachment evidence fails closed
         run: |

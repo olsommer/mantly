@@ -12,6 +12,10 @@ PYTHON_HELPER_IMAGE="${BACKUP_PYTHON_HELPER_IMAGE:-python:3.12-alpine}"
 SKIP_SERVICE_HEALTHCHECK="${SKIP_RESTORE_SERVICE_HEALTHCHECK:-false}"
 KEEP_WORK_DIR="${KEEP_RESTORE_WORK_DIR:-false}"
 EXPECTATIONS_FILE="${RESTORE_EXPECTATIONS_FILE:-}"
+APP_DATA_UID="${RESTORE_APP_DATA_UID:-1000}"
+APP_DATA_GID="${RESTORE_APP_DATA_GID:-1000}"
+PB_DATA_UID="${RESTORE_PB_DATA_UID:-10001}"
+PB_DATA_GID="${RESTORE_PB_DATA_GID:-10001}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -78,6 +82,36 @@ restore_mount() {
     -v "$archive:/restore/archive.tar.gz:ro" \
     "$HELPER_IMAGE" \
     sh -ec 'cd /target; tar -xzf /restore/archive.tar.gz'
+}
+
+validate_data_identity() {
+  local label="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]{0,9}$ ]] || (( value > 2147483647 )); then
+    fail "$label must be a non-root numeric ID between 1 and 2147483647"
+  fi
+}
+
+normalize_mount_ownership() {
+  local source="$1"
+  local uid="$2"
+  local gid="$3"
+  local label="$4"
+
+  log "Assigning restored $label data to $uid:$gid"
+  docker run --rm --user 0:0 -v "$source:/target" "$HELPER_IMAGE" \
+    sh -ec '
+      rootfs_owner="$(stat -c "%u:%g" /etc/passwd)"
+      chown -hRP "$1:$2" /target
+      test "$(stat -c "%u:%g" /etc/passwd)" = "$rootfs_owner"
+    ' sh "$uid" "$gid"
+
+  docker run --rm --user "$uid:$gid" -v "$source:/target" "$HELPER_IMAGE" \
+    sh -ec '
+      probe="$(mktemp /target/.mantly-restore-write-check.XXXXXX)"
+      test -f "$probe"
+      rm -f "$probe"
+    '
 }
 
 verify_sqlite_mount() {
@@ -148,6 +182,11 @@ require_command docker
 require_command python3
 require_command sha256sum
 require_command tar
+
+validate_data_identity RESTORE_APP_DATA_UID "$APP_DATA_UID"
+validate_data_identity RESTORE_APP_DATA_GID "$APP_DATA_GID"
+validate_data_identity RESTORE_PB_DATA_UID "$PB_DATA_UID"
+validate_data_identity RESTORE_PB_DATA_GID "$PB_DATA_GID"
 
 docker compose version >/dev/null
 
@@ -256,6 +295,9 @@ clear_mount "$PB_VOLUME"
 clear_mount "$APP_VOLUME"
 restore_mount "$PB_VOLUME" "$EXTRACT_DIR/pocketbase-data.tar.gz"
 restore_mount "$APP_VOLUME" "$EXTRACT_DIR/application-data.tar.gz"
+
+normalize_mount_ownership "$PB_VOLUME" "$PB_DATA_UID" "$PB_DATA_GID" PocketBase
+normalize_mount_ownership "$APP_VOLUME" "$APP_DATA_UID" "$APP_DATA_GID" application
 
 log "Verifying restored SQLite databases before service startup"
 verify_sqlite_mount "$PB_VOLUME" true

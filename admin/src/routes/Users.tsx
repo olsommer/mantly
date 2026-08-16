@@ -513,6 +513,7 @@ export const Users = ({
                                                 onClick={() => void handleDeleteUser(user)}
                                                 disabled={isDemoAccount || deletingUserId === user.id}
                                                 className="text-muted-foreground"
+                                                aria-label={t('Delete')}
                                             >
                                                 {deletingUserId === user.id ? (
                                                     <Loader className="size-4 animate-spin" />

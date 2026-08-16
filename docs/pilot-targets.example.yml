@@ -1,0 +1,182 @@
+schema_version: "1.0"
+pilot_id: "replace-with-pilot-id"
+customer_identifier: "replace-with-anonymized-or-contract-approved-name"
+operational_owner: "replace-with-operational-owner"
+economic_buyer: "replace-with-economic-buyer"
+pilot_window:
+  start: "YYYY-MM-DD"
+  end: "YYYY-MM-DD"
+mailbox_or_queue: "support@example.com"
+workflow: "email-based order and delivery support"
+currency: "EUR"
+expected_eligible_ticket_count: 200
+minimum_eligible_ticket_count: 200
+observation_window_days: 7
+baseline:
+  start: "YYYY-MM-DD"
+  end: "YYYY-MM-DD"
+  labour_cost_per_hour: 35.0
+  cost_per_resolved_ticket: 12.0
+runbooks:
+  - id: "delivery-status"
+    version: "replace-with-published-version"
+    autonomy: "automatic"
+  - id: "delivery-address-change"
+    version: "replace-with-published-version"
+    autonomy: "semi-automatic"
+  - id: "cancellation-or-refund-eligibility"
+    version: "replace-with-published-version"
+    autonomy: "semi-automatic"
+kpis:
+  verified_full_automation_rate:
+    operator: ">="
+    target: 0.20
+    owner: "pilot metrics owner"
+    data_source: "validated pilot metric export: eligibility and handling_classification"
+  recurring_cost_reduction_rate:
+    operator: ">="
+    target: 0.15
+    owner: "finance owner"
+    data_source: "approved baseline plus validated human_minutes, llm_cost, and tool_and_delivery_cost"
+  unsafe_or_materially_incorrect_outcome_rate:
+    operator: "<="
+    target: 0.00
+    owner: "safety review owner"
+    data_source: "validated pilot metric export: unsafe_or_materially_incorrect"
+  customer_continuation_score:
+    operator: ">="
+    target: 1
+    owner: "economic buyer"
+    data_source: "signed pilot-close customer decision record"
+  runbook_match_precision:
+    operator: ">="
+    target: 0.95
+    owner: "runbook owner"
+    data_source: "validated pilot metric export: runbook_id, runbook_version, and match_review"
+  runbook_match_coverage:
+    operator: ">="
+    target: 0.50
+    owner: "runbook owner"
+    data_source: "validated pilot metric export: eligibility and runbook_id"
+  draft_acceptance_rate:
+    operator: ">="
+    target: 0.70
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: draft_generated, material_edit, and delivery_status"
+  human_escalation_rate:
+    operator: "<="
+    target: 0.80
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: human_touch_count and handling_classification"
+  first_response_time_p90_seconds:
+    operator: "<="
+    target: 3600
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: received_at and first_response_at"
+  resolution_time_p90_seconds:
+    operator: "<="
+    target: 86400
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: received_at and resolved_at"
+  failed_action_rate:
+    operator: "<="
+    target: 0.05
+    owner: "engineering owner"
+    data_source: "validated pilot metric export: action_attempts and action_failures"
+  manual_recovery_rate:
+    operator: "<="
+    target: 0.02
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: autonomous_candidate and recovery_required"
+  variable_ai_and_delivery_cost_per_eligible_ticket_eur:
+    operator: "<="
+    target: 1.00
+    owner: "finance owner"
+    data_source: "validated pilot metric export: llm_cost and tool_and_delivery_cost"
+  variable_ai_and_delivery_cost_per_verified_autonomous_ticket_eur:
+    operator: "<="
+    target: 5.00
+    owner: "finance owner"
+    data_source: "validated pilot metric export: handling_classification, llm_cost, and tool_and_delivery_cost"
+  quality_review_pass_rate:
+    operator: ">="
+    target: 0.95
+    owner: "quality review owner"
+    data_source: "validated pilot metric export: review_result for the required review sample"
+guards:
+  critical_outcome_count:
+    operator: "<="
+    target: 0
+    owner: "safety review owner"
+    data_source: "validated pilot metric export: critical_outcome"
+  unsafe_or_materially_incorrect_outcome_count:
+    operator: "<="
+    target: 0
+    owner: "safety review owner"
+    data_source: "validated pilot metric export: unsafe_or_materially_incorrect"
+  tenant_isolation_incident_count:
+    operator: "<="
+    target: 0
+    owner: "security owner"
+    data_source: "incident register and tenant-isolation review evidence"
+  duplicate_irreversible_side_effect_count:
+    operator: "<="
+    target: 0
+    owner: "engineering owner"
+    data_source: "action execution trace and incident register"
+  schema_validation_error_count:
+    operator: "<="
+    target: 0
+    owner: "pilot metrics owner"
+    data_source: "pilot evidence validator output"
+  semantic_validation_error_count:
+    operator: "<="
+    target: 0
+    owner: "pilot metrics owner"
+    data_source: "pilot evidence validator output"
+  missing_required_evidence_count:
+    operator: "<="
+    target: 0
+    owner: "pilot metrics owner"
+    data_source: "final evidence completeness audit"
+  unknown_outcome_count:
+    operator: "<="
+    target: 0
+    owner: "pilot metrics owner"
+    data_source: "schema validation and final outcome reconciliation"
+  unresolved_eligible_ticket_count:
+    operator: "<="
+    target: 0
+    owner: "support operations owner"
+    data_source: "validated pilot metric export: resolved_at and handling_classification"
+  required_review_sample_completion_rate:
+    operator: ">="
+    target: 1.00
+    owner: "quality review owner"
+    data_source: "review sampling ledger joined to validated pilot metric records"
+review_sampling:
+  first_eligible_tickets_full_review: 50
+  autonomous_sample_rate_after_initial: 0.20
+  assisted_sample_rate: 0.10
+  manual_no_match_sample_rate: 0.10
+pause_conditions:
+  - "critical unsafe or materially incorrect outcome"
+  - "suspected tenant-isolation or unauthorized disclosure incident"
+  - "duplicate irreversible side effect"
+  - "missing required execution trace"
+  - "unknown runbook version or outcome"
+  - "delivery or action failures above an approved threshold"
+approved_exclusion_reasons:
+  - "spam_or_malware"
+  - "duplicate_ingestion"
+  - "workflow_out_of_scope"
+  - "source_system_outage"
+  - "customer_withdrawal_or_deletion"
+  - "synthetic_or_training"
+commercial_decision_date: "YYYY-MM-DD"
+instrumentation_follow_up: "https://github.com/olsommer/mantly/issues/6"
+approvals:
+  product_owner: "replace-with-name-date-and-approval-reference"
+  engineering_owner: "replace-with-name-date-and-approval-reference"
+  customer_operational_owner: "replace-with-name-date-and-approval-reference"
+  privacy_or_legal_owner: "replace-with-name-date-and-approval-reference"

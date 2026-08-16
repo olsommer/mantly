@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-import { AUTH_E2E, seedBootstrapAdmin } from './auth.helpers';
+import { AUTH_E2E, seedBootstrapAdmin, waitForAdminSession } from './auth.helpers';
 
 test.describe('Auth lifecycle', () => {
   test('admin provisions a user who is forced to change password on first login', async ({ browser }) => {
     test.slow();
 
-    await seedBootstrapAdmin();
+    const seed = await seedBootstrapAdmin();
 
     const customerEmail = `customer.auth-e2e+${Date.now()}@example.com`;
     const initialPassword = 'InitialUser123!';
@@ -20,6 +20,9 @@ test.describe('Auth lifecycle', () => {
 
     await adminPage.goto(AUTH_E2E.adminUrl);
     await adminPage.getByLabel('Email').fill(AUTH_E2E.bootstrapAdminEmail);
+    await adminPage.getByRole('button', { name: 'Continue' }).click();
+    await expect(adminPage.getByLabel('Password')).toBeVisible();
+    await expect(adminPage.getByRole('button', { name: 'Forgot password?' })).toBeVisible();
     const adminResetRequest = adminPage.waitForResponse((response) => {
       return response.url().includes('/api/collections/users/request-password-reset')
         && response.request().method() === 'POST';
@@ -28,10 +31,16 @@ test.describe('Auth lifecycle', () => {
     expect((await adminResetRequest).status()).toBe(204);
     await adminPage.getByLabel('Password').fill(AUTH_E2E.bootstrapAdminPassword);
     await adminPage.getByRole('button', { name: 'Sign in' }).click();
+    await waitForAdminSession(adminPage);
 
-    await adminPage.getByRole('button', { name: 'Users' }).click();
+    // User management lives behind the sidebar account dropdown. Address the
+    // route directly so this auth test does not depend on that menu's shape.
+    await adminPage.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/users`);
     await expect(adminPage.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
 
+    // The provisioning form lives in a dialog; open it before filling.
+    await adminPage.getByRole('button', { name: 'Add user', exact: true }).click();
+    await expect(adminPage.locator('#new-user-email')).toBeVisible();
     await adminPage.locator('#new-user-email').fill(customerEmail);
     await adminPage.locator('#new-user-password').fill(initialPassword);
     const createUserRequest = adminPage.waitForResponse((response) => {
@@ -50,7 +59,10 @@ test.describe('Auth lifecycle', () => {
     await expect(customerRow.getByText(customerEmail)).toBeVisible();
     await expect(customerRow.getByText('Password change required')).toBeVisible();
 
-    const customerFirstLoginContext = await browser.newContext();
+    // The add-in picks its language from navigator.language when nothing is
+    // stored, and these customer steps assert the German strings. Pin the
+    // locale so the run does not depend on the CI browser's default language.
+    const customerFirstLoginContext = await browser.newContext({ locale: 'de-DE' });
     const customerFirstLoginPage = await customerFirstLoginContext.newPage();
 
     await customerFirstLoginPage.goto(AUTH_E2E.addinUrl);
@@ -65,15 +77,18 @@ test.describe('Auth lifecycle', () => {
     await customerFirstLoginPage.getByLabel('Passwort').fill(initialPassword);
     await customerFirstLoginPage.getByRole('button', { name: 'Anmelden' }).click();
 
-    await expect(customerFirstLoginPage.getByRole('heading', { name: 'Passwort ändern' })).toBeVisible();
+    // After sign-in the add-in switches to the account's own language, and
+    // admin-provisioned users are created with language 'en', so the
+    // post-login screens are English even in this German browser context.
+    await expect(customerFirstLoginPage.getByRole('heading', { name: 'Change password' })).toBeVisible();
     await customerFirstLoginPage.locator('#current-password').fill(initialPassword);
     await customerFirstLoginPage.locator('#new-password').fill(newPassword);
     await customerFirstLoginPage.locator('#confirm-password').fill(newPassword);
-    await customerFirstLoginPage.getByRole('button', { name: 'Passwort aktualisieren' }).click();
+    await customerFirstLoginPage.getByRole('button', { name: 'Update password' }).click();
 
-    await expect(customerFirstLoginPage.getByText('Willkommen bei Mantly')).toBeVisible();
+    await expect(customerFirstLoginPage.getByText('Welcome to Mantly')).toBeVisible();
 
-    const customerReloginContext = await browser.newContext();
+    const customerReloginContext = await browser.newContext({ locale: 'de-DE' });
     const customerReloginPage = await customerReloginContext.newPage();
     await customerReloginPage.goto(AUTH_E2E.addinUrl);
     await customerReloginPage.getByLabel('E-Mail').fill(customerEmail);
@@ -89,8 +104,8 @@ test.describe('Auth lifecycle', () => {
     await customerReloginPage.getByRole('button', { name: 'Anmelden' }).click();
     expect((await reloginPocketBaseAuth).status()).toBe(200);
     expect((await reloginExchange).status()).toBe(200);
-    await expect(customerReloginPage.getByText('Willkommen bei Mantly')).toBeVisible();
-    await expect(customerReloginPage.getByRole('heading', { name: 'Passwort ändern' })).toHaveCount(0);
+    await expect(customerReloginPage.getByText('Welcome to Mantly')).toBeVisible();
+    await expect(customerReloginPage.getByRole('heading', { name: 'Change password' })).toHaveCount(0);
 
     const deleteUserRequest = adminPage.waitForResponse((response) => {
       return response.url().includes('/api/admin/users/')
@@ -104,7 +119,7 @@ test.describe('Auth lifecycle', () => {
     await customerDeleteButton.click();
     expect((await deleteUserRequest).status()).toBe(200);
 
-    const deletedUserLoginContext = await browser.newContext();
+    const deletedUserLoginContext = await browser.newContext({ locale: 'de-DE' });
     const deletedUserLoginPage = await deletedUserLoginContext.newPage();
     await deletedUserLoginPage.goto(AUTH_E2E.addinUrl);
     await deletedUserLoginPage.getByLabel('E-Mail').fill(customerEmail);

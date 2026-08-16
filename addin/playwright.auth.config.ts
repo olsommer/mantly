@@ -4,7 +4,7 @@ const addinUrl = process.env.E2E_ADDIN_URL || 'http://127.0.0.1:4173';
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'auth-lifecycle.spec.ts',
+  testMatch: ['auth-lifecycle.spec.ts', 'inbox-lifecycle.spec.ts'],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0,

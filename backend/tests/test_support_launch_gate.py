@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -1130,7 +1131,11 @@ def test_package_customer_manifest_includes_package_gate_evidence():
     result = subprocess.run(
         [_bash_executable(), str(root / "scripts/package-customer.sh"), version],
         cwd=root,
-        env={**os.environ, "REGISTRY": "ghcr.io/isarlabs"},
+        env={
+            **os.environ,
+            "PYTHON_BIN": Path(sys.executable).as_posix(),
+            "REGISTRY": "ghcr.io/isarlabs",
+        },
         capture_output=True,
         text=True,
         check=False,

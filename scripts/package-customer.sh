@@ -12,23 +12,27 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 VERSION="${1:-}"
 REGISTRY="${REGISTRY:-ghcr.io/isarlabs}"
 
+python_is_supported() {
+    "$1" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1
+}
+
 resolve_python() {
     local candidate
     if [ -n "${PYTHON_BIN:-}" ]; then
-        "$PYTHON_BIN" --version >/dev/null 2>&1 || {
-            echo "Configured PYTHON_BIN is not executable: $PYTHON_BIN" >&2
+        python_is_supported "$PYTHON_BIN" || {
+            echo "Configured PYTHON_BIN must be executable Python 3.11+: $PYTHON_BIN" >&2
             exit 69
         }
         printf '%s\n' "$PYTHON_BIN"
         return
     fi
     for candidate in python3 python; do
-        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+        if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
             printf '%s\n' "$candidate"
             return
         fi
     done
-    echo "Python 3 is required; set PYTHON_BIN to an executable interpreter." >&2
+    echo "Python 3.11+ is required; set PYTHON_BIN to a compatible interpreter." >&2
     exit 69
 }
 
@@ -93,7 +97,7 @@ if command -v uv >/dev/null 2>&1; then
             --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
     )
 else
-    python3 "$ROOT/scripts/generate_third_party_notice.py" \
+    "$PYTHON_COMMAND" "$ROOT/scripts/generate_third_party_notice.py" \
         --root "$ROOT" \
         --check \
         --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \

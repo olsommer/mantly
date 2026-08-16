@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "1.0",
+  "releaseId": "<immutable-commit-or-image-set>",
+  "environmentId": "isolated-pilot-capacity",
+  "topology": {
+    "artifact": "runtime-topology.json",
+    "sha256": "<sha256>"
+  },
+  "loadRuns": [
+    {"kind": "steady", "artifact": "steady-1.json", "sha256": "<sha256>"},
+    {"kind": "steady", "artifact": "steady-2.json", "sha256": "<sha256>"},
+    {"kind": "steady", "artifact": "steady-3.json", "sha256": "<sha256>"},
+    {"kind": "burst", "artifact": "burst.json", "sha256": "<sha256>"},
+    {"kind": "soak", "artifact": "soak.json", "sha256": "<sha256>"},
+    {
+      "kind": "degraded-provider",
+      "artifact": "degraded-provider.json",
+      "sha256": "<sha256>"
+    }
+  ],
+  "exercises": [
+    {
+      "kind": "restart-catch-up",
+      "artifact": "restart-catch-up.json",
+      "sha256": "<sha256>"
+    },
+    {
+      "kind": "storage-growth",
+      "artifact": "storage-growth.json",
+      "sha256": "<sha256>"
+    },
+    {"kind": "recovery", "artifact": "recovery.json", "sha256": "<sha256>"}
+  ],
+  "resourceEvidence": {
+    "artifact": "resource-evidence.json",
+    "sha256": "<sha256>"
+  },
+  "operatingEnvelope": {
+    "activeTenants": 1,
+    "concurrentInboxUsers": 10,
+    "ticketsPerDay": 200,
+    "messagesPerDay": 400,
+    "inboundEventsPerSecond": 1,
+    "outboundDeliveriesPerSecond": 1,
+    "concurrentAutomationExecutions": 5,
+    "attachmentAndKnowledgeGiB": 10,
+    "approvedRequestsPerSecond": 4.2,
+    "observedBottleneckRequestsPerSecond": 6,
+    "headroomPercent": 30
+  },
+  "approvals": {
+    "architecture": {
+      "approvedBy": "<named-owner>",
+      "approvedAt": "<iso-8601>",
+      "decision": "approved"
+    },
+    "operations": {
+      "approvedBy": "<named-owner>",
+      "approvedAt": "<iso-8601>",
+      "decision": "approved"
+    }
+  }
+}

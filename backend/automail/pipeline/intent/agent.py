@@ -732,7 +732,7 @@ def _select_applicable_actions(
 
     selected_names = {
         name.strip()
-        for name in output.selected_action_names
+        for name in (output.selected_action_names or [])
         if name.strip()
     }
     selected: list[IntentAction] = []
@@ -1354,6 +1354,7 @@ def _run_intent_router_agent(
     llm = create_llm(config, timeout=180, max_retries=2)
     usage_context = getattr(llm, "_mantly_usage_context", None)
 
+    raw_result: dict[str, Any] = {}
     try:
         # One tool call carries every concern. Tool and graph limits keep router
         # behavior bounded even when a model ignores the prompt.
@@ -2679,7 +2680,7 @@ def _scope_attachment_collisions(
     for filename, items in references.items():
         if filename not in colliding_names:
             continue
-        for result, owner_type, attachment_index, owner in items:
+        for result, _owner_type, attachment_index, owner in items:
             if isinstance(owner, RunbookAttachment):
                 original_filename = owner.source_filename or owner.filename
                 owner_key = f"runbook:{owner.source_intent or result.outcome.intent_name or ''}"
@@ -3825,7 +3826,7 @@ def _intent_result_from_outcomes(outcomes: list[RunbookOutcome], intents_dir: An
             matched=True,
             intent_name=primary.intent_name,
             actions=primary.actions,
-            response=_load_response_config(primary.intent_name, intents_dir=intents_dir),
+            response=_load_response_config(primary.intent_name or "", intents_dir=intents_dir),
             concerns=outcomes,
             error=primary.error,
         )

@@ -253,6 +253,7 @@ class TestEnsureAppCollectionsSchema:
             pb_admin_password="secret",
         )
 
+        assert not client.is_closed
         assert result == AppCollectionsBootstrapResult(
             created_collections=[
                 "licenses",

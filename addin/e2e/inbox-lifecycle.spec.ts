@@ -118,7 +118,9 @@ test.describe('Admin Inbox lifecycle', () => {
     // already had in memory.
     await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox?view=list`);
     await page.getByRole('button', { name: 'Deterministic delivery request' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Deterministic delivery request' })).toBeVisible();
+    // The reopened detail also renders an sr-only drawer title with the same
+    // text, so target the visible ticket heading rather than the role alone.
+    await expect(page.locator('h1').filter({ hasText: 'Deterministic delivery request' })).toBeVisible();
     await expect(
       page.locator(`[data-outbound-reply="${draft.id}"][data-outbound-reply-status="sent"]`).last(),
     ).toBeVisible();

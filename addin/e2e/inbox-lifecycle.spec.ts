@@ -116,7 +116,7 @@ test.describe('Admin Inbox lifecycle', () => {
     // The open ticket is client-side state, so a plain reload returns to the
     // list. Reload straight into the ticket route to check the sent state
     // survives a fresh page load.
-    await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox/${createdIssue.id}`);
+    await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox/${createdIssue.id}?view=list`);
     await expect(page.getByRole('heading', { name: 'Deterministic delivery request' })).toBeVisible();
     const closeRequest = page.waitForResponse((response) => (
       response.url().endsWith(`/issues/${createdIssue.id}`)

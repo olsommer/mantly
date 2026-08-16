@@ -25,6 +25,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Runs the pinned gitleaks CLI image rather than gitleaks-action, so this
+      # needs no GITHUB_TOKEN and no pull-requests: write. Findings are printed
+      # to the job log instead of posted as a comment.
       - name: Run canonical secret scan
         run: ./scripts/check-quality.sh security-secret
 

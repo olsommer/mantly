@@ -18,10 +18,14 @@ direct runtime dependencies:
 - Apache-2.0: class-variance-authority.
 - Apache-2.0 AND MIT: posthog-js.
 - ISC: Lucide and yaml.
+- OFL-1.1: the Fontsource webfont packages bundled by the Landing application
+  (`@fontsource/inter`, `@fontsource/inter-tight`, and
+  `@fontsource/playfair-display`). The SIL Open Font License applies to the
+  font files themselves, which travel with the built assets.
 
 Reviewed licenses in their locked transitive production graphs also include
-0BSD, BSD-3-Clause, MIT AND ISC, MPL-2.0, Python-2.0, and
-MPL-2.0 OR Apache-2.0. The legacy `format@0.2.2` package declares MIT through
+0BSD, BSD-2-Clause, BSD-3-Clause, MIT AND ISC, MPL-2.0, PSF-2.0, Python-2.0,
+and MPL-2.0 OR Apache-2.0. The legacy `format@0.2.2` package declares MIT through
 its `licenses` metadata. The installed `posthog-js@1.406.2` distribution
 declares Apache-2.0 AND MIT and includes both sets of notices in its `LICENSE`
 file.

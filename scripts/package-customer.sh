@@ -87,22 +87,26 @@ PY
 echo "=== Generating locked license evidence ==="
 rm -rf "$LICENSE_EVIDENCE_DIR"
 mkdir -p "$LICENSE_EVIDENCE_DIR"
-if command -v uv >/dev/null 2>&1; then
-    (
-        cd "$ROOT/backend"
-        uv run --frozen --no-dev python ../scripts/generate_third_party_notice.py \
-            --root "$ROOT" \
-            --check \
-            --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \
-            --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
-    )
-else
-    "$PYTHON_COMMAND" "$ROOT/scripts/generate_third_party_notice.py" \
+# generate_third_party_notice.py shells out to "uv export" itself, so uv is a
+# hard requirement here. Fail with that reason rather than falling through to a
+# plain-python branch that is only reachable when uv is missing and therefore
+# can only ever die inside the generator.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required to generate locked license evidence: generate_third_party_notice.py exports the frozen Python environment with 'uv export'." >&2
+    exit 66
+fi
+(
+    cd "$ROOT/backend"
+    # --no-sync reads the environment as it stands. --frozen --no-dev would
+    # exact-sync backend/.venv and uninstall pytest out from under the test
+    # session that invokes this script, and would strip a developer's dev
+    # environment on any manual run.
+    uv run --no-sync python ../scripts/generate_third_party_notice.py \
         --root "$ROOT" \
         --check \
         --json-out "$LICENSE_EVIDENCE_DIR/third-party-inventory.json" \
         --markdown-out "$LICENSE_EVIDENCE_DIR/THIRD_PARTY_INVENTORY.md"
-fi
+)
 
 # Clean and create staging directory.
 rm -rf "$STAGING"
@@ -140,8 +144,12 @@ if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]; then
     exit 65
 fi
 SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+# --prefix keeps the tarball self-contained. Without it the archive unpacks
+# repo paths straight into the current directory and overwrites the README.md
+# and LICENSE shipped next to it in this same package.
 git -C "$ROOT" archive \
     --format=tar.gz \
+    --prefix="mantly-community-source/" \
     --output="$STAGING/mantly-community-source.tar.gz" \
     "$SOURCE_REVISION"
 

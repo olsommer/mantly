@@ -76,6 +76,51 @@ jobs:
           )
           python -m json.tool artifacts/licenses/third-party-inventory.json >/dev/null
 
+      - name: Reconcile THIRD_PARTY_NOTICES.md with the generated inventory
+        run: |
+          set -euo pipefail
+          python3 - artifacts/licenses/third-party-inventory.json THIRD_PARTY_NOTICES.md <<'PY'
+          import json
+          import sys
+
+          inventory_path, notices_path = sys.argv[1], sys.argv[2]
+          with open(inventory_path, encoding="utf-8") as handle:
+              report = json.load(handle)
+          with open(notices_path, encoding="utf-8") as handle:
+              notices = handle.read()
+
+          # THIRD_PARTY_NOTICES.md is hand-maintained and ships in every image
+          # and in the customer source archive, so it carries the notice
+          # obligation. It cannot be regenerated from this inventory, but a
+          # license family entering the graph without ever being named here is
+          # the drift that actually matters.
+          def normalize(text: str) -> str:
+              # The policy records "(Apache-2.0 AND MIT)" while the prose writes
+              # it unparenthesised; the parentheses carry no meaning here.
+              return text.replace("(", "").replace(")", "")
+
+          normalized_notices = normalize(notices)
+          missing = sorted(
+              {
+                  component["spdx"]
+                  for component in report["components"]
+                  if component.get("spdx")
+                  and normalize(component["spdx"]) not in normalized_notices
+              }
+          )
+          if missing:
+              print("THIRD_PARTY_NOTICES.md does not mention these license expressions:", file=sys.stderr)
+              for expression in missing:
+                  packages = sorted(
+                      f"{item['ecosystem']}:{item['package']}@{item['version']}"
+                      for item in report["components"]
+                      if item.get("spdx") == expression
+                  )
+                  print(f"  - {expression}: {', '.join(packages[:5])}", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"THIRD_PARTY_NOTICES.md covers all {report['summary']['components']} inventoried components")
+          PY
+
       - name: Generate ecosystem SBOMs
         run: |
           mkdir -p artifacts/sbom
@@ -95,6 +140,9 @@ jobs:
           done
 
       - name: Upload SBOMs and reviewed notices
+        # A license-policy failure is exactly when this evidence is worth
+        # having, so upload it even when an earlier step failed.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: community-dependency-sboms

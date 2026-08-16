@@ -320,10 +320,15 @@ def collect_python(root: pathlib.Path, policy: Mapping[str, Any]) -> list[dict[s
     return components
 
 
-def _node_package_name(path: str, metadata: Mapping[str, Any]) -> str:
-    explicit = metadata.get("name")
-    if isinstance(explicit, str) and explicit:
-        return explicit
+def _node_package_name(path: str) -> str:
+    """Derive the package key from the lock path.
+
+    Deliberately ignores metadata.name so this matches packageName() in
+    check-dependency-licenses.mjs. Both gates read the same policy file, and an
+    aliased dependency such as "vite": "npm:rolldown-vite@..." would otherwise
+    be keyed as rolldown-vite here and vite there, so a policy override or
+    prohibition would apply in only one of them.
+    """
     marker = "node_modules/"
     if marker not in path:
         raise InventoryError(f"cannot derive package name from lock path: {path}")
@@ -347,14 +352,21 @@ def collect_node(root: pathlib.Path, policy: Mapping[str, Any]) -> list[dict[str
         direct_names = set(direct_dependencies) if isinstance(direct_dependencies, dict) else set()
 
         for package_path, raw_metadata in sorted(packages.items()):
-            if not package_path or not isinstance(raw_metadata, dict) or raw_metadata.get("dev") is True:
+            if not package_path or not isinstance(raw_metadata, dict):
                 continue
-            name = _node_package_name(package_path, raw_metadata)
+            name = _node_package_name(package_path)
+            # Prohibited packages are barred from the tree entirely, dev
+            # included. Skipping dev first let a prohibited dev dependency
+            # through here while check-dependency-licenses.mjs still caught it.
+            if name in prohibited:
+                raise InventoryError(
+                    f"{application}: prohibited package {name}@{raw_metadata.get('version') or 'unknown'}"
+                )
+            if raw_metadata.get("dev") is True:
+                continue
             version = raw_metadata.get("version")
             if not isinstance(version, str) or not version:
                 raise InventoryError(f"{application}: production package {name} has no locked version")
-            if name in prohibited:
-                raise InventoryError(f"{application}: prohibited package {name}@{version}")
             declared = raw_metadata.get("license")
             declared_text = declared.strip() if isinstance(declared, str) else ""
             expression, evidence, status = resolve_license(
@@ -517,6 +529,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.markdown_out:
             _write_output(args.markdown_out, render_markdown(report))
         if args.check and report["summary"]["unreviewed"]:
+            # Name the offenders. A bare exit 1 left CI with no indication of
+            # which package was rejected, and with --json-out the report goes
+            # to a file rather than the job log.
+            print(
+                f"license policy rejected {report['summary']['unreviewed']} "
+                f"of {report['summary']['components']} components:",
+                file=sys.stderr,
+            )
+            for item in report["components"]:
+                if item["policyStatus"] != "tracked":
+                    print(
+                        f"  - {item['ecosystem']} {item['package']}@{item['version']}: "
+                        f"{item['spdx'] or 'no license metadata'}",
+                        file=sys.stderr,
+                    )
             return 1
         return 0
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:

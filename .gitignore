@@ -63,6 +63,11 @@ logs/
 .pytest_cache/
 htmlcov/
 .coverage
+# Written by check-quality.sh backend-tests via --cov-report xml/json. Being
+# untracked and unignored, these tripped the clean-worktree gate in
+# package-customer.sh on every run after the backend test suite.
+coverage.xml
+coverage.json
 screenshots/
 playwright-report/
 test-results/

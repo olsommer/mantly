@@ -106,4 +106,26 @@ def test_rendering_is_byte_stable(tool) -> None:
         "disclaimer": "Inventory only.",
     }
 
-    assert tool.render_markdown(report) == tool.render_markdown(report)
+    rendered = tool.render_markdown(report)
+
+    # Byte-exact expectations. Comparing render_markdown(report) against itself
+    # cannot fail, so it asserted nothing about the rendered bytes.
+    assert rendered.startswith("# Locked third-party dependency inventory\n")
+    assert "Repository license: `AGPL-3.0-only`.\n" in rendered
+    assert "Target: Python 3.12.0 on `linux`.\n" in rendered
+    assert "- Components: **1**\n" in rendered
+    assert "- Tracked by policy: **1**\n" in rendered
+    assert "- Unreviewed: **0**\n" in rendered
+    assert (
+        "| python | backend default runtime | example | 1.0.0 | MIT | yes | tracked "
+        "| https://example.invalid/example |"
+    ) in rendered
+
+    # Key order must not leak into the output. A dict-ordering dependence is the
+    # realistic way this renderer would stop being byte-stable across runs.
+    reordered = {key: report[key] for key in reversed(list(report))}
+    reordered["components"] = [
+        {key: component[key] for key in reversed(list(component))}
+        for component in report["components"]
+    ]
+    assert tool.render_markdown(reordered) == rendered

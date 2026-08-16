@@ -1,3 +1,5 @@
+import type { Page } from '@playwright/test';
+
 export const AUTH_E2E = {
   pocketbaseUrl: process.env.E2E_PB_URL || 'http://127.0.0.1:8091',
   backendUrl: process.env.E2E_API_URL || 'http://127.0.0.1:8180',
@@ -136,6 +138,15 @@ async function waitForAdminUsersReady(apiToken: string): Promise<void> {
   }
 
   throw new Error(lastError);
+}
+
+/**
+ * Sign-in completes asynchronously: the form awaits the login response and only
+ * then writes the session token. Navigating before that lands on the login
+ * screen again, so wait for the token the app actually reads on boot.
+ */
+export async function waitForAdminSession(page: Page): Promise<void> {
+  await page.waitForFunction(() => window.localStorage.getItem('admin_auth_token') !== null);
 }
 
 export async function seedBootstrapAdmin(): Promise<BootstrapAdminSeed> {

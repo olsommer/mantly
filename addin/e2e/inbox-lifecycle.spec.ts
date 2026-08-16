@@ -5,6 +5,7 @@ import {
   adminApiJson,
   createInboxFixtureProject,
   seedBootstrapAdmin,
+  waitForAdminSession,
 } from './auth.helpers';
 
 test.describe('Admin Inbox lifecycle', () => {
@@ -23,6 +24,7 @@ test.describe('Admin Inbox lifecycle', () => {
     await expect(page.getByLabel('Password')).toBeVisible();
     await page.getByLabel('Password').fill(AUTH_E2E.bootstrapAdminPassword);
     await page.getByRole('button', { name: 'Sign in' }).click();
+    await waitForAdminSession(page);
     await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox?view=list`);
 
     await page.locator('[data-new-ticket-open]').first().click();

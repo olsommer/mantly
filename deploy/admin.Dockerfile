@@ -24,7 +24,8 @@ COPY demo /app/demo
 COPY admin/ ./
 RUN npm run build
 
-FROM nginx:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine@sha256:44e36330f74d4f3a1d4e222acca9e23b401fb87811a7597024502bb759c4dd49
 COPY deploy/spa-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/admin/dist /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 8080
+USER 101:101

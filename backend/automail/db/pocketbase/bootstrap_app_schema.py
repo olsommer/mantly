@@ -1,6 +1,7 @@
 """PocketBase application collection schema bootstrap."""
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import httpx
@@ -63,7 +64,8 @@ def ensure_app_collections_schema(
 
     created: list[str] = []
 
-    with httpx.Client(timeout=10.0) if client is None else client as http_client:
+    client_context = httpx.Client(timeout=10.0) if client is None else nullcontext(client)
+    with client_context as http_client:
         token = _authenticate_superuser(
             http_client,
             resolved_pb_url,

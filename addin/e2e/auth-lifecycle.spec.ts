@@ -20,6 +20,9 @@ test.describe('Auth lifecycle', () => {
 
     await adminPage.goto(AUTH_E2E.adminUrl);
     await adminPage.getByLabel('Email').fill(AUTH_E2E.bootstrapAdminEmail);
+    await adminPage.getByRole('button', { name: 'Continue' }).click();
+    await expect(adminPage.getByLabel('Password')).toBeVisible();
+    await expect(adminPage.getByRole('button', { name: 'Forgot password?' })).toBeVisible();
     const adminResetRequest = adminPage.waitForResponse((response) => {
       return response.url().includes('/api/collections/users/request-password-reset')
         && response.request().method() === 'POST';

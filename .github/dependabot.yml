@@ -1,6 +1,6 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
       interval: "weekly"
@@ -74,12 +74,42 @@ updates:
           - "minor"
           - "patch"
 
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/caddy"
+      - "/deploy"
+      - "/pocketbase"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+
+  - package-ecosystem: "docker-compose"
+    directories:
+      - "/"
+      - "/deploy"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:15"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "06:00"
+      time: "06:30"
       timezone: "Europe/Berlin"
     open-pull-requests-limit: 5
     labels:

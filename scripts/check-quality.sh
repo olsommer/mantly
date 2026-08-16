@@ -99,7 +99,7 @@ repository_contract() {
       exit 1
     fi
   done
-  if grep -R --line-number --exclude-dir=.git --exclude='merge-order.md' 'isarai-test' "$ROOT"; then
+  if grep -R --line-number --exclude-dir=.git --exclude='check-quality.sh' --exclude='merge-order.md' 'isarai-test' "$ROOT"; then
     echo "Legacy isarai-test image name is forbidden." >&2
     exit 1
   fi
@@ -166,9 +166,15 @@ browser_e2e() {
 
 production_images() {
   require_command docker
+  require_command curl
   run "Combined production image" docker build -t mantly-quality "$ROOT"
   run "SaaS API image" docker build -f "$ROOT/Dockerfile.api" -t mantly-api-quality "$ROOT"
+  run "Caddy production image" docker build -f "$ROOT/caddy/Dockerfile" -t mantly-caddy-quality "$ROOT"
   run "PocketBase production image" docker build -f "$ROOT/pocketbase/Dockerfile" -t mantly-pocketbase-quality "$ROOT"
+  run "Admin production image" docker build -f "$ROOT/deploy/admin.Dockerfile" -t mantly-admin-quality "$ROOT"
+  run "Add-in production image" docker build -f "$ROOT/deploy/addin.Dockerfile" -t mantly-addin-quality "$ROOT"
+  run "Landing production image" docker build -f "$ROOT/deploy/landing.Dockerfile" -t mantly-landing-quality "$ROOT"
+  run "Production image non-root runtime and upgrade smoke" bash "$ROOT/scripts/smoke-production-images.sh"
 }
 
 security_policy() {
@@ -229,7 +235,7 @@ security_config_scan() {
   run "Container and repository configuration scan" docker run --rm \
     -v "$ROOT:/repo" \
     aquasec/trivy:0.58.2 \
-    config --severity HIGH,CRITICAL --exit-code 1 --hide-progress /repo
+    config --severity HIGH,CRITICAL --exit-code 1 --quiet /repo
 }
 
 security_all() {

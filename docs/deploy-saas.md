@@ -110,12 +110,16 @@ The current deployment is one application instance and one PocketBase/SQLite ins
 
 Use four Coolify application resources in the same project/environment:
 
-| Resource | Build pack | Domain | Dockerfile / compose |
-| --- | --- | --- | --- |
-| `mantly-api` | Docker Compose | `https://api.mantly.io` | `/docker-compose.yml`, service domain `caddy`, API image `/Dockerfile.api` |
-| `mantly-admin` | Dockerfile | `https://app.mantly.io` | `/deploy/admin.Dockerfile` |
-| `mantly-addin` | Dockerfile | `https://addin.mantly.io` | `/deploy/addin.Dockerfile` |
-| `mantly-landing` | Dockerfile | `https://mantly.io` | `/deploy/landing.Dockerfile` |
+| Resource | Build pack | Domain | Internal port | Dockerfile / compose |
+|----------|------------|--------|---------------|----------------------|
+| `mantly-api` | Docker Compose | `https://api.mantly.io` | `80` (`caddy`) | `/docker-compose.yml`, service domain `caddy`, API image `/Dockerfile.api` |
+| `mantly-admin` | Dockerfile | `https://app.mantly.io` | `8080` | `/deploy/admin.Dockerfile` |
+| `mantly-addin` | Dockerfile | `https://addin.mantly.io` | `8080` | `/deploy/addin.Dockerfile` |
+| `mantly-landing` | Dockerfile | `https://mantly.io` | `8080` | `/deploy/landing.Dockerfile` |
+
+Configure Coolify's internal/container port as `8080` for all three frontend
+resources. Existing resources that target port `80` must be changed before
+deploying these images; otherwise the proxy returns `502 Bad Gateway`.
 
 Set these env vars on `mantly-api`:
 

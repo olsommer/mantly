@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-import { AUTH_E2E, seedBootstrapAdmin } from './auth.helpers';
+import { AUTH_E2E, seedBootstrapAdmin, waitForAdminSession } from './auth.helpers';
 
 test.describe('Auth lifecycle', () => {
   test('admin provisions a user who is forced to change password on first login', async ({ browser }) => {
     test.slow();
 
-    await seedBootstrapAdmin();
+    const seed = await seedBootstrapAdmin();
 
     const customerEmail = `customer.auth-e2e+${Date.now()}@example.com`;
     const initialPassword = 'InitialUser123!';
@@ -31,8 +31,11 @@ test.describe('Auth lifecycle', () => {
     expect((await adminResetRequest).status()).toBe(204);
     await adminPage.getByLabel('Password').fill(AUTH_E2E.bootstrapAdminPassword);
     await adminPage.getByRole('button', { name: 'Sign in' }).click();
+    await waitForAdminSession(adminPage);
 
-    await adminPage.getByRole('button', { name: 'Users' }).click();
+    // User management lives behind the sidebar account dropdown. Address the
+    // route directly so this auth test does not depend on that menu's shape.
+    await adminPage.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/users`);
     await expect(adminPage.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
 
     await adminPage.locator('#new-user-email').fill(customerEmail);

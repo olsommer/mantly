@@ -77,13 +77,16 @@ test.describe('Auth lifecycle', () => {
     await customerFirstLoginPage.getByLabel('Passwort').fill(initialPassword);
     await customerFirstLoginPage.getByRole('button', { name: 'Anmelden' }).click();
 
-    await expect(customerFirstLoginPage.getByRole('heading', { name: 'Passwort ändern' })).toBeVisible();
+    // After sign-in the add-in switches to the account's own language, and
+    // admin-provisioned users are created with language 'en', so the
+    // post-login screens are English even in this German browser context.
+    await expect(customerFirstLoginPage.getByRole('heading', { name: 'Change password' })).toBeVisible();
     await customerFirstLoginPage.locator('#current-password').fill(initialPassword);
     await customerFirstLoginPage.locator('#new-password').fill(newPassword);
     await customerFirstLoginPage.locator('#confirm-password').fill(newPassword);
-    await customerFirstLoginPage.getByRole('button', { name: 'Passwort aktualisieren' }).click();
+    await customerFirstLoginPage.getByRole('button', { name: 'Update password' }).click();
 
-    await expect(customerFirstLoginPage.getByText('Willkommen bei Mantly')).toBeVisible();
+    await expect(customerFirstLoginPage.getByText('Welcome to Mantly')).toBeVisible();
 
     const customerReloginContext = await browser.newContext({ locale: 'de-DE' });
     const customerReloginPage = await customerReloginContext.newPage();
@@ -101,8 +104,8 @@ test.describe('Auth lifecycle', () => {
     await customerReloginPage.getByRole('button', { name: 'Anmelden' }).click();
     expect((await reloginPocketBaseAuth).status()).toBe(200);
     expect((await reloginExchange).status()).toBe(200);
-    await expect(customerReloginPage.getByText('Willkommen bei Mantly')).toBeVisible();
-    await expect(customerReloginPage.getByRole('heading', { name: 'Passwort ändern' })).toHaveCount(0);
+    await expect(customerReloginPage.getByText('Welcome to Mantly')).toBeVisible();
+    await expect(customerReloginPage.getByRole('heading', { name: 'Change password' })).toHaveCount(0);
 
     const deleteUserRequest = adminPage.waitForResponse((response) => {
       return response.url().includes('/api/admin/users/')

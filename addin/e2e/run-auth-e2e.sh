@@ -10,6 +10,7 @@ PB_URL="${E2E_PB_URL:-http://127.0.0.1:8091}"
 API_URL="${E2E_API_URL:-http://127.0.0.1:8180}"
 ADDIN_URL="${E2E_ADDIN_URL:-http://127.0.0.1:4173}"
 ADMIN_URL="${E2E_ADMIN_URL:-http://127.0.0.1:4174}"
+DELIVERY_STUB_URL="${E2E_DELIVERY_STUB_URL:-http://127.0.0.1:8190}"
 PB_ADMIN_EMAIL="${E2E_PB_ADMIN_EMAIL:-admin@mantly.local}"
 PB_ADMIN_PASSWORD="${E2E_PB_ADMIN_PASSWORD:-adminpass123}"
 PB_CONTAINER_NAME="${E2E_PB_CONTAINER:-mantly-pocketbase-auth-e2e}"
@@ -19,8 +20,10 @@ PB_VOLUME_NAME="${E2E_PB_VOLUME:-mantly-pocketbase-auth-e2e-data}"
 BACKEND_LOG="/tmp/mantly-auth-e2e-backend.log"
 ADDIN_LOG="/tmp/mantly-auth-e2e-addin.log"
 ADMIN_LOG="/tmp/mantly-auth-e2e-admin.log"
+DELIVERY_STUB_LOG="/tmp/mantly-auth-e2e-delivery-stub.log"
 
 cleanup() {
+  if [ -n "${DELIVERY_STUB_PID:-}" ]; then kill "$DELIVERY_STUB_PID" >/dev/null 2>&1 || true; fi
   if [ -n "${ADMIN_PID:-}" ]; then kill "$ADMIN_PID" >/dev/null 2>&1 || true; fi
   if [ -n "${ADDIN_PID:-}" ]; then kill "$ADDIN_PID" >/dev/null 2>&1 || true; fi
   if [ -n "${BACKEND_PID:-}" ]; then kill "$BACKEND_PID" >/dev/null 2>&1 || true; fi
@@ -59,6 +62,14 @@ docker run -d \
 wait_for_url "$PB_URL/api/health" "PocketBase" 90
 
 (
+  cd "$ADDIN_DIR"
+  node ./e2e/delivery-stub.mjs >"$DELIVERY_STUB_LOG" 2>&1
+) &
+DELIVERY_STUB_PID=$!
+wait_for_url "$DELIVERY_STUB_URL/health" "delivery stub"
+export E2E_DELIVERY_STUB_URL="$DELIVERY_STUB_URL"
+
+(
   cd "$REPO_ROOT/backend"
   GOOGLE_API_KEY=dummy \
   REQUIRE_AUTH=true \
@@ -68,6 +79,7 @@ wait_for_url "$PB_URL/api/health" "PocketBase" 90
   PB_URL="$PB_URL" \
   PB_ADMIN_EMAIL="$PB_ADMIN_EMAIL" \
   PB_ADMIN_PASSWORD="$PB_ADMIN_PASSWORD" \
+  SUPPORT_EMAIL_OUTBOUND_WEBHOOK_URL="$DELIVERY_STUB_URL/deliver" \
   uv run python -m uvicorn automail.main:app --host 127.0.0.1 --port 8180 >"$BACKEND_LOG" 2>&1
 ) &
 BACKEND_PID=$!
@@ -89,10 +101,11 @@ wait_for_url "$ADDIN_URL" "addin"
   VITE_API_URL="$API_URL" \
   VITE_PB_URL="$PB_URL" \
   VITE_REQUIRE_AUTH=true \
+  E2E_DELIVERY_STUB_URL="$DELIVERY_STUB_URL" \
   npm run dev -- --host 127.0.0.1 --port 4174 >"$ADMIN_LOG" 2>&1
 ) &
 ADMIN_PID=$!
 wait_for_url "$ADMIN_URL" "admin"
 
 cd "$ADDIN_DIR"
-exec npx playwright test -c playwright.auth.config.ts
+npx playwright test -c playwright.auth.config.ts

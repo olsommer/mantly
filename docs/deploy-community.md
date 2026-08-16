@@ -8,6 +8,11 @@ Mantly Community is currently a preview release. Pin a reviewed `v0.1.x` tag,
 commit, or container digest; do not automate production deployments from a
 moving `main` branch.
 
+Before public or customer-data use, review the
+[threat model](security/threat-model.md),
+[incident-response runbook](security/incident-response.md), and
+[credential rotation/break-glass procedure](security/credential-rotation-and-break-glass.md).
+
 ## Prerequisites
 
 - Linux, macOS, or Windows with Docker and Docker Compose v2.

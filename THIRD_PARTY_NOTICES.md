@@ -49,6 +49,8 @@ a separate license and distribution review before release.
   `/usr/share/licenses/pocketbase/LICENSE` in the Mantly PocketBase image and
   is stored in `third_party/pocketbase/LICENSE` in this repository.
 - Caddy is Apache-2.0 licensed.
+- NGINX Open Source is distributed under the 2-clause BSD license. The
+  `nginx/docker-nginx-unprivileged` image wrapper is Apache-2.0 licensed.
 - CPython is distributed under the Python Software Foundation License and
   other historical notices included by the upstream Python image.
 - Node.js is MIT licensed and is used by the application build stages.

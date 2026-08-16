@@ -19,6 +19,8 @@ test.describe('Admin Inbox lifecycle', () => {
 
     await page.goto(AUTH_E2E.adminUrl);
     await page.getByLabel('Email').fill(AUTH_E2E.bootstrapAdminEmail);
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await expect(page.getByLabel('Password')).toBeVisible();
     await page.getByLabel('Password').fill(AUTH_E2E.bootstrapAdminPassword);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await page.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/${projectId}/inbox?view=list`);

@@ -62,7 +62,7 @@ async function createUserRecord(
   tenantId: string,
   email: string,
   password: string,
-  isAdmin: boolean,
+  isRoot: boolean,
   mustChangePassword: boolean,
 ): Promise<void> {
   const response = await fetch(`${AUTH_E2E.pocketbaseUrl}/api/collections/users/records`, {
@@ -76,7 +76,7 @@ async function createUserRecord(
       password,
       passwordConfirm: password,
       tenant: tenantId,
-      is_admin: isAdmin,
+      is_root: isRoot,
       must_change_password: mustChangePassword,
       verified: true,
     }),

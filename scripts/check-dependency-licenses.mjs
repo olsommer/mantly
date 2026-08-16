@@ -19,13 +19,22 @@ const allowedLicenseExpressions = new Set([
   "MIT AND ISC",
   "MPL-2.0",
   "(MPL-2.0 OR Apache-2.0)",
+  "OFL-1.1",
   "Python-2.0",
 ]);
 
-// Old package metadata that has been checked against the installed license.
-// Pin the version so an update requires a fresh review.
+// Package versions whose lock entries omit license metadata, checked against
+// their installed manifests and license texts. Pin versions for fresh review.
 const reviewedLicenseOverrides = new Map([
+  ["cookie@1.1.1", "MIT"],
+  ["dompurify@3.4.13", "(MPL-2.0 OR Apache-2.0)"],
   ["format@0.2.2", "MIT"],
+  ["js-yaml@4.3.1", "MIT"],
+  ["nanoid@3.3.18", "MIT"],
+  ["postcss@8.5.26", "MIT"],
+  ["react-router@7.18.2", "MIT"],
+  ["react-router-dom@7.18.2", "MIT"],
+  ["set-cookie-parser@2.7.2", "MIT"],
 ]);
 
 const prohibitedPackages = new Set([

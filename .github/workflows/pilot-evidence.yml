@@ -89,8 +89,9 @@ jobs:
           assert summary['targets']['resolutionTimeP90Seconds']['pass'] is True, summary
           assert summary['allTargetsPassed'] is True, summary
           assert summary['commercialDecision'] == 'commercial_trial', summary
+          markdown = Path('tests/fixtures/pilot-evidence/summary.md').read_text(encoding='utf-8')
+          assert '**All precommitted targets passed:** yes' in markdown, markdown
           PY
-          grep -q "All precommitted targets passed: yes" tests/fixtures/pilot-evidence/summary.md
 
       - name: Upload reproducible summary
         uses: actions/upload-artifact@v4

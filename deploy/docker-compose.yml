@@ -11,6 +11,20 @@
 
 services:
 
+  pocketbase-volume-permissions:
+    image: ${REGISTRY:-ghcr.io/isarlabs}/mantly-pocketbase:${VERSION:-latest}
+    user: "0:0"
+    entrypoint: ["/usr/bin/chown"]
+    command: ["-R", "10001:10001", "/pb/pb_data"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - pb_data:/pb/pb_data
+    restart: "no"
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -35,6 +49,9 @@ services:
       PB_ADMIN_PASSWORD: "${PB_ADMIN_PASSWORD:?PB_ADMIN_PASSWORD is required}"
     volumes:
       - pb_data:/pb/pb_data
+    depends_on:
+      pocketbase-volume-permissions:
+        condition: service_completed_successfully
     expose:
       - "8090"
     restart: unless-stopped

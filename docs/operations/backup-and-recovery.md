@@ -150,6 +150,14 @@ export BACKUP_AGE_IDENTITY_FILE=/secure/path/backup-identity.txt
 ./scripts/restore.sh /secure/mantly-backup-YYYYmmddTHHMMSSZ.tar.gz.age
 ```
 
+The restore normalizes all restored application data to UID/GID `1000:1000`
+and PocketBase data to `10001:10001`, then proves each volume writable as that
+non-root identity before starting either service. These defaults match the
+production images. A deployment using intentionally different runtime IDs must
+set `RESTORE_APP_DATA_UID`, `RESTORE_APP_DATA_GID`, `RESTORE_PB_DATA_UID`, and
+`RESTORE_PB_DATA_GID` to its image values. Root, non-numeric, and out-of-range
+IDs are rejected before target volumes are changed.
+
 For an unencrypted local drill only:
 
 ```bash
@@ -178,6 +186,8 @@ export RESTORE_CONFIRM='ERASE_AND_RESTORE_MANTLY'
    - stops target services;
    - clears only the discovered target durable volumes;
    - restores PocketBase and application data;
+   - assigns each restored tree to its configured non-root runtime UID/GID and
+     fails if that identity cannot write the volume;
    - runs SQLite integrity checks against each restored `.db` file;
    - starts PocketBase and the application;
    - waits for health endpoints;

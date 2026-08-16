@@ -1,6 +1,22 @@
 services:
 
+  caddy-volume-permissions:
+    image: mantly-caddy:${MANTLY_VERSION:-local}
+    user: "0:0"
+    entrypoint: ["/bin/chown"]
+    command: ["-R", "10001:10001", "/data", "/config"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: "no"
+
   caddy:
+    image: mantly-caddy:${MANTLY_VERSION:-local}
     build:
       context: .
       dockerfile: caddy/Dockerfile
@@ -12,6 +28,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
+      caddy-volume-permissions:
+        condition: service_completed_successfully
       app:
         condition: service_healthy
       pocketbase:
@@ -20,7 +38,22 @@ services:
       - "80"
     restart: unless-stopped
 
+  pocketbase-volume-permissions:
+    image: mantly-pocketbase:${MANTLY_VERSION:-local}
+    user: "0:0"
+    entrypoint: ["/usr/bin/chown"]
+    command: ["-R", "10001:10001", "/pb/pb_data"]
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - mantly_pb_data:/pb/pb_data
+    restart: "no"
+
   pocketbase:
+    image: mantly-pocketbase:${MANTLY_VERSION:-local}
     build:
       context: .
       dockerfile: pocketbase/Dockerfile
@@ -30,6 +63,9 @@ services:
       PB_CORS_ORIGINS: "${PB_CORS_ORIGINS:-}"
     volumes:
       - mantly_pb_data:/pb/pb_data
+    depends_on:
+      pocketbase-volume-permissions:
+        condition: service_completed_successfully
     expose:
       - "8090"
     restart: unless-stopped

@@ -84,15 +84,31 @@
       "spdx": "MIT",
       "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
     },
+    "dompurify@3.4.13": {
+      "spdx": "(MPL-2.0 OR Apache-2.0)",
+      "evidence": "Published package LICENSE offers MPL-2.0 or Apache-2.0 and package.json declares the same dual expression."
+    },
     "format@0.2.2": {
       "spdx": "MIT",
       "evidence": "Installed package.json declares MIT in its legacy licenses array."
     },
-    "react-router@7.18.1": {
+    "js-yaml@4.3.1": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
+    },
+    "nanoid@3.3.18": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
+    },
+    "postcss@8.5.26": {
+      "spdx": "MIT",
+      "evidence": "Published package LICENSE contains the MIT license and package.json declares MIT."
+    },
+    "react-router@7.18.2": {
       "spdx": "MIT",
       "evidence": "Published package LICENSE.md contains the MIT license and package.json declares MIT."
     },
-    "react-router-dom@7.18.1": {
+    "react-router-dom@7.18.2": {
       "spdx": "MIT",
       "evidence": "Published package LICENSE.md contains the MIT license and package.json declares MIT."
     },

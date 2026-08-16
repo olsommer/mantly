@@ -38,6 +38,9 @@ test.describe('Auth lifecycle', () => {
     await adminPage.goto(`${AUTH_E2E.adminUrl}/${seed.tenantId}/users`);
     await expect(adminPage.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
 
+    // The provisioning form lives in a dialog; open it before filling.
+    await adminPage.getByRole('button', { name: 'Add user', exact: true }).click();
+    await expect(adminPage.locator('#new-user-email')).toBeVisible();
     await adminPage.locator('#new-user-email').fill(customerEmail);
     await adminPage.locator('#new-user-password').fill(initialPassword);
     const createUserRequest = adminPage.waitForResponse((response) => {

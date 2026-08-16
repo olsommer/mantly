@@ -7,7 +7,7 @@ import socket
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -101,7 +101,7 @@ def _trusted_demo_webhook(url: str) -> bool:
         return False
     trusted = urlparse(configured_origin)
 
-    def origin(parsed) -> tuple[str, str, int | None]:
+    def origin(parsed: ParseResult) -> tuple[str, str, int | None]:
         default_port = 443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else None
         return parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port or default_port
 

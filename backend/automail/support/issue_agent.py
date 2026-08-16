@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, computed_field
 
@@ -644,7 +645,7 @@ _GROUNDING_RESTATEMENT_META_TOKENS = frozenset(
 
 
 def _grounding_restatement_tokens(text: str) -> frozenset[str]:
-    aliases = {
+    aliases: dict[str, str] = {
         "consultations": "consultation",
         "documents": "document",
         "enquiries": "enquiry",
@@ -654,11 +655,13 @@ def _grounding_restatement_tokens(text: str) -> frozenset[str]:
         "requirements": "requirement",
         "steps": "step",
     }
-    return frozenset(
-        normalized
-        for token in _GROUNDING_RESTATEMENT_TOKEN_PATTERN.findall(text.casefold())
-        if (normalized := aliases.get(token, token)) not in _GROUNDING_RESTATEMENT_META_TOKENS
-    )
+    tokens: set[str] = set()
+    for raw_token in _GROUNDING_RESTATEMENT_TOKEN_PATTERN.findall(text.casefold()):
+        token = _string_from(raw_token)
+        normalized = aliases.get(token, token)
+        if normalized not in _GROUNDING_RESTATEMENT_META_TOKENS:
+            tokens.add(normalized)
+    return frozenset(tokens)
 
 
 def _grounding_has_appositive_punctuation(text: str) -> bool:
@@ -947,6 +950,12 @@ def _string_from(value: Any) -> str:
 
 def _record_from(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _records_from(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _positive_int_from(value: Any) -> int:
@@ -1456,7 +1465,7 @@ _ACTION_STATE_SUBJECT_STOP_WORDS = frozenset(
         "your",
     }
 )
-_ACTION_STATE_SUBJECT_TOKEN_ALIASES = {
+_ACTION_STATE_SUBJECT_TOKEN_ALIASES: dict[str, str] = {
     # Read-only facts are commonly phrased as either "the recorded due date"
     # or "our records show the due date". Keep those forms on one topic token
     # so an answered fact is not mistaken for an omitted pending action.
@@ -1506,7 +1515,11 @@ def _detected_supported_language(*values: str) -> str:
             weight for character, weight in _LANGUAGE_CHARACTER_WEIGHTS.get(language, {}).items() if character in clean
         )
         scores[language] = score
-    return max(scores, key=scores.get) if max(scores.values(), default=0) > 0 else "en"
+    return (
+        max(scores, key=lambda language: scores[language])
+        if max(scores.values(), default=0) > 0
+        else "en"
+    )
 
 
 def _latest_customer_language(messages: list[dict[str, Any]]) -> str:
@@ -1631,7 +1644,7 @@ _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS = frozenset(
         "your",
     }
 )
-_KNOWLEDGE_REQUEST_TOKEN_ALIASES = {
+_KNOWLEDGE_REQUEST_TOKEN_ALIASES: dict[str, str] = {
     "affected": "affect",
     "affecting": "affect",
     "approval": "approv",
@@ -1902,7 +1915,8 @@ def _knowledge_request_tokens(value: str) -> set[str]:
         value.casefold(),
     )
     tokens: set[str] = set()
-    for raw in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE):
+    for raw_value in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE):
+        raw = _string_from(raw_value)
         if raw in _KNOWLEDGE_REQUEST_TOPIC_STOP_WORDS or (len(raw) == 1 and not raw.isdigit()):
             continue
         token = _KNOWLEDGE_REQUEST_TOKEN_ALIASES.get(raw, raw)
@@ -2245,8 +2259,8 @@ def _agent_chat_context(runs: list[dict[str, Any]], limit: int = 6) -> list[dict
 def _conversation_context(conversation: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(conversation, dict) or not _string_from(conversation.get("key")):
         return {}
-    tickets = conversation.get("tickets") if isinstance(conversation.get("tickets"), list) else []
-    messages = conversation.get("messages") if isinstance(conversation.get("messages"), list) else []
+    tickets = _records_from(conversation.get("tickets"))
+    messages = _records_from(conversation.get("messages"))
     return {
         "key": _string_from(conversation.get("key")),
         "source": _string_from(conversation.get("source")),
@@ -2269,7 +2283,6 @@ def _conversation_context(conversation: dict[str, Any] | None) -> dict[str, Any]
                 "needsResponse": bool(ticket.get("needsResponse")),
             }
             for ticket in tickets[:6]
-            if isinstance(ticket, dict)
         ],
         "messages": [
             {
@@ -2281,13 +2294,13 @@ def _conversation_context(conversation: dict[str, Any] | None) -> dict[str, Any]
                 "occurredAt": _string_from(message.get("occurredAt")),
             }
             for message in messages[-12:]
-            if isinstance(message, dict) and _string_from(message.get("body"))
+            if _string_from(message.get("body"))
         ],
     }
 
 
 def _ticket_context(issue: dict[str, Any]) -> dict[str, Any]:
-    ticket = {
+    ticket: dict[str, Any] = {
         "id": _string_from(issue.get("id")),
         "subject": _string_from(issue.get("subject")),
         "status": _string_from(issue.get("status") or issue.get("workflowStatus")),
@@ -2923,7 +2936,7 @@ def _automatic_runbook_action_context(
         )
         runbook = _string_from(metadata.get("runbook") or proposed.get("runbook"))
         if status == "pending" and metadata.get("approvalRequired") is True:
-            action_context = {
+            action_context: dict[str, Any] = {
                 "name": name,
                 "label": label,
                 "status": "pending_approval",
@@ -3097,7 +3110,7 @@ def _scoped_grounding_ticket_evidence(
                 for key, value in concern.items()
                 if key not in {"concernSummary", "runbookOutcomeSummary"}
             }
-            evidence = {
+            evidence: dict[str, Any] = {
                 "evidenceId": _concern_grounding_evidence_id(concern_id),
                 "concernId": concern_id,
                 "context": grounding_context,
@@ -5926,11 +5939,12 @@ def _english_action_result_pending_notice(question: str) -> tuple[str, str] | No
 
 def _action_state_subject_tokens(value: str) -> frozenset[str]:
     """Return stable topic tokens for conservative answer-presence checks."""
-    return frozenset(
-        _ACTION_STATE_SUBJECT_TOKEN_ALIASES.get(word, word)
-        for word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
-        if word not in _ACTION_STATE_SUBJECT_STOP_WORDS
-    )
+    tokens: set[str] = set()
+    for raw_word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE):
+        word = _string_from(raw_word)
+        if word not in _ACTION_STATE_SUBJECT_STOP_WORDS:
+            tokens.add(_ACTION_STATE_SUBJECT_TOKEN_ALIASES.get(word, word))
+    return frozenset(tokens)
 
 
 def _answer_has_explicit_negative_confirmation(answer: str, subject: str) -> bool:
@@ -7778,29 +7792,30 @@ def draft_issue_agent_answer(
             """Search and read the isolated support workspace with safe Bash commands."""
             return workspace.run(command)
 
+        knowledge_middleware: list[Any] = [
+            ModelCallLimitMiddleware(
+                run_limit=KNOWLEDGE_AGENT_MODEL_CALL_LIMIT,
+                exit_behavior="error",
+            ),
+            ToolCallLimitMiddleware(
+                tool_name="knowledge_bash",
+                run_limit=KNOWLEDGE_AGENT_TOOL_CALL_LIMIT,
+                exit_behavior="error",
+            ),
+        ]
         agent = create_agent(
             model=llm,
             tools=[knowledge_bash],
             system_prompt=_SYSTEM_PROMPT,
             response_format=ToolStrategy(KnowledgeAgentOutput),
-            middleware=[
-                ModelCallLimitMiddleware(
-                    run_limit=KNOWLEDGE_AGENT_MODEL_CALL_LIMIT,
-                    exit_behavior="error",
-                ),
-                ToolCallLimitMiddleware(
-                    tool_name="knowledge_bash",
-                    run_limit=KNOWLEDGE_AGENT_TOOL_CALL_LIMIT,
-                    exit_behavior="error",
-                ),
-            ],
+            middleware=knowledge_middleware,
             name="ticket_knowledge_agent",
         )
         user_prompt = _USER_TEMPLATE.format(
             question=clean_question,
             request_items=_json(request_items),
         )
-        invoke_config = {
+        invoke_config: RunnableConfig = {
             "recursion_limit": 48,
             "run_name": "ticket_knowledge_agent",
             "tags": ["mantly", "support", "knowledge-agent"],
@@ -8106,7 +8121,7 @@ def draft_issue_automation_answer(
             middleware=[ModelCallLimitMiddleware(run_limit=2, exit_behavior="error")],
             name="issue_automation_answer",
         )
-        invoke_config = {
+        invoke_config: RunnableConfig = {
             "recursion_limit": 6,
             "run_name": "issue_automation_answer",
             "tags": ["mantly", "support", "automation-answer"],
@@ -8417,6 +8432,336 @@ def _grounding_evidence(
     return evidence, tuple(snapshots), tuple(incomplete_ids)
 
 
+@dataclass
+class _GroundingObligationValidationContext:
+    answer: str
+    ticket_evidence: dict[str, Any]
+    expected_units: dict[str, dict[str, Any]]
+    supported_units: set[str]
+    supported_unit_evidence_ids: dict[str, frozenset[str]]
+    allowed_ids: set[str]
+    citation_ids: frozenset[str]
+    automation_grounding_citation_ids: frozenset[str]
+    scoped_grounding_evidence_concerns: dict[str, frozenset[str]]
+    successful_action_evidence_records: dict[str, tuple[frozenset[str], dict[str, Any]]]
+    successful_action_evidence_by_concern: dict[str, frozenset[str]]
+    atomic_recent_change_requirements: dict[str, dict[str, Any]]
+    atomic_http_response_code_requirements: dict[str, dict[str, Any]]
+    protocol_errors: list[str]
+    deterministically_resolved_obligation_ids: set[str]
+
+
+def _validate_grounding_obligation_assessment(
+    assessment: AutomationGroundingObligationAssessment,
+    *,
+    obligation_id: str,
+    obligation: dict[str, Any],
+    context: _GroundingObligationValidationContext,
+) -> dict[str, Any]:
+    """Validate one evaluator obligation result against deterministic evidence."""
+
+    answer_unit_ids = tuple(
+        dict.fromkeys(
+            unit_id for unit_id in (_string_from(value) for value in assessment.answer_unit_ids) if unit_id
+        )
+    )
+    unknown_unit_ids = [unit_id for unit_id in answer_unit_ids if unit_id not in context.expected_units]
+    if unknown_unit_ids:
+        context.protocol_errors.append(
+            "Answer obligation uses unknown answer-unit IDs: " + ", ".join(unknown_unit_ids[:5])
+        )
+    requested_resolution = _string_from(assessment.resolution)
+    resolution = requested_resolution
+    obligation_kind = _string_from(obligation.get("kind")) or "customer_question"
+    linked_units_are_supported = bool(
+        answer_unit_ids and not unknown_unit_ids and set(answer_unit_ids).issubset(context.supported_units)
+    )
+    obligation_concern_id = _string_from(obligation.get("concernId"))
+    linked_evidence_ids = {
+        evidence_id
+        for unit_id in answer_unit_ids
+        for evidence_id in context.supported_unit_evidence_ids.get(unit_id, frozenset())
+    }
+    requested_obligation_evidence_ids = tuple(
+        dict.fromkeys(evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value)))
+    )
+    unknown_obligation_evidence_ids = [
+        evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id not in context.allowed_ids
+    ]
+    if unknown_obligation_evidence_ids:
+        context.protocol_errors.append(
+            "Answer obligation uses unknown evidence IDs: " + ", ".join(unknown_obligation_evidence_ids[:5])
+        )
+    requested_linked_evidence_ids = {
+        evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id in linked_evidence_ids
+    }
+    obligation_evidence_ids = set(requested_linked_evidence_ids or linked_evidence_ids)
+    usable_obligation_evidence_ids = {
+        evidence_id
+        for evidence_id in obligation_evidence_ids
+        if (
+            not (scoped_concern_ids := context.scoped_grounding_evidence_concerns.get(evidence_id))
+            or scoped_concern_ids == frozenset({obligation_concern_id})
+        )
+    }
+    # A unit may make separately supported statements for several concerns.
+    # Filter foreign IDs from this obligation instead of rejecting the whole
+    # unit; at least one same-concern or global evidence source must remain.
+    obligation_has_usable_evidence = bool(usable_obligation_evidence_ids) and not (
+        unknown_obligation_evidence_ids
+    )
+    if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
+        context.protocol_errors.append(f"Addressed obligation has no answer-unit IDs: {obligation_id}")
+    if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not linked_units_are_supported:
+        resolution = "not_covered"
+    if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
+        resolution = "not_covered"
+    if (
+        requested_resolution == "not_covered"
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and _knowledge_backed_negative_guarantee_answers_obligation(
+            question=_string_from(obligation.get("question")),
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+            citation_ids=context.citation_ids,
+        )
+    ):
+        resolution = "pending_or_unavailable"
+        context.deterministically_resolved_obligation_ids.add(obligation_id)
+    if (
+        requested_resolution == "not_covered"
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and _knowledge_backed_secure_secret_delivery_answers_obligation(
+            question=_string_from(obligation.get("question")),
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+            citation_ids=context.citation_ids,
+        )
+    ):
+        resolution = "answered"
+        context.deterministically_resolved_obligation_ids.add(obligation_id)
+    if (
+        requested_resolution == "not_covered"
+        and obligation_kind == "runbook_requirement"
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and _tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
+            ticket=context.ticket_evidence,
+            concern_id=obligation_concern_id,
+            question=_string_from(obligation.get("question")),
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+            citation_ids=context.automation_grounding_citation_ids,
+        )
+    ):
+        resolution = "answered"
+        context.deterministically_resolved_obligation_ids.add(obligation_id)
+    if (
+        requested_resolution == "not_covered"
+        and obligation_kind == "customer_question"
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and _tool_backed_false_pause_state_answers_obligation(
+            ticket=context.ticket_evidence,
+            concern_id=obligation_concern_id,
+            question=_string_from(obligation.get("question")),
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+        )
+    ):
+        resolution = "answered"
+        context.deterministically_resolved_obligation_ids.add(obligation_id)
+    atomic_recent_change = context.atomic_recent_change_requirements.get(obligation_id)
+    if atomic_recent_change is not None:
+        required_value = _string_from(atomic_recent_change.get("value"))
+        required_evidence_ids = frozenset(
+            _string_from(evidence_id)
+            for evidence_id in atomic_recent_change.get(
+                "evidenceIds",
+                frozenset(),
+            )
+            if _string_from(evidence_id)
+        )
+        exact_fact_is_linked = bool(
+            linked_units_are_supported
+            and obligation_has_usable_evidence
+            and any(
+                _atomic_lookup_unit_affirmatively_states_value(
+                    _string_from(context.expected_units.get(unit_id, {}).get("text")),
+                    required_value,
+                )
+                and bool(
+                    context.supported_unit_evidence_ids.get(
+                        unit_id,
+                        frozenset(),
+                    ).intersection(required_evidence_ids)
+                )
+                for unit_id in answer_unit_ids
+            )
+            and not _atomic_lookup_answer_has_conflicting_change_assertion(
+                context.answer,
+                required_value,
+            )
+        )
+        # Correct only the evaluator's narrow internal contradiction:
+        # it linked an exhaustively supported unit to this obligation,
+        # while the unit states the exact safe scalar from the same-
+        # concern read-only evidence used to derive the requirement.
+        if requested_resolution == "not_covered" and exact_fact_is_linked:
+            resolution = "answered"
+            context.deterministically_resolved_obligation_ids.add(obligation_id)
+        elif requested_resolution != "answered" or not exact_fact_is_linked:
+            resolution = "not_covered"
+    atomic_http_response_code = context.atomic_http_response_code_requirements.get(obligation_id)
+    if atomic_http_response_code is not None:
+        required_value = _string_from(atomic_http_response_code.get("value"))
+        required_evidence_ids = frozenset(
+            _string_from(evidence_id)
+            for evidence_id in atomic_http_response_code.get(
+                "evidenceIds",
+                frozenset(),
+            )
+            if _string_from(evidence_id)
+        )
+        exact_fact_is_linked = requested_resolution == "answered" and any(
+            _unit_affirmatively_states_http_response_code(
+                _string_from(context.expected_units.get(unit_id, {}).get("text")),
+                required_value,
+            )
+            and bool(
+                context.supported_unit_evidence_ids.get(
+                    unit_id,
+                    frozenset(),
+                ).intersection(required_evidence_ids)
+            )
+            for unit_id in answer_unit_ids
+        )
+        if not exact_fact_is_linked:
+            resolution = "not_covered"
+    obligation_question = _string_from(obligation.get("question"))
+    is_service_incident_temporal_requirement = bool(
+        obligation_kind == "runbook_requirement"
+        and _is_service_incident_temporal_requirement(
+            ticket=context.ticket_evidence,
+            concern_id=obligation_concern_id,
+            question=obligation_question,
+        )
+    )
+    isolated_service_incident_temporal_answer = bool(
+        is_service_incident_temporal_requirement
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and _is_isolated_service_incident_temporal_answer(
+            ticket=context.ticket_evidence,
+            concern_id=obligation_concern_id,
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+        )
+    )
+    if (
+        requested_resolution == "answered"
+        and is_service_incident_temporal_requirement
+        and not isolated_service_incident_temporal_answer
+    ):
+        resolution = "not_covered"
+    linked_answer_asserts_action_state = any(
+        check_pending_action_claims(
+            answer=_string_from(context.expected_units.get(unit_id, {}).get("text")),
+            runbook_actions=(
+                {
+                    "name": obligation_question or "pending_action",
+                    "label": obligation_question or "Pending action",
+                    "status": "pending_approval",
+                },
+            ),
+        ).blocked
+        for unit_id in answer_unit_ids
+    )
+    must_bind_action_evidence = requested_resolution == "fulfilled_action" or (
+        requested_resolution == "answered" and linked_answer_asserts_action_state
+    )
+    if must_bind_action_evidence and linked_units_are_supported:
+        same_concern_action_evidence_ids = context.successful_action_evidence_by_concern.get(
+            obligation_concern_id,
+            frozenset(),
+        )
+        matching_action_evidence_ids = _matching_successful_action_evidence_ids(
+            context.successful_action_evidence_records,
+            concern_id=obligation_concern_id,
+            expected_action_text=_string_from(obligation.get("question")),
+        )
+        cited_same_concern_action_evidence_ids = obligation_evidence_ids.intersection(
+            same_concern_action_evidence_ids
+        )
+        if (
+            not matching_action_evidence_ids
+            or not cited_same_concern_action_evidence_ids
+            or not cited_same_concern_action_evidence_ids.issubset(matching_action_evidence_ids)
+            or any(
+                not context.supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
+                    matching_action_evidence_ids
+                )
+                for unit_id in answer_unit_ids
+            )
+        ):
+            resolution = "not_covered"
+    # Run this exact-fact exception after action-state validation. A
+    # read-only sentence such as "the incident started at <ISO>" can
+    # look like a completed mutation to the generic action guard. Only
+    # restore coverage when the obligation and linked unit pass the
+    # stricter same-concern, successful-tool, exact-scalar checks.
+    if (
+        resolution == "not_covered"
+        and requested_resolution == "answered"
+        and obligation_kind == "runbook_requirement"
+        and linked_units_are_supported
+        and obligation_has_usable_evidence
+        and isolated_service_incident_temporal_answer
+        and _tool_backed_temporal_scalar_answers_obligation(
+            ticket=context.ticket_evidence,
+            concern_id=obligation_concern_id,
+            question=obligation_question,
+            answer_unit_ids=answer_unit_ids,
+            expected_units=context.expected_units,
+            supported_unit_evidence_ids=context.supported_unit_evidence_ids,
+        )
+    ):
+        resolution = "answered"
+        context.deterministically_resolved_obligation_ids.add(obligation_id)
+    # A runbook response requirement is trusted operational guidance,
+    # not a customer-requested business action. Enforce this after all
+    # deterministic resolution overrides: only a substantive `answered`
+    # result can cover it; generic pending/unavailable prose cannot.
+    if obligation_kind == "runbook_requirement" and resolution != "answered":
+        resolution = "not_covered"
+    covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
+    clean_assessment: dict[str, Any] = {
+        "obligationId": obligation_id,
+        "resolution": resolution,
+        "covered": covered,
+        "answerUnitIds": list(answer_unit_ids),
+    }
+    if requested_obligation_evidence_ids:
+        clean_evidence_candidates = (
+            requested_obligation_evidence_ids
+            if requested_linked_evidence_ids
+            else tuple(sorted(linked_evidence_ids))
+        )
+        clean_assessment["evidenceIds"] = [
+            evidence_id
+            for evidence_id in clean_evidence_candidates
+            if evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids
+        ]
+    return clean_assessment
+
+
 def assess_issue_automation_grounding(
     *,
     issue: dict[str, Any],
@@ -8689,7 +9034,7 @@ def assess_issue_automation_grounding(
             middleware=[ModelCallLimitMiddleware(run_limit=1, exit_behavior="error")],
             name="issue_automation_grounding",
         )
-        invoke_config = {
+        invoke_config: RunnableConfig = {
             "recursion_limit": 4,
             "run_name": "issue_automation_grounding",
             "tags": ["mantly", "support", "automation-grounding"],
@@ -8884,11 +9229,6 @@ def assess_issue_automation_grounding(
         for assessment in structured.obligation_assessments[:100]:
             obligation_id = _string_from(assessment.obligation_id)
             obligation = expected_obligations.get(obligation_id)
-            answer_unit_ids = tuple(
-                dict.fromkeys(
-                    unit_id for unit_id in (_string_from(value) for value in assessment.answer_unit_ids) if unit_id
-                )
-            )
             if not obligation_id or obligation_id in seen_obligation_ids:
                 protocol_errors.append("Evaluator returned a missing or duplicate answer-obligation ID")
                 continue
@@ -8896,304 +9236,31 @@ def assess_issue_automation_grounding(
             if obligation is None:
                 protocol_errors.append(f"Evaluator returned unknown answer-obligation ID: {obligation_id}")
                 continue
-            unknown_unit_ids = [unit_id for unit_id in answer_unit_ids if unit_id not in expected_units]
-            if unknown_unit_ids:
-                protocol_errors.append(
-                    "Answer obligation uses unknown answer-unit IDs: " + ", ".join(unknown_unit_ids[:5])
-                )
-            requested_resolution = _string_from(assessment.resolution)
-            resolution = requested_resolution
-            obligation_kind = _string_from(obligation.get("kind")) or "customer_question"
-            linked_units_are_supported = bool(
-                answer_unit_ids and not unknown_unit_ids and set(answer_unit_ids).issubset(supported_units)
+            validation_context = _GroundingObligationValidationContext(
+                answer=answer,
+                ticket_evidence=ticket_evidence,
+                expected_units=expected_units,
+                supported_units=supported_units,
+                supported_unit_evidence_ids=supported_unit_evidence_ids,
+                allowed_ids=allowed_ids,
+                citation_ids=frozenset(citation_ids),
+                automation_grounding_citation_ids=automation_grounding_citation_ids,
+                scoped_grounding_evidence_concerns=scoped_grounding_evidence_concerns,
+                successful_action_evidence_records=successful_action_evidence_records,
+                successful_action_evidence_by_concern=successful_action_evidence_by_concern,
+                atomic_recent_change_requirements=atomic_recent_change_requirements,
+                atomic_http_response_code_requirements=atomic_http_response_code_requirements,
+                protocol_errors=protocol_errors,
+                deterministically_resolved_obligation_ids=deterministically_resolved_obligation_ids,
             )
-            obligation_concern_id = _string_from(obligation.get("concernId"))
-            linked_evidence_ids = {
-                evidence_id
-                for unit_id in answer_unit_ids
-                for evidence_id in supported_unit_evidence_ids.get(unit_id, frozenset())
-            }
-            requested_obligation_evidence_ids = tuple(
-                dict.fromkeys(evidence_id for value in assessment.evidence_ids if (evidence_id := _string_from(value)))
-            )
-            unknown_obligation_evidence_ids = [
-                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id not in allowed_ids
-            ]
-            if unknown_obligation_evidence_ids:
-                protocol_errors.append(
-                    "Answer obligation uses unknown evidence IDs: " + ", ".join(unknown_obligation_evidence_ids[:5])
-                )
-            requested_linked_evidence_ids = {
-                evidence_id for evidence_id in requested_obligation_evidence_ids if evidence_id in linked_evidence_ids
-            }
-            obligation_evidence_ids = set(requested_linked_evidence_ids or linked_evidence_ids)
-            usable_obligation_evidence_ids = {
-                evidence_id
-                for evidence_id in obligation_evidence_ids
-                if (
-                    not (scoped_concern_ids := scoped_grounding_evidence_concerns.get(evidence_id))
-                    or scoped_concern_ids == frozenset({obligation_concern_id})
-                )
-            }
-            # A unit may make separately supported statements for several
-            # concerns. Filter foreign IDs from this obligation instead of
-            # rejecting the whole unit; at least one same-concern or global
-            # evidence source must remain.
-            obligation_has_usable_evidence = bool(usable_obligation_evidence_ids) and not (
-                unknown_obligation_evidence_ids
-            )
-            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not answer_unit_ids:
-                protocol_errors.append(f"Addressed obligation has no answer-unit IDs: {obligation_id}")
-            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not linked_units_are_supported:
-                resolution = "not_covered"
-            if requested_resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS and not obligation_has_usable_evidence:
-                resolution = "not_covered"
-            if (
-                requested_resolution == "not_covered"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _knowledge_backed_negative_guarantee_answers_obligation(
-                    question=_string_from(obligation.get("question")),
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                    citation_ids=frozenset(citation_ids),
-                )
-            ):
-                resolution = "pending_or_unavailable"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            if (
-                requested_resolution == "not_covered"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _knowledge_backed_secure_secret_delivery_answers_obligation(
-                    question=_string_from(obligation.get("question")),
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                    citation_ids=frozenset(citation_ids),
-                )
-            ):
-                resolution = "answered"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            if (
-                requested_resolution == "not_covered"
-                and obligation_kind == "runbook_requirement"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _tool_and_knowledge_backed_audit_reporting_guidance_answers_obligation(
-                    ticket=ticket_evidence,
-                    concern_id=obligation_concern_id,
-                    question=_string_from(obligation.get("question")),
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                    citation_ids=automation_grounding_citation_ids,
-                )
-            ):
-                resolution = "answered"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            if (
-                requested_resolution == "not_covered"
-                and obligation_kind == "customer_question"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _tool_backed_false_pause_state_answers_obligation(
-                    ticket=ticket_evidence,
-                    concern_id=obligation_concern_id,
-                    question=_string_from(obligation.get("question")),
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                )
-            ):
-                resolution = "answered"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            atomic_recent_change = atomic_recent_change_requirements.get(obligation_id)
-            if atomic_recent_change is not None:
-                required_value = _string_from(atomic_recent_change.get("value"))
-                required_evidence_ids = frozenset(
-                    _string_from(evidence_id)
-                    for evidence_id in atomic_recent_change.get(
-                        "evidenceIds",
-                        frozenset(),
-                    )
-                    if _string_from(evidence_id)
-                )
-                exact_fact_is_linked = bool(
-                    linked_units_are_supported
-                    and obligation_has_usable_evidence
-                    and any(
-                        _atomic_lookup_unit_affirmatively_states_value(
-                            _string_from(expected_units.get(unit_id, {}).get("text")),
-                            required_value,
-                        )
-                        and bool(
-                            supported_unit_evidence_ids.get(
-                                unit_id,
-                                frozenset(),
-                            ).intersection(required_evidence_ids)
-                        )
-                        for unit_id in answer_unit_ids
-                    )
-                    and not _atomic_lookup_answer_has_conflicting_change_assertion(
-                        answer,
-                        required_value,
-                    )
-                )
-                # Correct only the evaluator's narrow internal contradiction:
-                # it linked an exhaustively supported unit to this obligation,
-                # while the unit states the exact safe scalar from the same-
-                # concern read-only evidence used to derive the requirement.
-                if requested_resolution == "not_covered" and exact_fact_is_linked:
-                    resolution = "answered"
-                    deterministically_resolved_obligation_ids.add(obligation_id)
-                elif requested_resolution != "answered" or not exact_fact_is_linked:
-                    resolution = "not_covered"
-            atomic_http_response_code = atomic_http_response_code_requirements.get(obligation_id)
-            if atomic_http_response_code is not None:
-                required_value = _string_from(atomic_http_response_code.get("value"))
-                required_evidence_ids = frozenset(
-                    _string_from(evidence_id)
-                    for evidence_id in atomic_http_response_code.get(
-                        "evidenceIds",
-                        frozenset(),
-                    )
-                    if _string_from(evidence_id)
-                )
-                exact_fact_is_linked = requested_resolution == "answered" and any(
-                    _unit_affirmatively_states_http_response_code(
-                        _string_from(expected_units.get(unit_id, {}).get("text")),
-                        required_value,
-                    )
-                    and bool(
-                        supported_unit_evidence_ids.get(
-                            unit_id,
-                            frozenset(),
-                        ).intersection(required_evidence_ids)
-                    )
-                    for unit_id in answer_unit_ids
-                )
-                if not exact_fact_is_linked:
-                    resolution = "not_covered"
-            obligation_question = _string_from(obligation.get("question"))
-            is_service_incident_temporal_requirement = bool(
-                obligation_kind == "runbook_requirement"
-                and _is_service_incident_temporal_requirement(
-                    ticket=ticket_evidence,
-                    concern_id=obligation_concern_id,
-                    question=obligation_question,
+            clean_obligation_assessments.append(
+                _validate_grounding_obligation_assessment(
+                    assessment,
+                    obligation_id=obligation_id,
+                    obligation=obligation,
+                    context=validation_context,
                 )
             )
-            isolated_service_incident_temporal_answer = bool(
-                is_service_incident_temporal_requirement
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and _is_isolated_service_incident_temporal_answer(
-                    ticket=ticket_evidence,
-                    concern_id=obligation_concern_id,
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                )
-            )
-            if (
-                requested_resolution == "answered"
-                and is_service_incident_temporal_requirement
-                and not isolated_service_incident_temporal_answer
-            ):
-                resolution = "not_covered"
-            linked_answer_asserts_action_state = any(
-                check_pending_action_claims(
-                    answer=_string_from(expected_units.get(unit_id, {}).get("text")),
-                    runbook_actions=(
-                        {
-                            "name": obligation_question or "pending_action",
-                            "label": obligation_question or "Pending action",
-                            "status": "pending_approval",
-                        },
-                    ),
-                ).blocked
-                for unit_id in answer_unit_ids
-            )
-            must_bind_action_evidence = requested_resolution == "fulfilled_action" or (
-                requested_resolution == "answered" and linked_answer_asserts_action_state
-            )
-            if must_bind_action_evidence and linked_units_are_supported:
-                same_concern_action_evidence_ids = successful_action_evidence_by_concern.get(
-                    obligation_concern_id,
-                    frozenset(),
-                )
-                matching_action_evidence_ids = _matching_successful_action_evidence_ids(
-                    successful_action_evidence_records,
-                    concern_id=obligation_concern_id,
-                    expected_action_text=_string_from(obligation.get("question")),
-                )
-                cited_same_concern_action_evidence_ids = obligation_evidence_ids.intersection(
-                    same_concern_action_evidence_ids
-                )
-                if (
-                    not matching_action_evidence_ids
-                    or not cited_same_concern_action_evidence_ids
-                    or not cited_same_concern_action_evidence_ids.issubset(matching_action_evidence_ids)
-                    or any(
-                        not supported_unit_evidence_ids.get(unit_id, frozenset()).intersection(
-                            matching_action_evidence_ids
-                        )
-                        for unit_id in answer_unit_ids
-                    )
-                ):
-                    resolution = "not_covered"
-            # Run this exact-fact exception after action-state validation. A
-            # read-only sentence such as "the incident started at <ISO>" can
-            # look like a completed mutation to the generic action guard. Only
-            # restore coverage when the obligation and linked unit pass the
-            # stricter same-concern, successful-tool, exact-scalar checks.
-            if (
-                resolution == "not_covered"
-                and requested_resolution == "answered"
-                and obligation_kind == "runbook_requirement"
-                and linked_units_are_supported
-                and obligation_has_usable_evidence
-                and isolated_service_incident_temporal_answer
-                and _tool_backed_temporal_scalar_answers_obligation(
-                    ticket=ticket_evidence,
-                    concern_id=obligation_concern_id,
-                    question=obligation_question,
-                    answer_unit_ids=answer_unit_ids,
-                    expected_units=expected_units,
-                    supported_unit_evidence_ids=supported_unit_evidence_ids,
-                )
-            ):
-                resolution = "answered"
-                deterministically_resolved_obligation_ids.add(obligation_id)
-            # A runbook response requirement is trusted operational guidance,
-            # not a customer-requested business action. Enforce this after all
-            # deterministic resolution overrides: only a substantive `answered`
-            # result can cover it; generic pending/unavailable prose cannot.
-            if obligation_kind == "runbook_requirement" and resolution != "answered":
-                resolution = "not_covered"
-            covered = resolution in _ADDRESSED_OBLIGATION_RESOLUTIONS
-            if not covered:
-                uncovered_obligations.append(_string_from(obligation.get("question"))[:500])
-            clean_assessment = {
-                "obligationId": obligation_id,
-                "resolution": resolution,
-                "covered": covered,
-                "answerUnitIds": list(answer_unit_ids),
-            }
-            if requested_obligation_evidence_ids:
-                clean_evidence_candidates = (
-                    requested_obligation_evidence_ids
-                    if requested_linked_evidence_ids
-                    else tuple(sorted(linked_evidence_ids))
-                )
-                clean_assessment["evidenceIds"] = [
-                    evidence_id
-                    for evidence_id in clean_evidence_candidates
-                    if (evidence_id in obligation_evidence_ids and evidence_id in usable_obligation_evidence_ids)
-                ]
-            clean_obligation_assessments.append(clean_assessment)
 
         # A combined answer can state one runbook rule once even when triage
         # split the message into sibling concerns that activated the same

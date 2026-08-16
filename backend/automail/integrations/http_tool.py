@@ -19,7 +19,7 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Generator, Optional
 from urllib.parse import parse_qs, parse_qsl, quote, urlparse
 
 import httpx
@@ -262,7 +262,7 @@ def current_tool_calls() -> list[dict[str, Any]]:
 
 
 @contextmanager
-def fence_http_tool_execution(claim_is_active: Callable[[], bool]) -> Iterator[None]:
+def fence_http_tool_execution(claim_is_active: Callable[[], bool]) -> Generator[None, None, None]:
     """Require a durable active claim immediately before every HTTP tool call."""
     token = _tool_execution_claim.set(claim_is_active)
     try:
@@ -278,7 +278,7 @@ def _require_http_tool_execution_claim() -> None:
 
 
 @contextmanager
-def isolated_http_tool_collection() -> Iterator[HttpToolCollection]:
+def isolated_http_tool_collection() -> Generator[HttpToolCollection, None, None]:
     """Capture tool activity without reading from or mutating a parent scope."""
     collection = HttpToolCollection()
     generated_token = _generated_attachments.set(collection.generated_attachments)

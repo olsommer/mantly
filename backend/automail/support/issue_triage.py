@@ -159,7 +159,9 @@ def _combined_text(issue: dict[str, Any], messages: list[dict[str, Any]]) -> str
         _string_from(issue.get("accountDomain")),
         _string_from(issue.get("contactEmail")),
     ]
-    for tag in issue.get("tags") if isinstance(issue.get("tags"), list) else []:
+    raw_tags = issue.get("tags")
+    tags: list[Any] = raw_tags if isinstance(raw_tags, list) else []
+    for tag in tags:
         parts.append(_string_from(tag))
     for message in messages[-8:]:
         parts.append(_string_from(message.get("body")))

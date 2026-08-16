@@ -56,13 +56,17 @@ def _record(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _records(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def _event_token(value: str) -> str:
     clean = [character if character.isalnum() else "_" for character in value.strip().lower()]
     return "_".join(part for part in "".join(clean).split("_") if part)
 
 
 def _ticket_creation_mode(channel: dict[str, Any]) -> str:
-    config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+    config = _record(channel.get("config"))
     raw = _event_token(
         _string(
             config.get("ticketCreationMode")
@@ -140,7 +144,7 @@ def _response_from_event(
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     raw_status = _string(event.get("status")) or "received"
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
+    result = _record(event.get("result"))
     status = (
         "processing"
         if raw_status == "received" and bool(result.get("processing"))
@@ -148,7 +152,7 @@ def _response_from_event(
         if raw_status == "received"
         else raw_status
     )
-    aggregate = result.get("aggregate") if isinstance(result.get("aggregate"), dict) else {}
+    aggregate = _record(result.get("aggregate"))
     issue_id = _string(result.get("issueId") or metadata.get("issueId"))
     terminal = status in CHANNEL_TEST_JOB_TERMINAL_STATUSES
     failed = int(aggregate.get("failed") or (1 if status == "failed" else 0))
@@ -186,11 +190,10 @@ def _response_from_event(
 
 
 def _aggregate_waits_for_provider_claim(aggregate: dict[str, Any]) -> bool:
-    items = aggregate.get("items") if isinstance(aggregate.get("items"), list) else []
+    items = _records(aggregate.get("items"))
     return any(
         _string(item.get("winnerStatus")).lower() in {"received", "processing", "claimed"}
         for item in items
-        if isinstance(item, dict)
     )
 
 
@@ -327,8 +330,8 @@ def process_channel_test_job(
                 job_id,
             )
             return aggregate
-        items = aggregate.get("items") if isinstance(aggregate.get("items"), list) else []
-        item = next((value for value in items if isinstance(value, dict)), {})
+        items = _records(aggregate.get("items"))
+        item = next(iter(items), {})
         winner_status = _string(item.get("winnerStatus")).lower()
         recovered_after_provider_completion = (
             int(claimed.get("processingAttempt") or 0) > 1

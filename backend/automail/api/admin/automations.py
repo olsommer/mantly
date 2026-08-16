@@ -82,7 +82,8 @@ def _action_creates_human_loop_agent_draft(action: dict[str, Any]) -> bool:
 def _rule_has_human_loop_agent_draft(rule: dict[str, Any]) -> bool:
     if rule.get("active") is False:
         return False
-    actions = rule.get("actions") if isinstance(rule.get("actions"), list) else []
+    raw_actions = rule.get("actions")
+    actions: list[Any] = raw_actions if isinstance(raw_actions, list) else []
     return any(_action_creates_human_loop_agent_draft(action) for action in actions if isinstance(action, dict))
 
 

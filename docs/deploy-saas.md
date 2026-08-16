@@ -2,6 +2,12 @@
 
 Production deployment guide for the hosted SaaS version on Hetzner (or any VPS with Docker).
 
+Before customer-data use, assign deployment-specific owners and complete the
+[threat-model](security/threat-model.md),
+[incident-response](security/incident-response.md), and
+[credential rotation/break-glass](security/credential-rotation-and-break-glass.md)
+checklists.
+
 ## Prerequisites
 
 - Linux VPS with Docker and Docker Compose v2
@@ -84,12 +90,16 @@ The SaaS API image is backend-only and does not bundle admin/add-in/landing asse
 
 For the hosted SaaS setup, use four Coolify application resources in the same project/environment:
 
-| Resource | Build pack | Domain | Dockerfile / compose |
-|----------|------------|--------|----------------------|
-| `mantly-api` | Docker Compose | `https://api.mantly.io` | `/docker-compose.yml`, service domain `caddy`, API image `/Dockerfile.api` |
-| `mantly-admin` | Dockerfile | `https://app.mantly.io` | `/deploy/admin.Dockerfile` |
-| `mantly-addin` | Dockerfile | `https://addin.mantly.io` | `/deploy/addin.Dockerfile` |
-| `mantly-landing` | Dockerfile | `https://mantly.io` | `/deploy/landing.Dockerfile` |
+| Resource | Build pack | Domain | Internal port | Dockerfile / compose |
+|----------|------------|--------|---------------|----------------------|
+| `mantly-api` | Docker Compose | `https://api.mantly.io` | `80` (`caddy`) | `/docker-compose.yml`, service domain `caddy`, API image `/Dockerfile.api` |
+| `mantly-admin` | Dockerfile | `https://app.mantly.io` | `8080` | `/deploy/admin.Dockerfile` |
+| `mantly-addin` | Dockerfile | `https://addin.mantly.io` | `8080` | `/deploy/addin.Dockerfile` |
+| `mantly-landing` | Dockerfile | `https://mantly.io` | `8080` | `/deploy/landing.Dockerfile` |
+
+Configure Coolify's internal/container port as `8080` for all three frontend
+resources. Existing resources that target port `80` must be changed before
+deploying these images; otherwise the proxy returns `502 Bad Gateway`.
 
 Set these env vars on `mantly-api`:
 

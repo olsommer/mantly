@@ -26,10 +26,24 @@ jobs:
           set -euo pipefail
           python3 -m py_compile scripts/validate-compliance-package.py
           python3 scripts/validate-compliance-package.py --root .
-          if python3 scripts/validate-compliance-package.py --root . --require-approved; then
+          if python3 scripts/validate-compliance-package.py --root . --require-approved \
+              > approved-attempt.json; then
             echo "Placeholder compliance package was incorrectly accepted as approved" >&2
             exit 1
           fi
+          # An unhandled exception also exits non-zero, so a bare "it failed"
+          # check would let a crashing validator pass as proof the gate works.
+          # Require a well-formed rejection report instead.
+          python3 - approved-attempt.json <<'PY'
+          import json
+          import sys
+
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          if report["ok"] or report["deploymentReady"] or not report["errors"]:
+              raise SystemExit(f"unexpected rejection report: {report}")
+          print(f"gate rejected placeholder evidence with {len(report['errors'])} error(s)")
+          PY
+          rm -f approved-attempt.json
 
       - name: Verify legal-review and lifecycle gates remain explicit
         run: |

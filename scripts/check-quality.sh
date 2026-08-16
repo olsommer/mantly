@@ -229,7 +229,7 @@ security_config_scan() {
   run "Container and repository configuration scan" docker run --rm \
     -v "$ROOT:/repo" \
     aquasec/trivy:0.58.2 \
-    config --severity HIGH,CRITICAL --exit-code 1 --hide-progress /repo
+    config --severity HIGH,CRITICAL --exit-code 1 --quiet /repo
 }
 
 security_all() {

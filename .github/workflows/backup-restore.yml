@@ -164,8 +164,8 @@ jobs:
           assert pathlib.Path('/pb/pb_data/attachment.txt').read_text(encoding='utf-8') == 'attachment-before-backup\n'
           assert not pathlib.Path('/pb/pb_data/unwanted-after-backup.txt').exists()
           PY
-          docker compose run --rm app sh -ec \
-            "test \"$(cat /app/data/nested/state.txt)\" = 'application-before-backup'; test ! -e /app/data/unwanted.txt"
+          docker compose exec -T app sh -ec \
+            'grep -Fxq "application-before-backup" /app/data/nested/state.txt; test ! -e /app/data/unwanted.txt'
 
       - name: Prove missing required attachment evidence fails closed
         run: |

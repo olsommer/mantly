@@ -59,7 +59,10 @@ test.describe('Auth lifecycle', () => {
     await expect(customerRow.getByText(customerEmail)).toBeVisible();
     await expect(customerRow.getByText('Password change required')).toBeVisible();
 
-    const customerFirstLoginContext = await browser.newContext();
+    // The add-in picks its language from navigator.language when nothing is
+    // stored, and these customer steps assert the German strings. Pin the
+    // locale so the run does not depend on the CI browser's default language.
+    const customerFirstLoginContext = await browser.newContext({ locale: 'de-DE' });
     const customerFirstLoginPage = await customerFirstLoginContext.newPage();
 
     await customerFirstLoginPage.goto(AUTH_E2E.addinUrl);
@@ -82,7 +85,7 @@ test.describe('Auth lifecycle', () => {
 
     await expect(customerFirstLoginPage.getByText('Willkommen bei Mantly')).toBeVisible();
 
-    const customerReloginContext = await browser.newContext();
+    const customerReloginContext = await browser.newContext({ locale: 'de-DE' });
     const customerReloginPage = await customerReloginContext.newPage();
     await customerReloginPage.goto(AUTH_E2E.addinUrl);
     await customerReloginPage.getByLabel('E-Mail').fill(customerEmail);
@@ -113,7 +116,7 @@ test.describe('Auth lifecycle', () => {
     await customerDeleteButton.click();
     expect((await deleteUserRequest).status()).toBe(200);
 
-    const deletedUserLoginContext = await browser.newContext();
+    const deletedUserLoginContext = await browser.newContext({ locale: 'de-DE' });
     const deletedUserLoginPage = await deletedUserLoginContext.newPage();
     await deletedUserLoginPage.goto(AUTH_E2E.addinUrl);
     await deletedUserLoginPage.getByLabel('E-Mail').fill(customerEmail);
